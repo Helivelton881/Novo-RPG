@@ -3177,7 +3177,7 @@ $('#gsCreate').addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.id===
    Para ligar: troque MP_URL pelo endereço do seu servidor.
    Local (rodando "npm start" na pasta do servidor): já vem pronto.
    Quando publicar o servidor (Render ou outro), troque só esta linha. */
-let MP_URL='ws://localhost:8787';
+let MP_URL='wss://novo-rpg.onrender.com';
 let mpWS=null,mpZone=null,mpT=0,mpTries=0;
 const PEERS={};
 function mpLog(...a){try{console.log('[mp]',...a)}catch(e){}}
