@@ -28,7 +28,13 @@ Inventário, progressão e parte da IA ainda são calculados no cliente. O dano 
 
 O cliente manda `cast_skill` (`id`, `sk`=rank, `atk`) toda vez que usa uma habilidade — o servidor confere se ela pertence à classe do jogador, se o cooldown real já passou (`SKILL_CD_MS`, um mapa por skill, espelhando `SKILLS`/`CLASSES` do cliente) e, se passou, calcula o dano exato com a mesma fórmula do cliente (`skBase()*multiplicador do rank`, com `atk` limitado a um teto genérico de 35 — não dá pra alegar um ataque maior que o de qualquer equipamento real) e guarda esse valor como "pendente" por alguns segundos. Cada `mob_damage` que referencia aquela skill só aplica dano se existir um valor pendente válido — nunca aceita um número que o cliente mande diretamente. Ataques básicos são calculados na hora (sem cast prévio), com limite de ~6 golpes por janela de velocidade de ataque da classe, além do limite de 80ms por par jogador/monstro que já existia.
 
-**O que isso NÃO cobre:** o servidor ainda não sabe onde os monstros realmente estão (isso é a Fase C, ainda não feita) — então "o monstro estava mesmo ao alcance" continua confiando no cliente. O que passou a ser impossível é reportar um dano maior do que a fórmula real permite, ou usar uma skill sem respeitar o cooldown dela.
+**O que isso NÃO cobre:** o servidor ainda não *simula* onde os monstros estão (isso seria a Fase C completa — IA de monstro rodando no servidor, um projeto multi-dia à parte, não feito). O que passou a ser impossível é reportar um dano maior do que a fórmula real permite, ou usar uma skill sem respeitar o cooldown dela.
+
+## Fase C1 — validação de alcance (sem reescrever IA)
+
+Sem simular monstro nenhum: o servidor já sabe a posição real do jogador (via `state`, enviado a cada ~90ms) e a última posição conhecida do monstro (via `mob_snapshot`, hoje só retransmitida do cliente-autoridade). Em todo `mob_damage`, rejeita o golpe se a distância entre as duas for maior que 550 — generoso o bastante pra cobrir o pior caso real do jogo (Flecha Perfurante viaja ~476; Raízes/Campo de Espinhos podem mirar um alvo a até 320 de distância + 90 de raio), mas suficiente pra travar "bater em monstro que está do outro lado do mapa" ou que nem existe de verdade pra você. Testado com um monstro movido artificialmente pra longe via `mob_snapshot` falso: o golpe foi corretamente rejeitado; movido pra uma distância moderada, voltou a funcionar.
+
+Isso não substitui a Fase C completa — a posição do monstro em si ainda vem do cliente-autoridade, não de uma simulação do servidor. É uma auditoria sobre o que já se recebe, não uma fonte de verdade nova.
 
 ## Loja/economia server-autoritativa
 

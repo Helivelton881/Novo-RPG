@@ -631,6 +631,14 @@ wss.on('connection', ws => {
       const map=cleanText(msg.map,24),state=maps.get(map);if(!state||map!==p.map)return;
       const mobId=cleanText(msg.id,48),mob=state.mobs.get(mobId);
       if(!mob||mob.dead)return;
+      // alcance plausivel: usa a posicao real do jogador (rastreada via
+      // 'state') e a ultima posicao conhecida do monstro (rastreada via
+      // mob_snapshot) para rejeitar um golpe em algo longe demais pra
+      // qualquer ataque do jogo (o maior caso real e a Flecha Perfurante,
+      // que viaja ate ~476; roots/thorns podem mirar ate 320 de distancia
+      // + 90 de raio). O servidor ainda nao simula a posicao do monstro
+      // (isso seria a Fase C completa) -- aqui so audita o que ja recebe.
+      if(Math.hypot(mob.x-p.x,mob.y-p.y)>550)return;
       // anti-spam por (jogador,monstro): bloqueia macro/cliente adulterado
       // batendo no mesmo alvo rapido demais.
       const now=Date.now(),guard=state.hitGuard.get(mobId);
