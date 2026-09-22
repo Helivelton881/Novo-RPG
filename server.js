@@ -33,7 +33,7 @@ function readJson(req) {
     let body = '';
     req.on('data', chunk => {
       body += chunk;
-      if (body.length > 16384) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); }
+      if (body.length > 262144) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); }
     });
     req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch { reject(new Error('INVALID_JSON')); } });
     req.on('error', reject);
@@ -98,6 +98,14 @@ function bearer(req) {
   return match ? match[1] : '';
 }
 
+async function resolveUser(req) {
+  const token = bearer(req);
+  if (!token) return null;
+  const rows = await supabase('sessions', {query:`?select=expires_at,users(id,username)&token=eq.${tokenHash(token)}&expires_at=gt.${encodeURIComponent(new Date().toISOString())}&limit=1`});
+  const row = rows[0], user = Array.isArray(row?.users) ? row.users[0] : row?.users;
+  return user ? {id: user.id, username: user.username, expiresAt: row.expires_at} : null;
+}
+
 async function handleAuth(req, res, pathname) {
   if (!pathname.startsWith('/api/auth/')) return false;
   if (req.method === 'POST' && rateLimited(req)) { json(res,429,{error:'Muitas tentativas. Aguarde um minuto.'}); return true; }
@@ -128,11 +136,9 @@ async function handleAuth(req, res, pathname) {
       json(res,200,{user:{id:user.id,name:user.username,key:user.username},...session});return true;
     }
     if (pathname === '/api/auth/session' && req.method === 'GET') {
-      const token=bearer(req);if(!token){json(res,401,{error:'Sessão ausente'});return true}
-      const rows=await supabase('sessions',{query:`?select=expires_at,users(id,username)&token=eq.${tokenHash(token)}&expires_at=gt.${encodeURIComponent(new Date().toISOString())}&limit=1`});
-      const row=rows[0], user=Array.isArray(row?.users)?row.users[0]:row?.users;
+      const user=await resolveUser(req);
       if(!user){json(res,401,{error:'Sessão expirada'});return true}
-      json(res,200,{user:{id:user.id,name:user.username,key:user.username},expiresAt:row.expires_at});return true;
+      json(res,200,{user:{id:user.id,name:user.username,key:user.username},expiresAt:user.expiresAt});return true;
     }
     if (pathname === '/api/auth/logout' && req.method === 'POST') {
       const token=bearer(req);if(token)await supabase('sessions',{method:'DELETE',query:`?token=eq.${tokenHash(token)}`,prefer:'return=minimal'});
@@ -142,6 +148,63 @@ async function handleAuth(req, res, pathname) {
   } catch (err) {
     console.error('auth_error', err.message, err.status || '', err.detail || '');
     if (!res.headersSent) json(res,err.message==='SUPABASE_NOT_CONFIGURED'?503:500,{error:err.message==='SUPABASE_NOT_CONFIGURED'?'Login online ainda não configurado no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+const CHAR_ID_RE = /^\/api\/characters\/([0-9a-fA-F-]{8,36})$/;
+
+async function handleCharacters(req, res, pathname) {
+  if (!pathname.startsWith('/api/characters')) return false;
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+
+    if (pathname === '/api/characters' && req.method === 'GET') {
+      const rows = await supabase('characters', {query:`?select=id,slot,name,cls,lvl,map,save,updated_at&user_id=eq.${user.id}&order=slot.asc`});
+      json(res,200,{characters: rows}); return true;
+    }
+
+    if (pathname === '/api/characters' && req.method === 'POST') {
+      const input = await readJson(req);
+      const slot = Number(input.slot);
+      const name = cleanText(input.name, 14);
+      const cls = ALLOWED_CLASS.has(input.cls) ? input.cls : 'guerreiro';
+      if (!Number.isInteger(slot) || slot < 0 || slot > 3) { json(res,400,{error:'Espaço inválido'}); return true; }
+      if (name.length < 2) { json(res,400,{error:'Nome do personagem inválido'}); return true; }
+      let rows;
+      try {
+        rows = await supabase('characters', {method:'POST', body:{user_id:user.id, slot, name, cls, lvl:1, map:'vila', save:{}}, prefer:'return=representation'});
+      } catch (e) {
+        if (e.status === 409) { json(res,409,{error:'Espaço ou nome já em uso'}); return true; }
+        throw e;
+      }
+      json(res,201,{character: rows[0]}); return true;
+    }
+
+    const idMatch = CHAR_ID_RE.exec(pathname);
+    if (idMatch && req.method === 'PUT') {
+      const id = idMatch[1];
+      const input = await readJson(req);
+      const lvl = Math.max(1, Math.min(99, Number(input.lvl) || 1));
+      const map = cleanText(input.map, 24);
+      const save = input.save && typeof input.save === 'object' ? input.save : {};
+      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}`, body:{lvl, map: ALLOWED_MAP.test(map) ? map : 'vila', save}, prefer:'return=representation'});
+      if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+      json(res,200,{character: rows[0]}); return true;
+    }
+
+    if (idMatch && req.method === 'DELETE') {
+      const id = idMatch[1];
+      const rows = await supabase('characters', {method:'DELETE', query:`?id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}`, prefer:'return=representation'});
+      if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+      json(res,200,{ok:true}); return true;
+    }
+
+    json(res,405,{error:'Método não permitido'}); return true;
+  } catch (err) {
+    console.error('characters_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Salvamento online ainda não configurado no servidor.':'Não foi possível salvar. Tente novamente.'});
     return true;
   }
 }
@@ -183,6 +246,7 @@ function publicPlayer(player) {
 const server = http.createServer(async (req, res) => {
   const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
   if (await handleAuth(req, res, pathname)) return;
+  if (await handleCharacters(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
   if (!file.startsWith(ROOT + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }

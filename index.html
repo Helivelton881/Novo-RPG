@@ -3053,9 +3053,12 @@ function drawMini(){
 }
 
 /* ================= salvar ================= */
+function buildSaveObj(){
+  return {cls:P.cls,gunlock:P.gunlock,lvl:P.lvl,xp:P.xp,gold:P.gold,pv:P.pv,pa:P.pa,quest:P.quest,kills:P.kills,hp:P.hp,mp:P.mp,x:P.x,y:P.y,gk:P.gk,gem:P.gem,ap:P.ap,key:P.key,scr:P.scr,chest:P.chestOpen,chest2:P.chestOpen2,chest3:P.chestOpen3,chest4:P.chestOpen4,chest5:P.chestOpen5,chest6:P.chestOpen6,chest7:P.chestOpen7,kv:P.kv,kvt:P.kvt,ki:P.ki,kit:P.kit,kt:P.kt,ktt:P.ktt,kp:P.kp,kpt:P.kpt,ks:P.ks,ke:P.ke,kw:P.kw,kwt:P.kwt,bag:P.bag,eq:P.eq,name:P.name,bar:P.bar,skSeen:P.skSeen,sk:P.sk,sl:P.sl,gb:P.gb,bs:P.bs,dt:P.dt,pt:P.pt,friends:P.friends,chat:P.chat,party:P.party,map:W_?W_.name:'vila'};
+}
 function saveGame(){
   if(!SAVE_READY)return;
-  try{metaTouch();localStorage.setItem(SAVE_KEY,JSON.stringify({cls:P.cls,gunlock:P.gunlock,lvl:P.lvl,xp:P.xp,gold:P.gold,pv:P.pv,pa:P.pa,quest:P.quest,kills:P.kills,hp:P.hp,mp:P.mp,x:P.x,y:P.y,gk:P.gk,gem:P.gem,ap:P.ap,key:P.key,scr:P.scr,chest:P.chestOpen,chest2:P.chestOpen2,chest3:P.chestOpen3,chest4:P.chestOpen4,chest5:P.chestOpen5,chest6:P.chestOpen6,chest7:P.chestOpen7,kv:P.kv,kvt:P.kvt,ki:P.ki,kit:P.kit,kt:P.kt,ktt:P.ktt,kp:P.kp,kpt:P.kpt,ks:P.ks,ke:P.ke,kw:P.kw,kwt:P.kwt,bag:P.bag,eq:P.eq,name:P.name,bar:P.bar,skSeen:P.skSeen,sk:P.sk,sl:P.sl,gb:P.gb,bs:P.bs,dt:P.dt,pt:P.pt,friends:P.friends,chat:P.chat,party:P.party,map:W_?W_.name:'vila'}))}catch(e){}
+  try{metaTouch();const s=buildSaveObj();localStorage.setItem(SAVE_KEY,JSON.stringify(s));queueCharSync(s)}catch(e){}
 }
 function loadGame(){
   try{
@@ -3127,6 +3130,45 @@ async function restoreOnlineSession(){
   if(!token)return null;
   try{return (await authRequest('/api/auth/session',{token})).user}catch(e){logoutOnline();return null}
 }
+/* ---- save do personagem na nuvem (Supabase, via server.js) ---- */
+function authToken(){try{return sessionStorage.getItem(AUTH_TOKEN_KEY)||''}catch(e){return ''}}
+async function syncCharsFromServer(){
+  if(!ACC||!ACC.id)return;
+  const token=authToken();if(!token)return;
+  let serverList;
+  try{serverList=(await authRequest('/api/characters',{token})).characters}catch(e){return}
+  const localList=charsOf(ACC.key),serverIds=new Set(serverList.map(c=>c.id)),merged=[],usedSlots=new Set();
+  for(const sc of serverList){
+    merged.push({id:sc.id,slot:sc.slot,name:sc.name,cls:sc.cls,lvl:sc.lvl,created:Date.parse(sc.updated_at)||Date.now(),last:Date.parse(sc.updated_at)||Date.now()});
+    usedSlots.add(sc.slot);
+    try{const hasSave=sc.save&&Object.keys(sc.save).length;localStorage.setItem(saveKeyOf(ACC.key,sc.id),JSON.stringify(hasSave?sc.save:{lvl:sc.lvl,map:sc.map,name:sc.name}))}catch(e){}
+  }
+  for(const lc of localList){
+    if(serverIds.has(lc.id)||usedSlots.has(lc.slot)||merged.length>=4)continue;
+    try{
+      const created=(await authRequest('/api/characters',{method:'POST',token,body:{slot:lc.slot,name:lc.name,cls:lc.cls}})).character;
+      const oldSave=localStorage.getItem(saveKeyOf(ACC.key,lc.id));
+      if(oldSave){try{const parsed=JSON.parse(oldSave);await authRequest('/api/characters/'+created.id,{method:'PUT',token,body:{lvl:parsed.lvl||lc.lvl||1,map:parsed.map||'vila',save:parsed}});localStorage.setItem(saveKeyOf(ACC.key,created.id),oldSave)}catch(e){}}
+      merged.push({id:created.id,slot:created.slot,name:created.name,cls:created.cls,lvl:created.lvl,created:Date.now(),last:Date.now()});
+      usedSlots.add(created.slot);
+    }catch(e){merged.push(lc);usedSlots.add(lc.slot)}
+  }
+  setChars(ACC.key,merged);
+}
+let charSyncTimer=0,charSyncPending=null;
+function charSyncURL(){return CUR_CHAR?('/api/characters/'+CUR_CHAR.id):null}
+function flushCharSyncNow(){
+  if(charSyncTimer){clearTimeout(charSyncTimer);charSyncTimer=0}
+  if(!ACC||!ACC.id||!CUR_CHAR)return;
+  const token=authToken();if(!token)return;
+  const s=charSyncPending;charSyncPending=null;if(!s)return;
+  try{fetch(charSyncURL(),{method:'PUT',headers:{'Content-Type':'application/json',Authorization:'Bearer '+token},body:JSON.stringify({lvl:s.lvl,map:s.map,save:s}),keepalive:true}).catch(()=>{})}catch(e){}
+}
+function queueCharSync(s){
+  if(!ACC||!ACC.id||!CUR_CHAR||!authToken())return;
+  charSyncPending=s;
+  if(!charSyncTimer)charSyncTimer=setTimeout(flushCharSyncNow,8000);
+}
 async function registerAcc(name,pw){
   name=(name||'').trim();
   if(!/^[A-Za-z0-9_]{3,16}$/.test(name))throw new Error('Usuário: de 3 a 16 letras, números ou _');
@@ -3187,7 +3229,7 @@ async function doAuth(){
     if(authMode==='reg'){if(p!==$('#auPass2').value)throw new Error('As senhas não conferem');ACC=await registerAcc(u,p)}
     else ACC=await loginAcc(u,p);
     try{localStorage.setItem('mmorpg_lastuser',ACC.name)}catch(e){}
-    selSlot=-1;showChars();
+    selSlot=-1;await syncCharsFromServer();showChars();
   }catch(e){err.textContent=e.message;btn.disabled=false}
 }
 $('#gsAuth').addEventListener('click',e=>{
@@ -3215,7 +3257,7 @@ function renderChars(){
   <details class="gtips"><summary>Como jogar</summary><ul><li><b>Mover:</b> WASD ou setas. No celular, arraste o dedo na tela.</li><li><b>Atacar:</b> toque num monstro para marcar o alvo e toque na espada da barra: o personagem vai até ele e ataca sozinho. No teclado: Espaço.</li><li><b>Barra de atalhos:</b> toque num espaço (ou teclas 1 a 8). Segure um espaço para escolher o que ele faz.</li><li><b>Menu:</b> botão no canto inferior esquerdo (ou Esc): personagem, habilidades, missões, mapa e mais.</li><li><b>Falar:</b> tecla E ou o botão que aparece perto de um NPC.</li></ul></details>`;
   drawSprites();
 }
-$('#gsChars').addEventListener('click',e=>{
+$('#gsChars').addEventListener('click',async e=>{
   const s=e.target.closest('[data-slot]');
   if(s){const i=+s.dataset.slot,c=charsOf(ACC.key).find(x=>x.slot===i);if(!c){showCreate(i)}else{selSlot=i;delArm=0;renderChars()}return}
   if(e.target.closest('#chOut')){logoutOnline();ACC=null;authMode='login';renderAuth();return}
@@ -3224,7 +3266,12 @@ $('#gsChars').addEventListener('click',e=>{
   if(e.target.closest('#chDel')){
     if(delArm<Date.now()){delArm=Date.now()+3500;renderChars();setTimeout(()=>{if($('#gsChars').classList.contains('on'))renderChars()},3600);return}
     const l=charsOf(ACC.key),c=l.find(x=>x.slot===selSlot);
-    if(c){try{localStorage.removeItem(saveKeyOf(ACC.key,c.id))}catch(err){}setChars(ACC.key,l.filter(x=>x.id!==c.id))}
+    if(c){
+      const token=authToken();
+      if(token)try{await authRequest('/api/characters/'+c.id,{method:'DELETE',token})}catch(e){}
+      try{localStorage.removeItem(saveKeyOf(ACC.key,c.id))}catch(err){}
+      setChars(ACC.key,l.filter(x=>x.id!==c.id));
+    }
     selSlot=-1;delArm=0;showChars();
   }
 });
@@ -3245,14 +3292,20 @@ function renderCreate(keepName){
   <div class="cname"><label for="cnName" style="color:#ffe45c">Nome do personagem</label><input id="cnName" type="text" maxlength="14" placeholder="2 a 14 letras" autocomplete="off" spellcheck="false" value="${esc(name)}"><div class="gerr" id="cnErr" role="alert"></div><button id="cnGo" class="gbtn green" type="button">Criar ${C.name}</button></div></div>`;
   drawSprites();
 }
-function doCreate(){
+async function doCreate(){
   const name=($('#cnName').value||'').trim().replace(/\s+/g,' '),err=$('#cnErr');err.textContent='';
   if(!/^[A-Za-zÀ-ÿ0-9_ ]{2,14}$/.test(name)){err.textContent='O nome precisa ter de 2 a 14 letras ou números';return}
   const l=charsOf(ACC.key);
   if(l.length>=4){err.textContent='Você já tem 4 personagens';return}
   if(l.some(c=>c.name.toLowerCase()===name.toLowerCase())){err.textContent='Você já tem um personagem com esse nome';return}
   const slot=l.some(c=>c.slot===pendSlot)?[0,1,2,3].find(i=>!l.some(c=>c.slot===i)):pendSlot;
-  const meta={id:'c'+Date.now().toString(36)+Math.floor(Math.random()*1e3).toString(36),slot,name,cls:newCls,lvl:1,created:Date.now(),last:Date.now()};
+  let id='c'+Date.now().toString(36)+Math.floor(Math.random()*1e3).toString(36);
+  const token=authToken();
+  if(token){
+    try{const created=(await authRequest('/api/characters',{method:'POST',token,body:{slot,name,cls:newCls}})).character;id=created.id}
+    catch(e){if(!(e instanceof TypeError)){err.textContent=e.message||'Não foi possível criar o personagem';return}}
+  }
+  const meta={id,slot,name,cls:newCls,lvl:1,created:Date.now(),last:Date.now()};
   l.push(meta);setChars(ACC.key,l);selSlot=slot;showChars();
   toast(name+' foi criado!');
 }
@@ -3278,7 +3331,7 @@ function startGame(meta,isNew){
   saveGame();
 }
 
-addEventListener('pagehide',()=>{try{saveGame()}catch(e){}});
+addEventListener('pagehide',()=>{try{saveGame()}catch(e){}try{flushCharSyncNow()}catch(e){}});
 /* ================= cripta dos esqueletos ================= */
 function skStats(m){if(m.boss)return{hp:1800,dmg:52,xp:800,sc:1.55};const l=m.lvl;return{hp:260+(l-10)*36,dmg:28+(l-10)*3,xp:100+(l-10)*14,sc:1+(l-10)*.02}}
 function newSkeleton(x,y,lvl,boss,pack,temp){const st=skStats({lvl,boss});return{type:'skeleton',boss:!!boss,pack,temp:!!temp,x,y,sx:x,sy:y,lvl,hp:st.hp,maxhp:st.hp,anim:Math.random()*6,flash:0,kx:0,ky:0,dead:false,respawn:0,state:'idle',t:0,t0:1,cd:1,ret:0,tx:x,ty:y,wt:Math.random()*3,face:1,fa:Math.PI/2,la:0,cmb:0,guard:0,hit:false,bar:0,moving:false,summoned:false}}
@@ -5394,7 +5447,7 @@ function frame(t){
       dev(cls,name){ACC={name:'dev',key:'dev'};const meta={id:'d'+Date.now().toString(36),slot:0,name:name||'Teste',cls,lvl:1,created:Date.now(),last:Date.now()};setChars('dev',[meta]);startGame(meta,true)}};
     assetsReady=true;
     const onlineUser=await restoreOnlineSession();
-    if(onlineUser){ACC=onlineUser;selSlot=-1;showChars();return}
+    if(onlineUser){ACC=onlineUser;selSlot=-1;await syncCharsFromServer();showChars();return}
     authMode='login';renderAuth();
   }catch(err){$('#gsAuth').innerHTML='<div class="gbox gfr"><h1 class="logo">MMORPG</h1><p class="tag">Erro ao carregar</p></div>';console.error(err)}
 })();

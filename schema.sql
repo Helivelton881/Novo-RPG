@@ -1,6 +1,10 @@
+-- user_id references public.users (nosso login proprio, com senha em scrypt/bcrypt
+-- e sessoes por token), nao auth.users (Supabase Auth) -- este projeto nao usa
+-- Supabase Auth/GoTrue. Ver server.js: /api/characters/*, acessado so pelo
+-- servidor via SUPABASE_SECRET_KEY (service role), que ignora RLS.
 create table if not exists public.characters (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references auth.users(id) on delete cascade,
+  user_id uuid not null references public.users(id) on delete cascade,
   slot int not null check (slot between 0 and 3),
   name text not null,
   cls text not null default 'guerreiro',
@@ -27,13 +31,10 @@ create trigger trg_characters_touch
 
 alter table public.characters enable row level security;
 
+-- Sem Supabase Auth, auth.uid() nunca bate com nosso user_id -- por isso
+-- nenhuma policy publica: só o servidor acessa, via service role.
 drop policy if exists "characters: leitura pública" on public.characters;
-create policy "characters: leitura pública" on public.characters
-  for select using (true);
-
 drop policy if exists "characters: dono cria/edita/apaga" on public.characters;
-create policy "characters: dono cria/edita/apaga" on public.characters
-  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 create index if not exists idx_characters_user on public.characters(user_id);
 create index if not exists idx_characters_lvl on public.characters(lvl desc);
