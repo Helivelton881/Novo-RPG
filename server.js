@@ -19,6 +19,24 @@ const ALLOWED_MAP = /^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)(?:
 const ALLOWED_CLASS = new Set(['guerreiro', 'druida', 'mago', 'arqueiro']);
 const MIME = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.json':'application/json; charset=utf-8'};
 
+// Espelha GEAR/tiers do index.html (so os campos usados pela validacao
+// anti-cheat) para recalcular stats de item no servidor em vez de confiar
+// nos numeros que o cliente manda.
+const GEAR_TIERS = {
+  sword:  [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
+  bow:    [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
+  staffd: [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
+  staffm: [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
+  shield: [null,{def:2,blk:.10},{def:4,blk:.14},{def:7,blk:.18},{def:11,blk:.22},{def:16,blk:.26}],
+  armor:  [null,{def:2,hp:10},{def:4,hp:25},{def:7,hp:45},{def:10,hp:70},{def:15,hp:105}],
+  helmet: [null,{def:1,hp:6},{def:3,hp:14},{def:5,hp:28},{def:8,hp:44},{def:12,hp:66}],
+  cape:   [null,{def:1,hp:8},{def:2,hp:16},{def:4,hp:30},{def:6,hp:48},{def:9,hp:72}],
+  jewel:  [null,{atk:1,hp:5},{atk:2,hp:12},{atk:4,hp:20},{atk:6,hp:34},{atk:9,hp:52}],
+  boots:  [null,{def:1,spd:.03},{def:2,spd:.05},{def:4,spd:.08},{def:6,spd:.12},{def:9,spd:.16}],
+};
+const EQ_SLOTS = ['sword','shield','armor','helmet','cape','jewel','boots'];
+const COUNTER_FIELDS = ['gk','ki','kit','kt','ktt','kp','kpt','ks','ke','kw','kwt','kv','kvt','ap','key','scr','sl','gb','bs','dt'];
+
 function cleanText(value, max) {
   return String(value || '').replace(/[<>\u0000-\u001f]/g, '').trim().slice(0, max);
 }
@@ -38,6 +56,45 @@ function readJson(req) {
     req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch { reject(new Error('INVALID_JSON')); } });
     req.on('error', reject);
   });
+}
+
+function sanitizeItem(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const tiers = GEAR_TIERS[raw.type]; if (!tiers) return null;
+  const tier = Math.round(Number(raw.tier));
+  if (!Number.isInteger(tier) || tier < 1 || tier >= tiers.length) return null;
+  const t = tiers[tier];
+  return {type: raw.type, tier, n: cleanText(raw.n, 40) || 'Item', atk: t.atk || 0, def: t.def || 0, hp: t.hp || 0, blk: t.blk || 0, spd: t.spd || 0, req: t.req || 0};
+}
+
+// Reconstroi o save inteiro a partir de limites plausiveis em vez de
+// confiar no JSON que o cliente manda: mesmo com o jogo ainda calculando
+// dano/inventario no cliente, isso impede que editar localStorage/memoria
+// vire ouro, itens ou XP infinitos persistidos na nuvem.
+function sanitizeSave(raw, lvl) {
+  const save = raw && typeof raw === 'object' ? raw : {};
+  const clampInt = (v, max) => Math.max(0, Math.min(max, Math.round(Number(v) || 0)));
+  const map = ALLOWED_MAP.test(cleanText(save.map, 24)) ? cleanText(save.map, 24) : 'vila';
+  const out = {
+    cls: ALLOWED_CLASS.has(save.cls) ? save.cls : 'guerreiro', lvl,
+    xp: clampInt(save.xp, 30 * (lvl + 1) * 3), gold: clampInt(save.gold, 500000), gem: clampInt(save.gem, 5000),
+    pv: clampInt(save.pv, 999), pa: clampInt(save.pa, 999), quest: clampInt(save.quest, 40), kills: clampInt(save.kills, 999999),
+    hp: clampInt(save.hp, 100000), mp: clampInt(save.mp, 100000),
+    x: Number.isFinite(Number(save.x)) ? Number(save.x) : 0, y: Number.isFinite(Number(save.y)) ? Number(save.y) : 0,
+    pt: clampInt(save.pt, 10000000), map,
+    chest: !!save.chest, chest2: !!save.chest2, chest3: !!save.chest3, chest4: !!save.chest4, chest5: !!save.chest5, chest6: !!save.chest6, chest7: !!save.chest7,
+    name: cleanText(save.name, 14) || 'Herói',
+    bar: Array.isArray(save.bar) ? save.bar.slice(0, 8).map(x => typeof x === 'string' && x.length < 20 ? x : null) : [],
+    gunlock: save.gunlock && typeof save.gunlock === 'object' ? Object.fromEntries(Object.entries(save.gunlock).slice(0, 20).map(([k, v]) => [cleanText(k, 24), !!v])) : {},
+    skSeen: save.skSeen && typeof save.skSeen === 'object' ? Object.fromEntries(Object.entries(save.skSeen).slice(0, 20).map(([k, v]) => [cleanText(k, 20), !!v])) : {},
+    sk: save.sk && typeof save.sk === 'object' ? Object.fromEntries(Object.entries(save.sk).slice(0, 10).map(([k, v]) => [cleanText(k, 20), clampInt(v, 3)])) : {},
+    bag: Array.isArray(save.bag) ? save.bag.slice(0, 24).map(sanitizeItem).filter(Boolean) : [],
+    eq: {},
+    chat: Array.isArray(save.chat) ? save.chat.slice(-40).map(m => ({n: cleanText(m && m.n, 20), t: cleanText(m && m.t, 240), sys: !!(m && m.sys)})) : [],
+  };
+  for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
+  for (const s of EQ_SLOTS) out.eq[s] = save.eq && save.eq[s] ? sanitizeItem(save.eq[s]) : null;
+  return out;
 }
 
 function authIp(req) {
@@ -187,9 +244,8 @@ async function handleCharacters(req, res, pathname) {
       const id = idMatch[1];
       const input = await readJson(req);
       const lvl = Math.max(1, Math.min(99, Number(input.lvl) || 1));
-      const map = cleanText(input.map, 24);
-      const save = input.save && typeof input.save === 'object' ? input.save : {};
-      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}`, body:{lvl, map: ALLOWED_MAP.test(map) ? map : 'vila', save}, prefer:'return=representation'});
+      const save = sanitizeSave(input.save, lvl);
+      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}`, body:{lvl, map: save.map, save}, prefer:'return=representation'});
       if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
       json(res,200,{character: rows[0]}); return true;
     }
@@ -205,6 +261,114 @@ async function handleCharacters(req, res, pathname) {
   } catch (err) {
     console.error('characters_error', err.message, err.status || '', err.detail || '');
     if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Salvamento online ainda não configurado no servidor.':'Não foi possível salvar. Tente novamente.'});
+    return true;
+  }
+}
+
+// accountSockets: userId -> Set<ws> conectados agora (qualquer mapa), para
+// status online real de amigos/grupo. Populado no 'join' do WS quando o
+// cliente manda um userId de conta online.
+const accountSockets = new Map();
+function isAccountOnline(userId) { const s = accountSockets.get(userId); return !!s && s.size > 0; }
+
+async function handleFriends(req, res, pathname) {
+  if (!pathname.startsWith('/api/friends')) return false;
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+
+    if (pathname === '/api/friends' && req.method === 'GET') {
+      const rows = await supabase('friends', {query:`?select=friend_id,users!friend_id(username)&user_id=eq.${user.id}&order=created_at.asc`});
+      const friends = rows.map(r => {const u = Array.isArray(r.users) ? r.users[0] : r.users; return {id:r.friend_id, username:u?u.username:'?', online:isAccountOnline(r.friend_id)}});
+      json(res,200,{friends}); return true;
+    }
+
+    if (pathname === '/api/friends' && req.method === 'POST') {
+      const input = await readJson(req);
+      const username = String(input.username || '').trim().toLowerCase();
+      if (!/^[a-z0-9_]{3,16}$/.test(username)) { json(res,400,{error:'Usuário inválido'}); return true; }
+      if (username === user.username) { json(res,400,{error:'Esse é você'}); return true; }
+      const found = await supabase('users', {query:`?select=id&username=eq.${encodeURIComponent(username)}&limit=1`});
+      if (!found.length) { json(res,404,{error:'Esse usuário não existe'}); return true; }
+      const count = await supabase('friends', {query:`?select=friend_id&user_id=eq.${user.id}`});
+      if (count.length >= 20) { json(res,400,{error:'Lista cheia (20 amigos)'}); return true; }
+      try { await supabase('friends', {method:'POST', body:{user_id:user.id, friend_id:found[0].id}, prefer:'return=minimal'}); }
+      catch (e) { if (e.status !== 409) throw e; }
+      const rows = await supabase('friends', {query:`?select=friend_id,users!friend_id(username)&user_id=eq.${user.id}&order=created_at.asc`});
+      const friends = rows.map(r => {const u = Array.isArray(r.users) ? r.users[0] : r.users; return {id:r.friend_id, username:u?u.username:'?', online:isAccountOnline(r.friend_id)}});
+      json(res,201,{friends}); return true;
+    }
+
+    const delMatch = /^\/api\/friends\/([a-z0-9_]{3,16})$/i.exec(pathname);
+    if (delMatch && req.method === 'DELETE') {
+      const username = delMatch[1].toLowerCase();
+      const found = await supabase('users', {query:`?select=id&username=eq.${encodeURIComponent(username)}&limit=1`});
+      if (found.length) await supabase('friends', {method:'DELETE', query:`?user_id=eq.${user.id}&friend_id=eq.${found[0].id}`, prefer:'return=minimal'});
+      const rows = await supabase('friends', {query:`?select=friend_id,users!friend_id(username)&user_id=eq.${user.id}&order=created_at.asc`});
+      const friends = rows.map(r => {const u = Array.isArray(r.users) ? r.users[0] : r.users; return {id:r.friend_id, username:u?u.username:'?', online:isAccountOnline(r.friend_id)}});
+      json(res,200,{friends}); return true;
+    }
+
+    json(res,405,{error:'Método não permitido'}); return true;
+  } catch (err) {
+    console.error('friends_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Amigos online ainda não configurado no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+// Grupos sao efemeros (nao sobrevivem a um restart do servidor), como a
+// autoridade de monstros por mapa - por isso ficam so em memoria, sem tabela.
+const parties = new Map(); // code -> {ownerId, members: Map<userId, username>}
+const memberParty = new Map(); // userId -> code
+const PARTY_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function genPartyCode() { let c = ''; for (let i = 0; i < 6; i++) c += PARTY_CODE_CHARS[Math.floor(Math.random() * PARTY_CODE_CHARS.length)]; return c; }
+function partyView(code) {
+  const p = parties.get(code); if (!p) return null;
+  return {code, ownerId: p.ownerId, members: [...p.members.entries()].map(([id, username]) => ({id, username, online: isAccountOnline(id)}))};
+}
+function leaveParty(userId) {
+  const code = memberParty.get(userId); if (!code) return;
+  const p = parties.get(code);
+  if (p) { p.members.delete(userId); if (!p.members.size) parties.delete(code); else if (p.ownerId === userId) p.ownerId = [...p.members.keys()][0]; }
+  memberParty.delete(userId);
+}
+
+async function handleParty(req, res, pathname) {
+  if (!pathname.startsWith('/api/party')) return false;
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+
+    if (pathname === '/api/party' && req.method === 'GET') {
+      const code = memberParty.get(user.id);
+      json(res,200,{party: code ? partyView(code) : null}); return true;
+    }
+    if (pathname === '/api/party' && req.method === 'POST') {
+      leaveParty(user.id);
+      let code; do { code = genPartyCode(); } while (parties.has(code));
+      parties.set(code, {ownerId: user.id, members: new Map([[user.id, user.username]])});
+      memberParty.set(user.id, code);
+      json(res,201,{party: partyView(code)}); return true;
+    }
+    if (pathname === '/api/party/join' && req.method === 'POST') {
+      const input = await readJson(req);
+      const code = cleanText(input.code, 8).toUpperCase();
+      const p = parties.get(code);
+      if (!p) { json(res,404,{error:'Código inválido'}); return true; }
+      if (p.members.size >= 4 && !p.members.has(user.id)) { json(res,400,{error:'Grupo cheio'}); return true; }
+      leaveParty(user.id);
+      p.members.set(user.id, user.username); memberParty.set(user.id, code);
+      json(res,200,{party: partyView(code)}); return true;
+    }
+    if (pathname === '/api/party/leave' && req.method === 'POST') {
+      leaveParty(user.id);
+      json(res,200,{ok:true}); return true;
+    }
+    json(res,405,{error:'Método não permitido'}); return true;
+  } catch (err) {
+    console.error('party_error', err.message);
+    if (!res.headersSent) json(res,500,{error:'Não foi possível concluir. Tente novamente.'});
     return true;
   }
 }
@@ -229,7 +393,7 @@ function broadcastMap(map, payload) {
 
 function mapState(id) {
   let state=maps.get(id);
-  if(!state){state={id,mobs:new Map(),authorityId:null};maps.set(id,state)}
+  if(!state){state={id,mobs:new Map(),authorityId:null,hitGuard:new Map()};maps.set(id,state)}
   return state;
 }
 
@@ -247,6 +411,8 @@ const server = http.createServer(async (req, res) => {
   const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
   if (await handleAuth(req, res, pathname)) return;
   if (await handleCharacters(req, res, pathname)) return;
+  if (await handleFriends(req, res, pathname)) return;
+  if (await handleParty(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
   if (!file.startsWith(ROOT + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
@@ -266,8 +432,10 @@ wss.on('connection', ws => {
     let msg; try { msg = JSON.parse(raw); } catch { return; }
     let p = clients.get(ws);
     if (msg.type === 'join' && !p) {
-      p = {id:crypto.randomUUID(),name:cleanText(msg.name,14)||'Herói',cls:ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',map:'vila',x:720,y:1258,dir:0,moving:false,lvl:Math.max(1,Math.min(99,Number(msg.lvl)||1)),atkT:0,atkAng:0};
+      const userId = typeof msg.userId === 'string' && /^[0-9a-f-]{36}$/i.test(msg.userId) ? msg.userId : null;
+      p = {id:crypto.randomUUID(),userId,name:cleanText(msg.name,14)||'Herói',cls:ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',map:'vila',x:720,y:1258,dir:0,moving:false,lvl:Math.max(1,Math.min(99,Number(msg.lvl)||1)),atkT:0,atkAng:0};
       clients.set(ws,p);
+      if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
       send(ws,{type:'welcome',id:p.id,players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
       broadcast({type:'player_join',player:publicPlayer(p)},ws);
       return;
@@ -294,8 +462,17 @@ wss.on('connection', ws => {
       broadcastMap(map,{type:'authority',map,authorityId:state.authorityId});
     } else if (msg.type === 'mob_damage') {
       const map=cleanText(msg.map,24),state=maps.get(map);if(!state||map!==p.map)return;
-      const mob=state.mobs.get(cleanText(msg.id,48)),damage=Math.max(0,Math.min(100000,Number(msg.damage)||0));
-      if(!mob||mob.dead||!damage)return;
+      const mobId=cleanText(msg.id,48),mob=state.mobs.get(mobId);
+      if(!mob||mob.dead)return;
+      // limite de dano por golpe (generoso o bastante para nunca travar jogo
+      // legitimo) + anti-spam por (jogador,monstro): bloqueia macro/cliente
+      // adulterado mandando dano gigante ou repetido rapido demais.
+      const now=Date.now(),guard=state.hitGuard.get(mobId);
+      if(guard&&guard.playerId===p.id&&now-guard.at<80)return;
+      state.hitGuard.set(mobId,{playerId:p.id,at:now});
+      const lvl=Math.max(1,Math.min(99,Number(p.lvl)||1)),maxHit=Math.min(6500,50+lvl*60);
+      const damage=Math.max(0,Math.min(maxHit,Number(msg.damage)||0));
+      if(!damage)return;
       mob.hp=Math.max(0,mob.hp-damage);
       if(mob.hp<=0){mob.dead=true;mob.respawnAt=Date.now()+(mob.boss?60000:30000)}
       broadcastMap(map,{type:'mob_state',map,mob,killerId:mob.dead?p.id:null});
@@ -316,7 +493,7 @@ wss.on('connection', ws => {
       const text=cleanText(msg.text,160);if(text)broadcast({type:'chat',from:p.name,text,at:Date.now()});
     }
   });
-  ws.on('close', () => { const p=clients.get(ws);if(p){clients.delete(ws);broadcast({type:'player_leave',id:p.id});const state=maps.get(p.map);if(state){chooseAuthority(state);broadcastMap(p.map,{type:'authority',map:p.map,authorityId:state.authorityId})}} });
+  ws.on('close', () => { const p=clients.get(ws);if(p){clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id});const state=maps.get(p.map);if(state){chooseAuthority(state);broadcastMap(p.map,{type:'authority',map:p.map,authorityId:state.authorityId})}} });
 });
 
 setInterval(()=>{

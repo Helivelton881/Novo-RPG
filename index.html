@@ -229,6 +229,7 @@ button{font:inherit;color:inherit}
 .rw .frow:last-child{border-bottom:0}
 .rw .frow b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .rw .dot{width:10px;height:10px;border-radius:50%;background:#77715a;flex:none}
+.rw .dot.on{background:#7cf07c;box-shadow:0 0 4px #7cf07c}
 .rw .add{display:flex;gap:6px}
 .rw .slots{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}
 .rw .slotp{border:2px dashed #6b4d20;border-radius:8px;padding:9px;text-align:center;color:#cdb98f;min-height:56px}
@@ -1101,7 +1102,7 @@ const P={x:START.x,y:START.y,dir:0,hp:100,mp:50,maxhp:100,maxmp:50,lvl:1,xp:0,go
   atkT:0,cd:0,hurtT:0,inv:0,anim:0,moving:false,dead:false,deadT:0,calm:0,quest:0,kills:0,gk:0,gem:0,hitDone:true,atkAng:0};
 P.eq={sword:mkItem('sword',1),shield:null,armor:null,helmet:null,cape:null,jewel:null,boots:null};P.bag=[];P.ap=0;P.key=0;P.scr=0;P.gunlock={};P.chestOpen=false;P.chestOpen2=false;P.chestOpen3=false;P.chestOpen4=false;P.chestOpen5=false;P.chestOpen6=false;P.chestOpen7=false;P.kv=0;P.kvt=0;P.ki=0;P.kit=0;P.kt=0;P.ktt=0;P.kp=0;P.kpt=0;P.ks=0;P.ke=0;P.kw=0;P.kwt=0;P.atk=0;P.def=0;P.blk=0;P.hpBonus=0;P.spd=0;
 P.bar=['atk','pv','pa','gold','gem','ap','bag',null];P.skSeen={};
-P.name='Herói';P.sk={spin:1,dash:1,heal:1};P.scd={spin:0,dash:0,heal:0};P.sl=0;P.gb=0;P.bs=0;P.dt=0;P.pt=0;P.friends=[];P.chat=[];P.party=null;
+P.name='Herói';P.sk={spin:1,dash:1,heal:1};P.scd={spin:0,dash:0,heal:0};P.sl=0;P.gb=0;P.bs=0;P.dt=0;P.pt=0;P.chat=[];
 function recalc(){
   let a=0,d=0,h=0,b=0,sp=0;
   for(const k of EQ_KEYS){const it=P.eq[k];if(it){a+=k==='sword'?Math.round((it.atk||0)*CLS.wm):(it.atk||0);d+=it.def||0;h+=it.hp||0;b+=it.blk||0;sp+=it.spd||0}}
@@ -1816,8 +1817,9 @@ function openScr(name,tab){
   if(!started||P.dead||traveling)return;
   closeMenu();closeInv();closeShop();if(name==='char'&&tab)charTab=tab;if(name==='map'&&W_&&worlds[W_.name])mapView=W_.name;
   scrOpen=name;chSel=null;$('#talk').classList.remove('on');const se=$('#scr');se.innerHTML='';se.classList.add('on');renderScr();
+  if(name==='social'){refreshSocial();clearInterval(socialPollTimer);socialPollTimer=setInterval(refreshSocial,5000)}
 }
-function closeScr(){scrOpen=null;const el=$('#scr');el.classList.remove('on');resetWinPos(el)}
+function closeScr(){scrOpen=null;const el=$('#scr');el.classList.remove('on');resetWinPos(el);clearInterval(socialPollTimer);socialPollTimer=0}
 function escKey(){if(shopOpen)closeShop();else if(invOpen)closeInv();else if(scrOpen)closeScr();else if(menuOpen)closeMenu();else openMenu()}
 $('#menuBtn').addEventListener('click',()=>{menuOpen?closeMenu():openMenu()});
 document.addEventListener('pointerdown',e=>{if(menuOpen&&!e.target.closest('#menu,#menuBtn'))closeMenu()},true);
@@ -1860,7 +1862,7 @@ function statusHtml(extra){
 }
 let winSigStr='',mapTick=0,winDetailFocus=false;
 function winSig(){
-  return JSON.stringify([Object.keys(P.gunlock).join(),P.bar.join(),shopOpen,shopTab,shopCat,shopSel,shopSold.length,shopOpen?P.gold:0,invOpen,scrOpen,bagFilter,charTab,skSel,mapView,socTab,P.lvl,P.quest,P.kills,P.gk,P.ks,P.kw,P.kp,P.kt,P.ki,P.kv,P.gem,P.pv,P.pa,P.ap,P.key,P.scr,P.bag.map(i=>i.n).join(),Object.values(P.eq).map(i=>i&&i.n).join(),P.sl,P.gb,P.bs,P.dt,Math.floor(P.pt/60),P.chestOpen,P.friends.length,P.chat.length,!!P.party,P.sk,skillPoints(),nearMerchant(),W_&&W_.name,P.name]);
+  return JSON.stringify([Object.keys(P.gunlock).join(),P.bar.join(),shopOpen,shopTab,shopCat,shopSel,shopSold.length,shopOpen?P.gold:0,invOpen,scrOpen,bagFilter,charTab,skSel,mapView,socTab,P.lvl,P.quest,P.kills,P.gk,P.ks,P.kw,P.kp,P.kt,P.ki,P.kv,P.gem,P.pv,P.pa,P.ap,P.key,P.scr,P.bag.map(i=>i.n).join(),Object.values(P.eq).map(i=>i&&i.n).join(),P.sl,P.gb,P.bs,P.dt,Math.floor(P.pt/60),P.chestOpen,FRIENDS.length,P.chat.length,!!PARTY,P.sk,skillPoints(),nearMerchant(),W_&&W_.name,P.name]);
 }
 function tickWin(){
   if(shopOpen){const mn=NPCS.find(n=>n.id==='mercador');if(!mn||Math.hypot(mn.x-P.x,mn.y-P.y)>200){closeShop();toast('Você se afastou do mercador')}}
@@ -1971,16 +1973,53 @@ function drawBigMap(){
 }
 /* --- Social --- */
 function chatAdd(n,tx,sys){P.chat.push({n,t:tx,sys:!!sys});if(P.chat.length>40)P.chat.splice(0,P.chat.length-40)}
+let FRIENDS=[],PARTY=null,socialPollTimer=0;
+async function refreshSocial(){
+  const token=authToken();if(!token)return;
+  try{
+    const [fr,pa]=await Promise.all([authRequest('/api/friends',{token}),authRequest('/api/party',{token})]);
+    FRIENDS=fr.friends||[];PARTY=pa.party||null;if(scrOpen==='social')renderScr();
+  }catch(e){}
+}
+async function addFriend(){
+  const inp=$('#frIn'),n=(inp.value||'').trim();
+  if(n.length<3){toast('Digite o usuário da conta (3 a 16 letras)');return}
+  const token=authToken();if(!token){toast('Entre com uma conta online para adicionar amigos');return}
+  try{const r=await authRequest('/api/friends',{method:'POST',token,body:{username:n}});FRIENDS=r.friends||FRIENDS;inp.value='';toast(n+' adicionado');renderScr()}
+  catch(e){toast(e.message||'Não foi possível adicionar')}
+}
+async function delFriend(username){
+  const token=authToken();if(!token)return;
+  try{const r=await authRequest('/api/friends/'+encodeURIComponent(username),{method:'DELETE',token});FRIENDS=r.friends||FRIENDS.filter(f=>f.username!==username)}
+  catch(e){}
+  toast(username+' removido');renderScr();
+}
+async function partyCreate(){
+  const token=authToken();if(!token){toast('Entre com uma conta online para criar um grupo');return}
+  try{const r=await authRequest('/api/party',{method:'POST',token});PARTY=r.party;toast('Grupo criado');renderScr()}
+  catch(e){toast(e.message||'Não foi possível criar o grupo')}
+}
+async function partyJoin(){
+  const inp=$('#pcIn'),code=(inp.value||'').trim().toUpperCase();if(code.length<4){toast('Digite o código do grupo');return}
+  const token=authToken();if(!token){toast('Entre com uma conta online para entrar num grupo');return}
+  try{const r=await authRequest('/api/party/join',{method:'POST',token,body:{code}});PARTY=r.party;toast('Você entrou no grupo');renderScr()}
+  catch(e){toast(e.message||'Código inválido')}
+}
+async function partyLeave(){
+  const token=authToken();if(token)try{await authRequest('/api/party/leave',{method:'POST',token})}catch(e){}
+  PARTY=null;toast('Você saiu do grupo');renderScr();
+}
 function scrSocial(){
   const tabs=`<div class="tabs">${[['amigos','Amigos'],['grupo','Grupo'],['chat','Chat']].map(x=>`<button type="button" data-a="st" data-t="${x[0]}" class="${socTab===x[0]?'on':''}">${x[1]}</button>`).join('')}</div>`;
   let h=tabs;
+  const online=!!authToken();
   if(socTab==='amigos'){
-    h+=`<div class="add"><input id="frIn" type="text" maxlength="14" placeholder="Nome do jogador" aria-label="Nome do jogador"><button type="button" data-a="addfr">Adicionar</button></div><div class="card"><h4>Amigos (${P.friends.length}/20)</h4>${P.friends.length?P.friends.map((n,i)=>`<div class="frow"><span class="dot"></span><b>${esc(n)}</b><small>Offline</small><button type="button" data-a="delfr" data-i="${i}" aria-label="Remover ${esc(n)}">Remover</button></div>`).join(''):'<p class="mut"><small>Sua lista está vazia. Adicione o nome de um amigo.</small></p>'}</div><p class="mut"><small>O modo online ainda não está ativo: sua lista fica salva neste aparelho e os amigos vão aparecer como online quando o servidor chegar.</small></p>`;
+    h+=`<div class="add"><input id="frIn" type="text" maxlength="16" placeholder="Usuário da conta" aria-label="Usuário da conta"><button type="button" data-a="addfr">Adicionar</button></div><div class="card"><h4>Amigos (${FRIENDS.length}/20)</h4>${FRIENDS.length?FRIENDS.map(f=>`<div class="frow"><span class="dot${f.online?' on':''}"></span><b>${esc(f.username)}</b><small>${f.online?'Online':'Offline'}</small><button type="button" data-a="delfr" data-u="${esc(f.username)}" aria-label="Remover ${esc(f.username)}">Remover</button></div>`).join(''):'<p class="mut"><small>Sua lista está vazia. Adicione o usuário da conta de um amigo.</small></p>'}</div>${online?'':'<p class="mut"><small>Entre com uma conta online para adicionar amigos de verdade.</small></p>'}`;
   }else if(socTab==='grupo'){
-    const pa=P.party;
-    h+=`<div class="card"><h4>Grupo ${pa?'(1/4)':''}</h4>${pa?`<p>Código do grupo</p><div class="code">${pa.code}</div><p><small>Compartilhe o código com seus amigos. Eles poderão entrar quando o modo online estiver ativo.</small></p><div class="slots"><div class="slotp me"><b>${esc(P.name)}</b><br><small>Líder · Nv ${P.lvl}</small></div><div class="slotp">Vaga aberta</div><div class="slotp">Vaga aberta</div><div class="slotp">Vaga aberta</div></div><div class="acts2"><button type="button" data-a="copy">Copiar código</button> <button type="button" data-a="invite">Convidar amigo</button> <button type="button" class="danger" data-a="party">Sair do grupo</button></div>`:`<p>Você não está em nenhum grupo. Crie um para chamar amigos.</p><button type="button" data-a="party">Criar grupo</button>`}</div>`;
+    const pa=PARTY,openSlots=pa?Math.max(0,4-pa.members.length):0;
+    h+=`<div class="card"><h4>Grupo ${pa?`(${pa.members.length}/4)`:''}</h4>${pa?`<p>Código do grupo</p><div class="code">${esc(pa.code)}</div><p><small>Compartilhe o código: seus amigos entram em Grupo → Entrar com código.</small></p><div class="slots">${pa.members.map(m=>`<div class="slotp${m.id===(ACC&&ACC.id)?' me':''}"><b>${esc(m.username)}</b><br><small>${m.id===pa.ownerId?'Líder':'Membro'} · ${m.online?'Online':'Offline'}</small></div>`).join('')}${Array.from({length:openSlots}).map(()=>'<div class="slotp">Vaga aberta</div>').join('')}</div><div class="acts2"><button type="button" data-a="copy">Copiar código</button> <button type="button" class="danger" data-a="partyleave">Sair do grupo</button></div>`:`<p>Você não está em nenhum grupo.</p><button type="button" data-a="partynew">Criar grupo</button><div class="add"><input id="pcIn" type="text" maxlength="6" placeholder="Código do grupo" aria-label="Código do grupo"><button type="button" data-a="partyjoin">Entrar</button></div>`}</div>${online?'':'<p class="mut"><small>Entre com uma conta online para usar grupos de verdade.</small></p>'}`;
   }else{
-    if(!P.chat.length)chatAdd('Sistema','Bem-vindo ao chat! Digite /ajuda para ver os comandos. O chat entre jogadores chega com o modo online.',true);
+    if(!P.chat.length)chatAdd('Sistema','Bem-vindo ao chat! Digite /ajuda para ver os comandos. Mensagens aqui chegam a todo mundo no mesmo mapa, em tempo real.',true);
     h+=`<div class="chat" id="chatLog">${P.chat.map(m=>m.sys?`<p class="sys">${esc(m.t)}</p>`:`<p><b>${esc(m.n)}:</b> ${esc(m.t)}</p>`).join('')}</div><div class="add"><input id="chIn" type="text" maxlength="120" placeholder="Digite uma mensagem" aria-label="Mensagem"><button type="button" data-a="send">Enviar</button></div>`;
   }
   return h;
@@ -2066,14 +2105,6 @@ function renderScr(){
   if(scrOpen==='social'&&socTab==='chat'){const l=$('#chatLog');if(l)l.scrollTop=l.scrollHeight}
   winSigStr=winSig();
 }
-function addFriend(){
-  const inp=$('#frIn'),n=(inp.value||'').trim().slice(0,14);
-  if(n.length<2){toast('Digite pelo menos 2 letras');return}
-  if(n.toLowerCase()===P.name.toLowerCase()){toast('Esse é o seu personagem');return}
-  if(P.friends.some(x=>x.toLowerCase()===n.toLowerCase())){toast('Já está na sua lista');return}
-  if(P.friends.length>=20){toast('Lista cheia (20 amigos)');return}
-  P.friends.push(n);saveGame();toast(n+' adicionado');renderScr();
-}
 function sendChat(){
   const inp=$('#chIn'),tx=(inp.value||'').trim();if(!tx)return;
   if(tx[0]==='/'){
@@ -2102,10 +2133,11 @@ function scrAct(a,el){
     case 'mv':mapView=el.dataset.v;renderScr();break;
     case 'st':socTab=el.dataset.t;renderScr();break;
     case 'addfr':addFriend();break;
-    case 'delfr':{const i=+el.dataset.i;const n=P.friends[i];P.friends.splice(i,1);saveGame();toast(n+' removido');renderScr();break}
-    case 'party':{if(P.party){P.party=null;toast('Você saiu do grupo')}else{const cs='ABCDEFGHJKLMNPQRSTUVWXYZ23456789';let c='';for(let i=0;i<6;i++)c+=cs[Math.floor(Math.random()*cs.length)];P.party={code:c};toast('Grupo criado')}saveGame();renderScr();break}
-    case 'copy':{const c=P.party&&P.party.code;if(c&&navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(c).then(()=>toast('Código copiado'),()=>toast('Não foi possível copiar'));else toast('Código: '+c);break}
-    case 'invite':toast(P.friends.length?'Convites funcionam quando o modo online chegar':'Adicione amigos primeiro, na aba Amigos');break;
+    case 'delfr':delFriend(el.dataset.u);break;
+    case 'partynew':partyCreate();break;
+    case 'partyjoin':partyJoin();break;
+    case 'partyleave':partyLeave();break;
+    case 'copy':{const c=PARTY&&PARTY.code;if(c&&navigator.clipboard&&navigator.clipboard.writeText)navigator.clipboard.writeText(c).then(()=>toast('Código copiado'),()=>toast('Não foi possível copiar'));else if(c)toast('Código: '+c);break}
     case 'send':sendChat();break;
     case 'tg':{const k=el.dataset.k;SET[k]=!SET[k];saveSet();if(k==='sound'&&SET.sound)sfx.coin();renderScr();break}
     case 'zoom':SET.zoom=el.dataset.v;saveSet();resize();renderScr();break;
@@ -2133,7 +2165,7 @@ $('#scr').addEventListener('click',e=>{
 });
 $('#scr').addEventListener('keydown',e=>{
   if(e.key!=='Enter')return;
-  if(e.target.id==='frIn')addFriend();else if(e.target.id==='chIn')sendChat();else if(e.target.id==='nameIn')scrAct('rename');
+  if(e.target.id==='frIn')addFriend();else if(e.target.id==='pcIn')partyJoin();else if(e.target.id==='chIn')sendChat();else if(e.target.id==='nameIn')scrAct('rename');
 });
 $('#scr').addEventListener('input',e=>{if(e.target.id==='volIn'){SET.vol=e.target.value/100;saveSet()}});
 $('#scr').addEventListener('change',e=>{if(e.target.id==='volIn')sfx.coin()});
@@ -2549,7 +2581,7 @@ function netConnect(){
   if(!started||!CUR_CHAR||NET&&NET.readyState<2)return;
   const proto=location.protocol==='https:'?'wss:':'ws:';
   NET=new WebSocket(proto+'//'+location.host+'/game');netLabel('Conectando...',false);
-  NET.onopen=()=>{netRetry=0;NET.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl}))};
+  NET.onopen=()=>{netRetry=0;NET.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined}))};
   NET.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch(err){return}
     if(m.type==='welcome'){NET_ID=m.id;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel((REMOTE.size+1)+' online',true);netJoinMap()}
     else if(m.type==='player_join'||m.type==='state'){const p=m.player;if(p&&p.id!==NET_ID){const old=REMOTE.get(p.id);REMOTE.set(p.id,Object.assign(old||{},p));netLabel((REMOTE.size+1)+' online',true)}}
@@ -3054,7 +3086,7 @@ function drawMini(){
 
 /* ================= salvar ================= */
 function buildSaveObj(){
-  return {cls:P.cls,gunlock:P.gunlock,lvl:P.lvl,xp:P.xp,gold:P.gold,pv:P.pv,pa:P.pa,quest:P.quest,kills:P.kills,hp:P.hp,mp:P.mp,x:P.x,y:P.y,gk:P.gk,gem:P.gem,ap:P.ap,key:P.key,scr:P.scr,chest:P.chestOpen,chest2:P.chestOpen2,chest3:P.chestOpen3,chest4:P.chestOpen4,chest5:P.chestOpen5,chest6:P.chestOpen6,chest7:P.chestOpen7,kv:P.kv,kvt:P.kvt,ki:P.ki,kit:P.kit,kt:P.kt,ktt:P.ktt,kp:P.kp,kpt:P.kpt,ks:P.ks,ke:P.ke,kw:P.kw,kwt:P.kwt,bag:P.bag,eq:P.eq,name:P.name,bar:P.bar,skSeen:P.skSeen,sk:P.sk,sl:P.sl,gb:P.gb,bs:P.bs,dt:P.dt,pt:P.pt,friends:P.friends,chat:P.chat,party:P.party,map:W_?W_.name:'vila'};
+  return {cls:P.cls,gunlock:P.gunlock,lvl:P.lvl,xp:P.xp,gold:P.gold,pv:P.pv,pa:P.pa,quest:P.quest,kills:P.kills,hp:P.hp,mp:P.mp,x:P.x,y:P.y,gk:P.gk,gem:P.gem,ap:P.ap,key:P.key,scr:P.scr,chest:P.chestOpen,chest2:P.chestOpen2,chest3:P.chestOpen3,chest4:P.chestOpen4,chest5:P.chestOpen5,chest6:P.chestOpen6,chest7:P.chestOpen7,kv:P.kv,kvt:P.kvt,ki:P.ki,kit:P.kit,kt:P.kt,ktt:P.ktt,kp:P.kp,kpt:P.kpt,ks:P.ks,ke:P.ke,kw:P.kw,kwt:P.kwt,bag:P.bag,eq:P.eq,name:P.name,bar:P.bar,skSeen:P.skSeen,sk:P.sk,sl:P.sl,gb:P.gb,bs:P.bs,dt:P.dt,pt:P.pt,chat:P.chat,map:W_?W_.name:'vila'};
 }
 function saveGame(){
   if(!SAVE_READY)return;
@@ -3064,7 +3096,7 @@ function loadGame(){
   try{
     const s=JSON.parse(localStorage.getItem(SAVE_KEY)||'null');if(!s)return false;
     P.lvl=s.lvl||1;P.xp=s.xp||0;P.gold=s.gold??10;P.pv=s.pv??3;P.pa=s.pa??2;P.quest=s.quest||0;P.kills=s.kills||0;P.bar=Array.isArray(s.bar)?s.bar.slice(0,8):P.bar;while(P.bar.length<8)P.bar.push(null);P.bar=P.bar.map(x=>['atk','pv','pa','ap','scr','bag','gold','gem'].concat(SKILLS.map(k=>k.id)).includes(x)?x:null);P.skSeen=s.skSeen||{};
-    P.name=s.name||P.name||'Herói';P.sk=Object.assign(Object.fromEntries(SKILLS.map(k=>[k.id,1])),s.sk||{});for(const k in P.sk)if(!SKILLS.some(x=>x.id===k))delete P.sk[k];P.sl=s.sl||0;P.gb=s.gb||0;P.bs=s.bs||0;P.dt=s.dt||0;P.pt=s.pt||0;P.friends=Array.isArray(s.friends)?s.friends:[];P.chat=Array.isArray(s.chat)?s.chat:[];P.party=s.party||null;
+    P.name=s.name||P.name||'Herói';P.sk=Object.assign(Object.fromEntries(SKILLS.map(k=>[k.id,1])),s.sk||{});for(const k in P.sk)if(!SKILLS.some(x=>x.id===k))delete P.sk[k];P.sl=s.sl||0;P.gb=s.gb||0;P.bs=s.bs||0;P.dt=s.dt||0;P.pt=s.pt||0;P.chat=Array.isArray(s.chat)?s.chat:[];
     P.gk=s.gk||0;P.gem=s.gem||0;P.ap=s.ap||0;P.key=s.key||0;P.scr=s.scr||0;P.gunlock=s.gunlock||{};P.chestOpen=!!s.chest;P.chestOpen2=!!s.chest2;P.chestOpen3=!!s.chest3;P.chestOpen4=!!s.chest4;P.chestOpen5=!!s.chest5;P.chestOpen6=!!s.chest6;P.chestOpen7=!!s.chest7;P.kv=s.kv||0;P.kvt=s.kvt||0;P.ki=s.ki||0;P.kit=s.kit||0;P.kt=s.kt||0;P.ktt=s.ktt||0;P.kp=s.kp||0;P.kpt=s.kpt||0;P.ks=s.ks||0;P.ke=s.ke||0;P.kw=s.kw||0;P.kwt=s.kwt||0;
     P.bag=Array.isArray(s.bag)?s.bag:[];P.eq=Object.assign({sword:null,shield:null,armor:null,helmet:null,cape:null,jewel:null,boots:null},s.eq||{sword:mkItem('sword',1)});
     recalc();P.hp=clamp(s.hp||P.maxhp,1,P.maxhp);P.mp=clamp(s.mp??P.maxmp,0,P.maxmp);
@@ -3088,19 +3120,10 @@ function loadGame(){
 }
 
 /* ================= contas, personagens e criação ================= */
-const ACC_KEY='mmorpg_accounts_v2';
 const AUTH_TOKEN_KEY='mmorpg_auth_token_v1';
 let ACC=null,CUR_CHAR=null,authMode='login',selSlot=-1,pendSlot=0,newCls='guerreiro',delArm=0,assetsReady=false;
 const lsGet=(k,d)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}};
-function cyrb53(str,seed=0){let h1=0xdeadbeef^seed,h2=0x41c6ce57^seed;for(let i=0,ch;i<str.length;i++){ch=str.charCodeAt(i);h1=Math.imul(h1^ch,2654435761);h2=Math.imul(h2^ch,1597334677)}h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);h2=Math.imul(h2^(h2>>>16),2246822507)^Math.imul(h1^(h1>>>13),3266489909);return (4294967296*(2097151&h2)+(h1>>>0)).toString(16)}
-async function hashPw(salt,pw){
-  const s=salt+':'+pw;
-  try{if(window.crypto&&crypto.subtle){const h=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));return [...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,'0')).join('')}}catch(e){}
-  return 'f'+cyrb53(s)+cyrb53(s,7);
-}
-function newSalt(){const a=new Uint8Array(12);if(window.crypto&&crypto.getRandomValues)crypto.getRandomValues(a);else for(let i=0;i<12;i++)a[i]=Math.random()*256;return [...a].map(b=>b.toString(16).padStart(2,'0')).join('')}
-const accounts=()=>lsGet(ACC_KEY,{users:{}});
 const charsKey=k=>'mmorpg_chars_v2_'+k;
 const saveKeyOf=(k,id)=>'mmorpg_save_v2_'+k+'_'+id;
 const charsOf=k=>lsGet(charsKey(k),[]);
@@ -3220,7 +3243,7 @@ function renderAuth(keepUser){
   <div class="gerr" id="auErr" role="alert"></div>
   <button id="auGo" class="gbtn" type="button">${reg?'Criar conta':'Entrar'}</button>
   <button id="auMode" class="glink" type="button">${reg?'Já tenho conta: entrar':'Criar uma conta'}</button>
-  <small class="gnote">Sua conta é protegida e salva online. O progresso dos personagens ainda fica neste aparelho.</small></div>`;
+  <small class="gnote">Sua conta é protegida e o progresso dos personagens sincroniza com a nuvem — pode continuar de outro aparelho.</small></div>`;
   showGS('#gsAuth');
 }
 async function doAuth(){

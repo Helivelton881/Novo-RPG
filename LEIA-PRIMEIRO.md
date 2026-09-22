@@ -22,7 +22,11 @@ O cliente descobre o endereço do WebSocket sozinho (`wss://` ou `ws://` + o hos
 - projéteis de mago, arqueiro e druida (disparo, trajetória, impacto);
 - contador de jogadores online, heartbeat e validação básica de mensagens.
 
-Inventário, progressão, cálculo de dano e parte da IA ainda são calculados no cliente — ainda precisam migrar para o servidor antes de uma versão pública competitiva (hoje um cliente malicioso pode trapacear nesses pontos).
+Inventário, progressão, cálculo de dano e parte da IA ainda são calculados no cliente. O servidor já limita os pontos mais fáceis de explorar: dano por golpe é limitado por nível (com anti-spam por par jogador/monstro), e ao salvar o personagem na nuvem (`PUT /api/characters/:id`) o servidor reconstrói o save inteiro a partir de limites plausíveis — ouro, gemas, XP, contadores e os stats de cada item do inventário são recalculados a partir de `{type,tier}` server-side, nunca aceitos como o cliente manda. Isso não impede trapaça durante a partida em si (a lógica de combate roda no cliente), mas impede que ela persista/sincronize entre dispositivos.
+
+## Amigos e Grupo
+
+Reais, não só decorativos: `/api/friends` (listar/adicionar/remover, por usuário da conta) e `/api/party` (`POST` cria, `/join` entra com código, `/leave` sai). Status "Online" é verdadeiro — o servidor rastreia quais contas têm um WebSocket conectado agora (`accountSockets`, populado pelo `userId` que o cliente manda no `join`). A tela Social faz polling a cada 5s enquanto aberta. Grupo é efêmero (fica só em memória no servidor, como a autoridade de monstros — não sobrevive a um restart); Amigos persiste na tabela `friends` do Supabase.
 
 ## Login online (Supabase) — opcional
 
@@ -49,7 +53,7 @@ Com uma conta online, o progresso completo do personagem (nível, XP, inventári
 
 ## Supabase — schema.sql
 
-`schema.sql` cria as tabelas `users`, `sessions` e `characters` (com RLS habilitado e sem policy pública — acesso só via service role pelo servidor). `characters` guarda nível, mapa e o save completo (jsonb) por personagem.
+`schema.sql` cria as tabelas `users`, `sessions`, `characters` e `friends` (com RLS habilitado e sem policy pública — acesso só via service role pelo servidor). `characters` guarda nível, mapa e o save completo (jsonb) por personagem.
 
 ## Produção (Render)
 

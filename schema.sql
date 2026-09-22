@@ -71,3 +71,17 @@ alter table public.sessions enable row level security;
 
 create index if not exists idx_sessions_user on public.sessions(user_id);
 create index if not exists idx_sessions_expires on public.sessions(expires_at);
+
+-- Lista de amigos (server.js: /api/friends). Grupo/party e efemero e fica
+-- so em memoria no servidor (nao precisa de tabela).
+create table if not exists public.friends (
+  user_id uuid not null references public.users(id) on delete cascade,
+  friend_id uuid not null references public.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (user_id, friend_id),
+  check (user_id <> friend_id)
+);
+
+alter table public.friends enable row level security;
+
+create index if not exists idx_friends_user on public.friends(user_id);
