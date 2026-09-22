@@ -4,10 +4,15 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const { WebSocketServer, WebSocket } = require('ws');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
+const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const authAttempts = new Map();
 const clients = new Map();
 const maps = new Map();
 const ALLOWED_MAP = /^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)(?:_d)?$/;
@@ -16,6 +21,129 @@ const MIME = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset
 
 function cleanText(value, max) {
   return String(value || '').replace(/[<>\u0000-\u001f]/g, '').trim().slice(0, max);
+}
+
+function json(res, status, payload) {
+  res.writeHead(status, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});
+  res.end(JSON.stringify(payload));
+}
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 16384) { reject(new Error('BODY_TOO_LARGE')); req.destroy(); }
+    });
+    req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch { reject(new Error('INVALID_JSON')); } });
+    req.on('error', reject);
+  });
+}
+
+function authIp(req) {
+  return cleanText(String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0], 64);
+}
+
+function rateLimited(req) {
+  const now = Date.now(), key = authIp(req), recent = (authAttempts.get(key) || []).filter(t => now - t < 60000);
+  recent.push(now); authAttempts.set(key, recent);
+  return recent.length > 12;
+}
+
+function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
+function tokenHash(token) { return crypto.createHash('sha256').update(token).digest('hex'); }
+function scrypt(password, salt, keylen, options) {
+  return new Promise((resolve, reject) => crypto.scrypt(password, salt, keylen, options, (err, key) => err ? reject(err) : resolve(key)));
+}
+async function hashPassword(password) {
+  const salt = crypto.randomBytes(16), N = 16384, r = 8, p = 1;
+  const key = await scrypt(password, salt, 32, {N, r, p, maxmem: 64 * 1024 * 1024});
+  return `scrypt$${N}$${r}$${p}$${b64url(salt)}$${b64url(key)}`;
+}
+async function verifyPassword(password, encoded) {
+  if (/^\$2[aby]\$/.test(String(encoded || ''))) {
+    try { return await bcrypt.compare(password, encoded); } catch { return false; }
+  }
+  const parts = String(encoded || '').split('$');
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+  const [,n,rr,pp,salt64,key64] = parts, expected = Buffer.from(key64, 'base64url');
+  if (!expected.length) return false;
+  try {
+    const actual = await scrypt(password, Buffer.from(salt64, 'base64url'), expected.length, {N:Number(n), r:Number(rr), p:Number(pp), maxmem:64 * 1024 * 1024});
+    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+  } catch { return false; }
+}
+
+async function supabase(table, {method='GET', query='', body, prefer}={}) {
+  if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) throw new Error('SUPABASE_NOT_CONFIGURED');
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`, {
+    method,
+    headers:{apikey:SUPABASE_SECRET_KEY,Authorization:`Bearer ${SUPABASE_SECRET_KEY}`,'Content-Type':'application/json',...(prefer?{Prefer:prefer}:{})},
+    body:body === undefined ? undefined : JSON.stringify(body)
+  });
+  const text = await response.text();
+  let data = null; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!response.ok) { const err = new Error('SUPABASE_REQUEST_FAILED'); err.status=response.status; err.detail=data; throw err; }
+  return data;
+}
+
+async function createSession(userId) {
+  const token = b64url(crypto.randomBytes(32)), expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+  await supabase('sessions', {method:'POST', body:{token:tokenHash(token),user_id:userId,expires_at:expiresAt}, prefer:'return=minimal'});
+  return {token, expiresAt};
+}
+
+function bearer(req) {
+  const match = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || ''));
+  return match ? match[1] : '';
+}
+
+async function handleAuth(req, res, pathname) {
+  if (!pathname.startsWith('/api/auth/')) return false;
+  if (req.method === 'POST' && rateLimited(req)) { json(res,429,{error:'Muitas tentativas. Aguarde um minuto.'}); return true; }
+  try {
+    if (pathname === '/api/auth/register' && req.method === 'POST') {
+      const input=await readJson(req), username=String(input.username||'').trim().toLowerCase(), password=String(input.password||'');
+      if(!/^[a-z0-9_]{3,16}$/.test(username)){json(res,400,{error:'Usuário: de 3 a 16 letras, números ou _'});return true}
+      if(password.length<8||password.length>72){json(res,400,{error:'A senha precisa ter de 8 a 72 caracteres'});return true}
+      const found=await supabase('users',{query:`?select=id&username=eq.${encodeURIComponent(username)}&limit=1`});
+      if(found.length){json(res,409,{error:'Esse usuário já existe'});return true}
+      const password_hash=await hashPassword(password);
+      let rows;
+      try { rows=await supabase('users',{method:'POST',body:{username,password_hash},prefer:'return=representation'}); }
+      catch(e){if(e.status===409){json(res,409,{error:'Esse usuário já existe'});return true}throw e}
+      const session=await createSession(rows[0].id);
+      json(res,201,{user:{id:rows[0].id,name:username,key:username},...session});return true;
+    }
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
+      const input=await readJson(req), username=String(input.username||'').trim().toLowerCase(), password=String(input.password||'');
+      if(!username||!password){json(res,400,{error:'Digite o usuário e a senha'});return true}
+      const rows=await supabase('users',{query:`?select=id,username,password_hash&username=eq.${encodeURIComponent(username)}&limit=1`});
+      const user=rows[0];
+      if(!user||!(await verifyPassword(password,user.password_hash))){json(res,401,{error:'Usuário ou senha incorretos'});return true}
+      const update={last_login:new Date().toISOString()};
+      if(/^\$2[aby]\$/.test(user.password_hash))update.password_hash=await hashPassword(password);
+      await supabase('users',{method:'PATCH',query:`?id=eq.${encodeURIComponent(user.id)}`,body:update,prefer:'return=minimal'});
+      const session=await createSession(user.id);
+      json(res,200,{user:{id:user.id,name:user.username,key:user.username},...session});return true;
+    }
+    if (pathname === '/api/auth/session' && req.method === 'GET') {
+      const token=bearer(req);if(!token){json(res,401,{error:'Sessão ausente'});return true}
+      const rows=await supabase('sessions',{query:`?select=expires_at,users(id,username)&token=eq.${tokenHash(token)}&expires_at=gt.${encodeURIComponent(new Date().toISOString())}&limit=1`});
+      const row=rows[0], user=Array.isArray(row?.users)?row.users[0]:row?.users;
+      if(!user){json(res,401,{error:'Sessão expirada'});return true}
+      json(res,200,{user:{id:user.id,name:user.username,key:user.username},expiresAt:row.expires_at});return true;
+    }
+    if (pathname === '/api/auth/logout' && req.method === 'POST') {
+      const token=bearer(req);if(token)await supabase('sessions',{method:'DELETE',query:`?token=eq.${tokenHash(token)}`,prefer:'return=minimal'});
+      json(res,200,{ok:true});return true;
+    }
+    json(res,405,{error:'Método não permitido'});return true;
+  } catch (err) {
+    console.error('auth_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res,err.message==='SUPABASE_NOT_CONFIGURED'?503:500,{error:err.message==='SUPABASE_NOT_CONFIGURED'?'Login online ainda não configurado no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
 }
 
 function send(ws, payload) {
@@ -52,8 +180,9 @@ function publicPlayer(player) {
   return {id:player.id,name:player.name,cls:player.cls,map:player.map,x:player.x,y:player.y,dir:player.dir,moving:player.moving,lvl:player.lvl,atkT:player.atkT||0,atkAng:player.atkAng||0};
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  if (await handleAuth(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
   if (!file.startsWith(ROOT + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }

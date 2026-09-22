@@ -2115,7 +2115,7 @@ function scrAct(a,el){
     case 'buyportal':{const d=PORTAL_DESTS.find(x=>x.id===el.dataset.w);if(d&&!d.ok()&&d.price&&P.gold>=d.price){P.gold-=d.price;P.gunlock[d.id]=true;sfx.coin();toast(d.n+' liberado!');saveGame();renderScr()}break}
     case 'dun':{const id=el.dataset.w,cfg=MASMORRA_CFG[id];if(!cfg||!cfg.ok())break;closeScr();delete worlds[id+'_d'];travel(id+'_d');break}
     case 'switchchar':saveGame();SAVE_READY=false;location.reload();break;
-    case 'logout':saveGame();SAVE_READY=false;try{sessionStorage.removeItem('mmorpg_user')}catch(e){}location.reload();break;
+    case 'logout':saveGame();SAVE_READY=false;logoutOnline();location.reload();break;
     case 'reset':{
       if(resetArm>Date.now()){resetChar()}
       else{resetArm=Date.now()+3500;toast('Toque de novo para apagar tudo');renderScr();setTimeout(()=>{if(scrOpen==='settings')renderScr()},3600)}
@@ -3086,6 +3086,7 @@ function loadGame(){
 
 /* ================= contas, personagens e criação ================= */
 const ACC_KEY='mmorpg_accounts_v2';
+const AUTH_TOKEN_KEY='mmorpg_auth_token_v1';
 let ACC=null,CUR_CHAR=null,authMode='login',selSlot=-1,pendSlot=0,newCls='guerreiro',delArm=0,assetsReady=false;
 const lsGet=(k,d)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}};
 const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));return true}catch(e){return false}};
@@ -3110,22 +3111,33 @@ function importLegacy(key){
     localStorage.setItem('mmorpg_legacy_done',key);
   }catch(e){}
 }
+async function authRequest(url,{method='GET',body,token}={}){
+  const r=await fetch(url,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});
+  let data={};try{data=await r.json()}catch(e){}
+  if(!r.ok)throw new Error(data.error||'Nao foi possivel conectar ao servidor');
+  return data;
+}
+function saveAuth(data){try{sessionStorage.setItem(AUTH_TOKEN_KEY,data.token);sessionStorage.setItem('mmorpg_user',data.user.key)}catch(e){}}
+function logoutOnline(){
+  let token='';try{token=sessionStorage.getItem(AUTH_TOKEN_KEY)||'';sessionStorage.removeItem(AUTH_TOKEN_KEY);sessionStorage.removeItem('mmorpg_user')}catch(e){}
+  if(token)fetch('/api/auth/logout',{method:'POST',headers:{Authorization:'Bearer '+token},keepalive:true}).catch(()=>{});
+}
+async function restoreOnlineSession(){
+  let token='';try{token=sessionStorage.getItem(AUTH_TOKEN_KEY)||''}catch(e){}
+  if(!token)return null;
+  try{return (await authRequest('/api/auth/session',{token})).user}catch(e){logoutOnline();return null}
+}
 async function registerAcc(name,pw){
   name=(name||'').trim();
   if(!/^[A-Za-z0-9_]{3,16}$/.test(name))throw new Error('Usuário: de 3 a 16 letras, números ou _');
-  if((pw||'').length<6)throw new Error('A senha precisa ter pelo menos 6 caracteres');
-  const db=accounts(),key=name.toLowerCase();
-  if(db.users[key])throw new Error('Esse usuário já existe');
-  const salt=newSalt();db.users[key]={name,salt,hash:await hashPw(salt,pw),created:Date.now()};
-  if(!lsSet(ACC_KEY,db))throw new Error('Não foi possível salvar a conta neste aparelho');
-  importLegacy(key);return{name,key};
+  if((pw||'').length<8)throw new Error('A senha precisa ter pelo menos 8 caracteres');
+  const online=await authRequest('/api/auth/register',{method:'POST',body:{username:name,password:pw}});
+  saveAuth(online);importLegacy(online.user.key);return online.user;
 }
 async function loginAcc(name,pw){
   name=(name||'').trim();if(!name||!pw)throw new Error('Digite o usuário e a senha');
-  const db=accounts(),u=db.users[name.toLowerCase()];
-  if(!u)throw new Error('Usuário não encontrado');
-  if(await hashPw(u.salt,pw)!==u.hash)throw new Error('Senha incorreta');
-  return{name:u.name,key:name.toLowerCase()};
+  const online=await authRequest('/api/auth/login',{method:'POST',body:{username:name,password:pw}});
+  saveAuth(online);return online.user;
 }
 function metaTouch(){
   if(!ACC||!CUR_CHAR)return;
@@ -3166,7 +3178,7 @@ function renderAuth(keepUser){
   <div class="gerr" id="auErr" role="alert"></div>
   <button id="auGo" class="gbtn" type="button">${reg?'Criar conta':'Entrar'}</button>
   <button id="auMode" class="glink" type="button">${reg?'Já tenho conta: entrar':'Criar uma conta'}</button>
-  <small class="gnote">Contas e personagens ficam salvos neste aparelho até o modo online chegar.</small></div>`;
+  <small class="gnote">Sua conta é protegida e salva online. O progresso dos personagens ainda fica neste aparelho.</small></div>`;
   showGS('#gsAuth');
 }
 async function doAuth(){
@@ -3174,7 +3186,7 @@ async function doAuth(){
   try{
     if(authMode==='reg'){if(p!==$('#auPass2').value)throw new Error('As senhas não conferem');ACC=await registerAcc(u,p)}
     else ACC=await loginAcc(u,p);
-    try{localStorage.setItem('mmorpg_lastuser',ACC.name);sessionStorage.setItem('mmorpg_user',ACC.key)}catch(e){}
+    try{localStorage.setItem('mmorpg_lastuser',ACC.name)}catch(e){}
     selSlot=-1;showChars();
   }catch(e){err.textContent=e.message;btn.disabled=false}
 }
@@ -3206,7 +3218,7 @@ function renderChars(){
 $('#gsChars').addEventListener('click',e=>{
   const s=e.target.closest('[data-slot]');
   if(s){const i=+s.dataset.slot,c=charsOf(ACC.key).find(x=>x.slot===i);if(!c){showCreate(i)}else{selSlot=i;delArm=0;renderChars()}return}
-  if(e.target.closest('#chOut')){try{sessionStorage.removeItem('mmorpg_user')}catch(err){}ACC=null;authMode='login';renderAuth();return}
+  if(e.target.closest('#chOut')){logoutOnline();ACC=null;authMode='login';renderAuth();return}
   if(e.target.closest('#chNew')){const used=charsOf(ACC.key).map(c=>c.slot),f=[0,1,2,3].find(i=>!used.includes(i));if(f===undefined)toast('Limite de 4 personagens');else showCreate(f);return}
   if(e.target.closest('#chPlay')){const c=charsOf(ACC.key).find(x=>x.slot===selSlot);if(c)startGame(c,false);return}
   if(e.target.closest('#chDel')){
@@ -5381,8 +5393,8 @@ function frame(t){
     window.__G={buildMasmorra,MASMORRA_CFG,ensureWorld,buildSerra,buildPantano,buildTorre,buildIlhas,buildVulcao,HAZ,EPROJ,applyClass,get CLS(){return CLS},get SKILLS(){return SKILLS},PROJ,P,worlds,travel,setBarSlot,barPress,setTarget,pressAttack,get tgt(){return tgt},get auto(){return auto},openShop,closeShop,SET,castSkill,openScr,openMenu,closeScr,scrAct,renderScr,uiBusy,openInv,closeInv,giveItem,mkItem,pickup,openChest,drops,setWorld,update,draw,attack,useSlot,openDialog,advanceDlg,tone,get dlg(){return dlg},get MOBS(){return MOBS},get NPCS(){return NPCS},get W(){return W_},
       dev(cls,name){ACC={name:'dev',key:'dev'};const meta={id:'d'+Date.now().toString(36),slot:0,name:name||'Teste',cls,lvl:1,created:Date.now(),last:Date.now()};setChars('dev',[meta]);startGame(meta,true)}};
     assetsReady=true;
-    let su=null;try{su=sessionStorage.getItem('mmorpg_user')}catch(e){}
-    if(su){const u=accounts().users[su];if(u){ACC={name:u.name,key:su};selSlot=-1;showChars();return}}
+    const onlineUser=await restoreOnlineSession();
+    if(onlineUser){ACC=onlineUser;selSlot=-1;showChars();return}
     authMode='login';renderAuth();
   }catch(err){$('#gsAuth').innerHTML='<div class="gbox gfr"><h1 class="logo">MMORPG</h1><p class="tag">Erro ao carregar</p></div>';console.error(err)}
 })();

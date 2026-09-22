@@ -25,6 +25,19 @@ npm install
 npm start
 ```
 
+## Login online com Supabase
+
+Configure estas variáveis apenas no servidor/Render:
+
+```text
+SUPABASE_URL=https://SEU-PROJETO.supabase.co
+SUPABASE_SECRET_KEY=sb_secret_...
+```
+
+Também é aceito `SUPABASE_SERVICE_ROLE_KEY` para projetos que ainda usam a chave legada. Nunca coloque uma dessas chaves no `index.html` ou no GitHub.
+
+As rotas `/api/auth/register`, `/api/auth/login`, `/api/auth/session` e `/api/auth/logout` armazenam contas e sessões no Supabase. Senhas novas usam `scrypt`; hashes `bcrypt` existentes continuam válidos e são atualizados no próximo login.
+
 Abra `http://localhost:8080` em dois navegadores ou dispositivos da mesma rede.
 
 Para publicar, configure `PORT` na hospedagem e use um serviço compatível com WebSocket.
