@@ -58,7 +58,8 @@ const server = http.createServer((req, res) => {
 
   res.end('404 - Arquivo não encontrado');
 });
-});
+
+
 const wss = new WebSocketServer({ server });
 wss.on('connection', (ws) => {
   const id = 'p' + (nextId++);
