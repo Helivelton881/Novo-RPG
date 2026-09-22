@@ -55,6 +55,39 @@ function typeSlot(type) { return (type === 'sword' || type === 'bow' || type ===
 // nao sobrevive a um restart, nao precisa de tabela.
 const shopSoldByChar = new Map();
 
+// Espelha a formula de dano e o cooldown de cada skill (CLASSES/SKILL_FX em
+// index.html) pra computar o dano no servidor em vez de aceitar o numero que
+// o cliente manda. O cliente so informa QUAL skill/rank foi usada; o "quanto
+// de dano" sai sempre do calculo abaixo.
+const CLASS_DMG = {
+  guerreiro: {dmg0:11, dmgL:3.2}, druida: {dmg0:9, dmgL:2.8},
+  mago: {dmg0:13, dmgL:3.7}, arqueiro: {dmg0:10, dmgL:3},
+};
+const BASIC_CD_MS = {guerreiro:420, druida:500, mago:620, arqueiro:400};
+const SKILL_CD_MS = {spin:5000, dash:4000, warcry:18000, heal:7000, roots:9000, thorns:10000, fireball:4000, frost:7000, barrier:16000, multi:4000, evade:5000, pierce:8000};
+const CLASS_SKILLS = {
+  guerreiro: ['spin','dash','warcry'], druida: ['heal','roots','thorns'],
+  mago: ['fireball','frost','barrier'], arqueiro: ['multi','evade','pierce'],
+};
+const DAMAGE_SKILLS = new Set(['spin','dash','roots','thorns','fireball','frost','multi','pierce']);
+function skillDamageMul(id, r) {
+  switch (id) {
+    case 'spin': return 1.4 + .3 * (r - 1);
+    case 'dash': return 1.2 + .25 * (r - 1);
+    case 'roots': return .8 + .2 * (r - 1);
+    case 'thorns': return .45 + .1 * (r - 1);
+    case 'fireball': return 1.8 + .4 * (r - 1);
+    case 'frost': return 1 + .25 * (r - 1);
+    case 'multi': return .75 + .05 * (r - 1);
+    case 'pierce': return 2.2 + .4 * (r - 1);
+    default: return 0;
+  }
+}
+function clampAtk(v) { return Math.max(0, Math.min(35, Number(v) || 0)); }
+function baseDmgOf(cls, lvl) { const c = CLASS_DMG[cls] || CLASS_DMG.guerreiro; return c.dmg0 + c.dmgL * (lvl - 1); }
+function buffMulOf(p) { return 1 + ((p.buffUntil && Date.now() < p.buffUntil) ? (p.buffAtk || 0) : 0); }
+function skBaseOf(p, atk) { return (baseDmgOf(p.cls, p.lvl) + clampAtk(atk) + 2) * buffMulOf(p); }
+
 function cleanText(value, max) {
   return String(value || '').replace(/[<>\u0000-\u001f]/g, '').trim().slice(0, max);
 }
@@ -581,20 +614,47 @@ wss.on('connection', ws => {
       chooseAuthority(state);
       send(ws,{type:'map_state',map,authorityId:state.authorityId,mobs:[...state.mobs.values()]});
       broadcastMap(map,{type:'authority',map,authorityId:state.authorityId});
+    } else if (msg.type === 'cast_skill') {
+      const map=cleanText(msg.map,24);if(map!==p.map)return;
+      const id=cleanText(msg.id,16),sk=Math.max(1,Math.min(3,Math.round(Number(msg.sk))||1)),atk=clampAtk(msg.atk);
+      if(!(CLASS_SKILLS[p.cls]||[]).includes(id))return;
+      const now=Date.now();
+      p.skillCd=p.skillCd||{};
+      if(now<(p.skillCd[id]||0))return;
+      p.skillCd[id]=now+(SKILL_CD_MS[id]||1000);
+      if(id==='warcry'){p.buffUntil=now+(6+2*(sk-1))*1000;p.buffAtk=.3+.1*(sk-1)}
+      if(DAMAGE_SKILLS.has(id)){
+        p.pendingSkill=p.pendingSkill||{};
+        p.pendingSkill[id]={dmg:Math.round(skBaseOf(p,atk)*skillDamageMul(id,sk)),expiresAt:now+(id==='thorns'?4000:2000)};
+      }
     } else if (msg.type === 'mob_damage') {
       const map=cleanText(msg.map,24),state=maps.get(map);if(!state||map!==p.map)return;
       const mobId=cleanText(msg.id,48),mob=state.mobs.get(mobId);
       if(!mob||mob.dead)return;
-      // limite de dano por golpe (generoso o bastante para nunca travar jogo
-      // legitimo) + anti-spam por (jogador,monstro): bloqueia macro/cliente
-      // adulterado mandando dano gigante ou repetido rapido demais.
+      // anti-spam por (jogador,monstro): bloqueia macro/cliente adulterado
+      // batendo no mesmo alvo rapido demais.
       const now=Date.now(),guard=state.hitGuard.get(mobId);
       if(guard&&guard.playerId===p.id&&now-guard.at<80)return;
-      state.hitGuard.set(mobId,{playerId:p.id,at:now});
+      // o dano nunca vem do que o cliente manda -- o servidor recalcula a
+      // partir da skill/rank informada (basic ataca com formula+cooldown
+      // por classe; skills usam o valor computado no cast_skill acima).
+      const skill=cleanText(msg.skill,16)||'basic';
+      let dmg=0;
+      if(skill==='basic'){
+        p.recentBasic=(p.recentBasic||[]).filter(t=>now-t<(BASIC_CD_MS[p.cls]||420));
+        if(p.recentBasic.length>=6)return;
+        p.recentBasic.push(now);
+        dmg=Math.round((baseDmgOf(p.cls,p.lvl)+clampAtk(msg.atk))*buffMulOf(p))+Math.floor(Math.random()*4);
+      } else if(DAMAGE_SKILLS.has(skill)){
+        const pend=p.pendingSkill&&p.pendingSkill[skill];
+        if(!pend||now>pend.expiresAt)return;
+        dmg=msg.splash?Math.round(pend.dmg*.6):pend.dmg;
+      } else return;
       const lvl=Math.max(1,Math.min(99,Number(p.lvl)||1)),maxHit=Math.min(6500,50+lvl*60);
-      const damage=Math.max(0,Math.min(maxHit,Number(msg.damage)||0));
-      if(!damage)return;
-      mob.hp=Math.max(0,mob.hp-damage);
+      dmg=Math.max(0,Math.min(maxHit,dmg));
+      if(!dmg)return;
+      state.hitGuard.set(mobId,{playerId:p.id,at:now});
+      mob.hp=Math.max(0,mob.hp-dmg);
       if(mob.hp<=0){mob.dead=true;mob.respawnAt=Date.now()+(mob.boss?60000:30000)}
       broadcastMap(map,{type:'mob_state',map,mob,killerId:mob.dead?p.id:null});
     } else if (msg.type === 'mob_snapshot') {

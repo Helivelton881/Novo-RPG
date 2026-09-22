@@ -1287,7 +1287,7 @@ function doHits(){
     let dmg=Math.round((baseDmg()+P.atk)*buffMul())+Math.floor(Math.random()*4);
     const sMul=shieldMult(s);if(sMul<1)dmg=Math.max(1,Math.round(dmg*sMul));
     dmg=absorbHit(s,dmg);if(dmg<=0){floater(s.x,s.y-(mobDims(s).h+6),'Absorvido','#9ad0ff');s.flash=.1;any=true;continue}
-    const onlineHit=netMobDamage(s,dmg);if(!onlineHit)s.hp-=dmg;s.flash=.16;s.bar=4;any=true;
+    const onlineHit=netMobDamage(s,dmg,'basic');if(!onlineHit)s.hp-=dmg;s.flash=.16;s.bar=4;any=true;
     const n=d||1,kb=s.boss?.3:(s.type!=='slime'?.75:1);
     if(s.state!=='dash'){s.kx=dx/n*230*kb;s.ky=dy/n*230*kb}
     if(s.type!=='slime'){
@@ -1616,10 +1616,10 @@ function makeSkillIcon(id){
 const skURL={};
 function skIconURL(id){return skURL[id]||(skURL[id]=makeSkillIcon(id).toDataURL())}
 function absorbHit(m,dmg){if(!(m.absorb>0))return dmg;const a=Math.min(m.absorb,dmg);m.absorb-=a;if(m.absorb<=0){m.absorb=0;toast('A barreira arcana foi quebrada!');sfx.boom()}return dmg-a}
-function skillHit(s,dmg,kb,col){
+function skillHit(s,dmg,kb,col,skill,splash){
   const sMul=shieldMult(s);if(sMul<1){dmg=Math.max(1,Math.round(dmg*sMul));col='#9ad0ff'}
   dmg=absorbHit(s,dmg);if(dmg<=0){floater(s.x,s.y-(mobDims(s).h+6),'Absorvido','#9ad0ff');s.flash=.1;return}
-  const onlineHit=netMobDamage(s,dmg);if(!onlineHit)s.hp-=dmg;s.flash=.16;s.bar=4;
+  const onlineHit=netMobDamage(s,dmg,skill,splash);if(!onlineHit)s.hp-=dmg;s.flash=.16;s.bar=4;
   const dx=s.x-P.x,dy=s.y-P.y,n=Math.hypot(dx,dy)||1,k=kb*(s.boss?.3:(s.type!=='slime'?.75:1));
   if(s.state!=='dash'){s.kx=dx/n*k;s.ky=dy/n*k}
   if(s.type!=='slime'){if(s.state==='idle'||s.state==='return')aggro(s);else alertPack(s);if(s.state==='wind'&&!s.boss&&s.hp>0){s.state='chase';s.cd=.9}}
@@ -1637,7 +1637,7 @@ function castPos(){
 }
 function fireProj(a,o){
   const sp=o.speed||400;
-  const p={x:P.x+Math.cos(a)*10,y:P.y-24+Math.sin(a)*6,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:o.life||.6,kind:o.kind,dmg:o.dmg,pierce:!!o.pierce,hit:new Set(),splash:o.splash||0,kb:o.kb||120,basic:!!o.basic,r:o.r||8};
+  const p={x:P.x+Math.cos(a)*10,y:P.y-24+Math.sin(a)*6,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:o.life||.6,kind:o.kind,dmg:o.dmg,pierce:!!o.pierce,hit:new Set(),splash:o.splash||0,kb:o.kb||120,basic:!!o.basic,skill:o.skill||null,r:o.r||8};
   PROJ.push(p);netProjectile(p);
 }
 function basicShot(a){
@@ -1646,31 +1646,31 @@ function basicShot(a){
 }
 function explode(p,skip){
   EFX.push({kind:'boom',x:p.x,y:p.y+22,t:0,life:.35,r:70,col:'255,140,40'});sfx.boom();
-  for(const m of MOBS){if(m.dead||m===skip)continue;if(Math.hypot(m.x-p.x,(m.y-10)-p.y)<70)skillHit(m,Math.round(p.dmg*.6),120,'#ffb060')}
+  for(const m of MOBS){if(m.dead||m===skip)continue;if(Math.hypot(m.x-p.x,(m.y-10)-p.y)<70)skillHit(m,Math.round(p.dmg*.6),120,'#ffb060','fireball',true)}
 }
 /* ---- efeitos de cada habilidade ---- */
 const SKILL_FX={
   spin(s,r){
     sfx.swing();EFX.push({kind:'spin',x:P.x,y:P.y,t:0,life:.38});let any=false;
-    for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-P.x,(m.y-8)-(P.y-22))<=(m.boss?110:92)){skillHit(m,Math.round(skBase()*(1.4+.3*(r-1))),300);any=true}}
+    for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-P.x,(m.y-8)-(P.y-22))<=(m.boss?110:92)){skillHit(m,Math.round(skBase()*(1.4+.3*(r-1))),300,undefined,'spin');any=true}}
     if(any)sfx.hit();
   },
   dash(s,r){const v=dirVec[P.dir];P.dashT=.16;P.dashV=[v[0]*700,v[1]*700];P.dashHit=new Set();P.dashNoHit=false;P.dashMul=1.2+.25*(r-1);P.inv=Math.max(P.inv,.35);sfx.dash()},
   warcry(s,r){P.wc={until:time+6+2*(r-1),atk:.3+.1*(r-1),def:4+2*(r-1)};EFX.push({kind:'aura',x:P.x,y:P.y,t:0,life:.7,col:'255,90,60'});sfx.alert()},
   multi(s,r){
     const n=3+(r-1),base=aimAngle(),dmg=Math.round(skBase()*(.75+.05*(r-1)));
-    for(let i=0;i<n;i++)fireProj(base+(i-(n-1)/2)*.22,{kind:'arrow',dmg,speed:480,life:.62,kb:110,r:6});
+    for(let i=0;i<n;i++)fireProj(base+(i-(n-1)/2)*.22,{kind:'arrow',dmg,speed:480,life:.62,kb:110,r:6,skill:'multi'});
     sfx.shoot();
   },
   evade(s,r){
     let a=aimAngle()+Math.PI;if(tgt&&!tgt.dead)a=Math.atan2(P.y-tgt.y,P.x-tgt.x);
     const dist=110+15*(r-1);P.dashT=.16;P.dashV=[Math.cos(a)*dist/.16,Math.sin(a)*dist/.16];P.dashHit=new Set();P.dashNoHit=true;P.inv=Math.max(P.inv,.5);sfx.dash();
   },
-  pierce(s,r){fireProj(aimAngle(),{kind:'arrow',dmg:Math.round(skBase()*(2.2+.4*(r-1))),speed:560,life:.85,pierce:true,kb:200,r:9});sfx.shoot()},
-  fireball(s,r){fireProj(aimAngle(),{kind:'fire',dmg:Math.round(skBase()*(1.8+.4*(r-1))),speed:360,life:.9,splash:1,kb:160,r:9});sfx.cast()},
+  pierce(s,r){fireProj(aimAngle(),{kind:'arrow',dmg:Math.round(skBase()*(2.2+.4*(r-1))),speed:560,life:.85,pierce:true,kb:200,r:9,skill:'pierce'});sfx.shoot()},
+  fireball(s,r){fireProj(aimAngle(),{kind:'fire',dmg:Math.round(skBase()*(1.8+.4*(r-1))),speed:360,life:.9,splash:1,kb:160,r:9,skill:'fireball'});sfx.cast()},
   frost(s,r){
     EFX.push({kind:'frost',x:P.x,y:P.y,t:0,life:.5});sfx.frost();
-    for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-P.x,m.y-P.y)<95+(m.boss?20:0)){skillHit(m,Math.round(skBase()*(1+.25*(r-1))),120,'#bfe9ff');m.slow=3+(r-1)}}
+    for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-P.x,m.y-P.y)<95+(m.boss?20:0)){skillHit(m,Math.round(skBase()*(1+.25*(r-1))),120,'#bfe9ff','frost');m.slow=3+(r-1)}}
   },
   barrier(s,r){P.shield=barrierAmt(r);P.shieldT=time+8;EFX.push({kind:'aura',x:P.x,y:P.y,t:0,life:.6,col:'110,170,255'});sfx.cast()},
   heal(s,r){
@@ -1679,7 +1679,7 @@ const SKILL_FX={
   },
   roots(s,r){
     const c=castPos();EFX.push({kind:'roots',x:c.x,y:c.y,t:0,life:.6});sfx.cast();
-    for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-c.x,m.y-c.y)<85){skillHit(m,Math.round(skBase()*(.8+.2*(r-1))),20,'#9dff8a');m.root=2+.5*(r-1)}}
+    for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-c.x,m.y-c.y)<85){skillHit(m,Math.round(skBase()*(.8+.2*(r-1))),20,'#9dff8a','roots');m.root=2+.5*(r-1)}}
   },
   thorns(s,r){const c=castPos();ZONES.push({x:c.x,y:c.y,r:90,t:0,life:3,acc:.3,tick:.6,mult:.45+.1*(r-1)});sfx.cast()}
 };
@@ -1688,9 +1688,11 @@ function castSkill(id){
   const s=SKILLS.find(x=>x.id===id);if(!s||P.lvl<s.req||P.scd[id]>0)return;
   if(P.mp<s.cost){toast('Mana insuficiente');return}
   const r=P.sk[id]||1;
+  netCastSkill(id,r);
   if(SKILL_FX[id](s,r)===false)return;
   P.mp-=s.cost;P.scd[id]=s.cd;hud();
 }
+function netCastSkill(id,r){if(NET&&NET.readyState===1)NET.send(JSON.stringify({type:'cast_skill',map:W_?W_.name:'vila',id,sk:r,atk:P.atk}))}
 function skillUpdate(dt){
   if(P.bleed){const b=P.bleed;b.t-=dt;b.k=(b.k||0)+dt;if(b.k>=1){b.k-=1;if(!P.dead){P.hp=Math.max(1,P.hp-b.dmg);P.calm=0;floater(P.x,P.y-70,'Sangrando -'+b.dmg,'#d63a3a')}}if(b.t<=0||P.dead)P.bleed=null}
   if(P.burn){const b=P.burn;b.t-=dt;b.k=(b.k||0)+dt;if(b.k>=.5){b.k-=.5;if(!P.dead){P.hp=Math.max(1,P.hp-b.dmg);P.calm=0;floater(P.x,P.y-70,'Queimando -'+b.dmg,'#ff8a3c')}}if(b.t<=0||P.dead)P.burn=null}
@@ -1705,20 +1707,20 @@ function skillUpdate(dt){
     if(!blocked(P.x+mx,P.y,10,10)&&!npcBlock(P.x+mx,P.y))P.x+=mx;
     if(!blocked(P.x,P.y+my,10,10)&&!npcBlock(P.x,P.y+my))P.y+=my;
     P.inv=Math.max(P.inv,.2);EFX.push({kind:'ghost',x:P.x,y:P.y,dir:P.dir,t:0,life:.25});
-    if(!P.dashNoHit)for(const m of MOBS){if(m.dead||P.dashHit.has(m))continue;if(Math.hypot(m.x-P.x,m.y-P.y)<52){P.dashHit.add(m);skillHit(m,Math.round(skBase()*(P.dashMul||1.2)),200);sfx.hit()}}
+    if(!P.dashNoHit)for(const m of MOBS){if(m.dead||P.dashHit.has(m))continue;if(Math.hypot(m.x-P.x,m.y-P.y)<52){P.dashHit.add(m);skillHit(m,Math.round(skBase()*(P.dashMul||1.2)),200,undefined,'dash');sfx.hit()}}
   }
   for(let i=PROJ.length-1;i>=0;i--){
     const p=PROJ[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;let done=p.life<=0;
     if(!done)for(const m of MOBS){
       if(m.dead||p.hit.has(m))continue;const dm=mobDims(m);
-      if(Math.hypot(m.x-p.x,(m.y-(m.hov||0)-dm.h*.3)-p.y)<dm.w*.38+p.r){p.hit.add(m);skillHit(m,p.dmg,p.kb,p.basic?'#fff':'#ffe27a');sfx.hit();if(p.splash)explode(p,m);if(!p.pierce){done=true;break}}
+      if(Math.hypot(m.x-p.x,(m.y-(m.hov||0)-dm.h*.3)-p.y)<dm.w*.38+p.r){p.hit.add(m);skillHit(m,p.dmg,p.kb,p.basic?'#fff':'#ffe27a',p.basic?'basic':p.skill);sfx.hit();if(p.splash)explode(p,m);if(!p.pierce){done=true;break}}
     }
     if(done){if(p.splash&&p.life<=0&&!p.hit.size)explode(p,null);netProjectileEnd(p);PROJ.splice(i,1)}
   }
   for(let i=RPROJ.length-1;i>=0;i--){const p=RPROJ[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;if(p.life<=0)RPROJ.splice(i,1)}
   for(let i=ZONES.length-1;i>=0;i--){
     const z=ZONES[i];z.t+=dt;z.acc+=dt;
-    if(z.acc>=z.tick){z.acc-=z.tick;for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-z.x,m.y-z.y)<z.r+8)skillHit(m,Math.round(skBase()*z.mult),30,'#9dff8a')}}
+    if(z.acc>=z.tick){z.acc-=z.tick;for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-z.x,m.y-z.y)<z.r+8)skillHit(m,Math.round(skBase()*z.mult),30,'#9dff8a','thorns')}}
     if(z.t>z.life)ZONES.splice(i,1);
   }
 }
@@ -2585,7 +2587,7 @@ function netUpdate(dt){
   netSendT-=dt;if(netSendT<=0){netSendT=.09;NET.send(JSON.stringify({type:'state',map:W_?W_.name:'vila',x:P.x,y:P.y,dir:P.dir,moving:P.moving,lvl:P.lvl,atkT:Math.max(0,P.atkT||0),atkAng:P.atkAng||0}));if(W_&&NET_MAP!==W_.name)netJoinMap()}
   netMobT-=dt;if(netMobT<=0&&NET_AUTH===NET_ID&&W_){netMobT=.2;NET.send(JSON.stringify({type:'mob_snapshot',map:W_.name,mobs:MOBS.filter(m=>!m.dead&&m.netId).map(m=>({id:m.netId,x:m.x,y:m.y,state:m.state}))}))}
 }
-function netMobDamage(m,damage){if(NET&&NET.readyState===1&&m.netId){NET.send(JSON.stringify({type:'mob_damage',map:W_.name,id:m.netId,damage}));return true}return false}
+function netMobDamage(m,damage,skill,splash){if(NET&&NET.readyState===1&&m.netId){NET.send(JSON.stringify({type:'mob_damage',map:W_.name,id:m.netId,skill:skill||'basic',atk:P.atk,splash:!!splash}));return true}return false}
 function netProjectile(p){if(!NET||NET.readyState!==1||!W_)return;p.nid=NET_ID+':p'+(++netProjectileSeq);NET.send(JSON.stringify({type:'projectile',map:W_.name,id:p.nid,kind:p.kind,x:p.x,y:p.y,vx:p.vx,vy:p.vy,life:p.life,r:p.r,pierce:p.pierce}))}
 function netProjectileEnd(p){if(NET&&NET.readyState===1&&p.nid)NET.send(JSON.stringify({type:'projectile_end',map:W_.name,id:p.nid,x:p.x,y:p.y,boom:!!p.splash}))}
 function netLockMobs(){if(!NET_ID)return;for(const m of MOBS){if(m.netHp!=null)m.hp=m.netHp;if(m.netDead)m.dead=true;if(NET_AUTH!==NET_ID&&!m.dead&&Number.isFinite(m.netX)){m.x=m.netX;m.y=m.netY;if(m.netState)m.state=m.netState}}}

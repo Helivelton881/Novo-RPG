@@ -22,7 +22,13 @@ O cliente descobre o endereço do WebSocket sozinho (`wss://` ou `ws://` + o hos
 - projéteis de mago, arqueiro e druida (disparo, trajetória, impacto);
 - contador de jogadores online, heartbeat e validação básica de mensagens.
 
-Inventário, progressão, cálculo de dano e parte da IA ainda são calculados no cliente. O servidor já limita os pontos mais fáceis de explorar: dano por golpe é limitado por nível (com anti-spam por par jogador/monstro), e ao salvar o personagem na nuvem (`PUT /api/characters/:id`) o servidor reconstrói o save inteiro a partir de limites plausíveis — ouro, gemas, XP, contadores e os stats de cada item do inventário são recalculados a partir de `{type,tier}` server-side, nunca aceitos como o cliente manda. Isso não impede trapaça durante a partida em si (a lógica de combate roda no cliente), mas impede que ela persista/sincronize entre dispositivos.
+Inventário, progressão e parte da IA ainda são calculados no cliente. O dano por golpe/skill **não é mais** — o cliente só informa qual skill (ou "basic") e a própria classe/nível/ataque; o servidor recalcula o valor exato e é ele quem decide quanto HP o monstro perde. Ao salvar o personagem na nuvem (`PUT /api/characters/:id`) o servidor também reconstrói o save inteiro a partir de limites plausíveis — ouro, gemas, XP, contadores e os stats de cada item do inventário são recalculados a partir de `{type,tier}` server-side, nunca aceitos como o cliente manda.
+
+## Dano exato por skill/cooldown (server-autoritativo)
+
+O cliente manda `cast_skill` (`id`, `sk`=rank, `atk`) toda vez que usa uma habilidade — o servidor confere se ela pertence à classe do jogador, se o cooldown real já passou (`SKILL_CD_MS`, um mapa por skill, espelhando `SKILLS`/`CLASSES` do cliente) e, se passou, calcula o dano exato com a mesma fórmula do cliente (`skBase()*multiplicador do rank`, com `atk` limitado a um teto genérico de 35 — não dá pra alegar um ataque maior que o de qualquer equipamento real) e guarda esse valor como "pendente" por alguns segundos. Cada `mob_damage` que referencia aquela skill só aplica dano se existir um valor pendente válido — nunca aceita um número que o cliente mande diretamente. Ataques básicos são calculados na hora (sem cast prévio), com limite de ~6 golpes por janela de velocidade de ataque da classe, além do limite de 80ms por par jogador/monstro que já existia.
+
+**O que isso NÃO cobre:** o servidor ainda não sabe onde os monstros realmente estão (isso é a Fase C, ainda não feita) — então "o monstro estava mesmo ao alcance" continua confiando no cliente. O que passou a ser impossível é reportar um dano maior do que a fórmula real permite, ou usar uma skill sem respeitar o cooldown dela.
 
 ## Loja/economia server-autoritativa
 
