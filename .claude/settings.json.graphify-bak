@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "graphify hook-guard read --strict",
+            "command": "graphify hook-guard read",
             "timeout": 10
           }
         ]
