@@ -1659,7 +1659,8 @@ function castPos(){
 }
 function fireProj(a,o){
   const sp=o.speed||400;
-  PROJ.push({x:P.x+Math.cos(a)*10,y:P.y-24+Math.sin(a)*6,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:o.life||.6,kind:o.kind,dmg:o.dmg,pierce:!!o.pierce,hit:new Set(),splash:o.splash||0,kb:o.kb||120,basic:!!o.basic,r:o.r||8});
+  const p={x:P.x+Math.cos(a)*10,y:P.y-24+Math.sin(a)*6,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:o.life||.6,kind:o.kind,dmg:o.dmg,pierce:!!o.pierce,hit:new Set(),splash:o.splash||0,kb:o.kb||120,basic:!!o.basic,r:o.r||8};
+  PROJ.push(p);netProjectile(p);
 }
 function basicShot(a){
   const dmg=Math.round((baseDmg()+P.atk)*buffMul())+Math.floor(Math.random()*4),sp=CLS.proj==='arrow'?520:400;
@@ -1734,8 +1735,9 @@ function skillUpdate(dt){
       if(m.dead||p.hit.has(m))continue;const dm=mobDims(m);
       if(Math.hypot(m.x-p.x,(m.y-(m.hov||0)-dm.h*.3)-p.y)<dm.w*.38+p.r){p.hit.add(m);skillHit(m,p.dmg,p.kb,p.basic?'#fff':'#ffe27a');sfx.hit();if(p.splash)explode(p,m);if(!p.pierce){done=true;break}}
     }
-    if(done){if(p.splash&&p.life<=0&&!p.hit.size)explode(p,null);PROJ.splice(i,1)}
+    if(done){if(p.splash&&p.life<=0&&!p.hit.size)explode(p,null);netProjectileEnd(p);PROJ.splice(i,1)}
   }
+  for(let i=RPROJ.length-1;i>=0;i--){const p=RPROJ[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;if(p.life<=0)RPROJ.splice(i,1)}
   for(let i=ZONES.length-1;i>=0;i--){
     const z=ZONES[i];z.t+=dt;z.acc+=dt;
     if(z.acc>=z.tick){z.acc-=z.tick;for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-z.x,m.y-z.y)<z.r+8)skillHit(m,Math.round(skBase()*z.mult),30,'#9dff8a')}}
@@ -1784,7 +1786,7 @@ function drawEfx(){
       ctx.strokeStyle='rgba('+e.col+','+(1-k)+')';ctx.lineWidth=3;ctx.beginPath();ctx.ellipse(e.x,e.y-20,18+k*30,26+k*30,0,0,6.29);ctx.stroke();
     }
   }
-  for(const p of PROJ){
+  for(const p of PROJ.concat(RPROJ)){
     const a=Math.atan2(p.vy,p.vx);ctx.save();ctx.translate(Math.round(p.x),Math.round(p.y));ctx.rotate(a);
     if(p.kind==='arrow'){
       if(p.pierce){ctx.fillStyle='rgba(154,240,255,.55)';ctx.fillRect(-22,-3,34,6)}
@@ -2526,11 +2528,13 @@ $('#tX').addEventListener('click',clearTarget);
 const keys={};let started=false;
 const stage=$('#stage'),ctx=stage.getContext('2d');
 const REMOTE=new Map();
+const RPROJ=[];
 let NET=null,NET_ID=null,NET_AUTH=null,NET_MAP='',netSendT=0,netMobT=0,netRetry=0;
+let netProjectileSeq=0;
 function netLabel(text,on){const e=$('#net');if(!e)return;e.textContent=text;e.classList.toggle('online',!!on);e.classList.toggle('offline',!on)}
 function netMobById(id){return MOBS.find(m=>m.netId===id)}
 function netJoinMap(){
-  if(!NET||NET.readyState!==1||!W_)return;NET_MAP=W_.name;
+  if(!NET||NET.readyState!==1||!W_)return;NET_MAP=W_.name;RPROJ.length=0;
   const mobs=MOBS.map((m,i)=>{m.netId=NET_MAP+':'+i;return{id:m.netId,maxhp:m.maxhp,x:m.sx??m.x,y:m.sy??m.y,boss:!!m.boss}});
   NET.send(JSON.stringify({type:'map_join',map:NET_MAP,mobs}));
 }
@@ -2554,6 +2558,8 @@ function netConnect(){
     else if(m.type==='authority'&&m.map===W_.name)NET_AUTH=m.authorityId;
     else if(m.type==='mob_state'&&m.map===W_.name)netApplyMob(m.mob,m.killerId);
     else if(m.type==='mob_snapshot'&&m.map===W_.name)for(const u of m.mobs||[]){const x=netMobById(u.id);if(x){x.netX=Number(u.x);x.netY=Number(u.y);x.netState=u.state||x.state}}
+    else if(m.type==='projectile'&&m.map===W_.name&&m.ownerId!==NET_ID){const p=m.projectile;if(p&&!RPROJ.some(x=>x.id===p.id))RPROJ.push(Object.assign({remote:true},p))}
+    else if(m.type==='projectile_end'&&m.map===W_.name&&m.ownerId!==NET_ID){const i=RPROJ.findIndex(x=>x.id===m.id);if(i>=0)RPROJ.splice(i,1);if(m.boom)EFX.push({kind:'boom',x:m.x,y:m.y+22,t:0,life:.35,r:70,col:'255,140,40'})}
     else if(m.type==='chat'){chatAdd(m.from,m.text);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.from+': '+m.text)}
   };
   NET.onclose=()=>{NET_ID=null;NET_AUTH=null;NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};
@@ -2565,6 +2571,8 @@ function netUpdate(dt){
   netMobT-=dt;if(netMobT<=0&&NET_AUTH===NET_ID&&W_){netMobT=.2;NET.send(JSON.stringify({type:'mob_snapshot',map:W_.name,mobs:MOBS.filter(m=>!m.dead&&m.netId).map(m=>({id:m.netId,x:m.x,y:m.y,state:m.state}))}))}
 }
 function netMobDamage(m,damage){if(NET&&NET.readyState===1&&m.netId){NET.send(JSON.stringify({type:'mob_damage',map:W_.name,id:m.netId,damage}));return true}return false}
+function netProjectile(p){if(!NET||NET.readyState!==1||!W_)return;p.nid=NET_ID+':p'+(++netProjectileSeq);NET.send(JSON.stringify({type:'projectile',map:W_.name,id:p.nid,kind:p.kind,x:p.x,y:p.y,vx:p.vx,vy:p.vy,life:p.life,r:p.r,pierce:p.pierce}))}
+function netProjectileEnd(p){if(NET&&NET.readyState===1&&p.nid)NET.send(JSON.stringify({type:'projectile_end',map:W_.name,id:p.nid,x:p.x,y:p.y,boom:!!p.splash}))}
 function netLockMobs(){if(!NET_ID)return;for(const m of MOBS){if(m.netHp!=null)m.hp=m.netHp;if(m.netDead)m.dead=true;if(NET_AUTH!==NET_ID&&!m.dead&&Number.isFinite(m.netX)){m.x=m.netX;m.y=m.netY;if(m.netState)m.state=m.netState}}}
 function netChat(text){if(NET&&NET.readyState===1){NET.send(JSON.stringify({type:'chat',text}));return true}return false}
 addEventListener('keydown',e=>{
