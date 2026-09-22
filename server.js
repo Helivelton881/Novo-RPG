@@ -27,10 +27,37 @@ function leaveAll(id, zone) {
   if (room && room.delete(id)) broadcast(zone, { t: 'leave', id }, id);
 }
 let nextId = 1;
+const fs = require('fs');
+const path = require('path');
+
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('mmorpg realtime server (local) ok — jogadores online: ' +
-    [...rooms.values()].reduce((n, r) => n + r.size, 0));
+
+  if (req.url === '/' || req.url === '/index.html') {
+    const filePath = path.join(__dirname, 'index.html');
+
+    fs.readFile(filePath, (err, data) => {
+      if (err) {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Erro ao carregar o jogo.');
+        return;
+      }
+
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8'
+      });
+
+      res.end(data);
+    });
+
+    return;
+  }
+
+  res.writeHead(404, {
+    'Content-Type': 'text/plain; charset=utf-8'
+  });
+
+  res.end('404 - Arquivo não encontrado');
+});
 });
 const wss = new WebSocketServer({ server });
 wss.on('connection', (ws) => {
