@@ -1,16 +1,17 @@
 {
-  "name": "mmorpg-realtime-server",
-  "version": "1.0.0",
+  "name": "mmorpg-vila-inicial-online",
+  "version": "0.1.0",
   "private": true,
-  "description": "Servidor de tempo real (posição e chat) do MMORPG — roda local ou no Render",
-  "main": "server.js",
+  "description": "MVP multiplayer da Vila Inicial",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "bcryptjs": "3.0.2",
+    "ws": "^8.18.3"
   }
 }
