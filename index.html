@@ -1219,29 +1219,6 @@ const NPC_SCRIPT={
     if(P.quest===29)return{lines:['O Senhor das Chamas fica na cratera, a nordeste. Fuja das ondas de lava e dos círculos de meteoro, e cuidado quando ele ficar furioso.']};
     return{lines:['Você derrotou o Senhor das Chamas! O reino está em paz... por enquanto. Novas aventuras aguardam no horizonte.']};
   },
-  mercador(){
-    const buy=(k,cost,msg)=>()=>{if(P.gold<cost)return 'Suas moedas não bastam, amigo.';P.gold-=cost;P[k]++;sfx.coin();return msg};
-    const gear=(type,tier,cost)=>()=>{const slot=GEAR[type].slot;if(P.gold<cost)return 'Suas moedas não bastam, amigo.';if(P.bag.length>=BAG_MAX&&P.eq[slot])return 'Sua mochila está cheia.';P.gold-=cost;const it=mkItem(type,tier);giveItem(it);return 'Levou: '+it.n+'. Boa escolha!'};
-    const main=()=>({lines:['Boas-vindas! Para vender equipamentos, abra a mochila (I) perto de mim.'],choices:[
-      {t:'Poção de vida (10)',do:buy('pv',10,'Uma poção de vida, fresquinha!')},
-      {t:'Poção de mana (10)',do:buy('pa',10,'Uma poção de mana!')},
-      {t:'Maçã (5)',do:buy('ap',5,'Uma maçã crocante.')},
-      {t:'Pergaminho de Retorno (30)',do:buy('scr',30,'Leve sempre um para voltar à vila.')},
-      {t:'Equipamentos',do:()=>gearMenu()},
-      {t:'Vender gema (25)',do(){if(P.gem<=0)return 'Você não tem gemas.';P.gem--;P.gold+=25;sfx.coin();return 'Que gema linda! Aqui estão 25 moedas.'}},
-      {t:'Sair',do(){return null}}]});
-    const gearMenu=()=>({lines:['Equipamentos de primeira! Tudo testado.'],choices:[
-      {t:'Escudo de Madeira (25)',do:gear('shield',1,25)},
-      {t:'Gibão de Couro (30)',do:gear('armor',1,30)},
-      {t:'Espada de Ferro (60)',do:gear('sword',2,60)},
-      {t:'Couraça Reforçada (70)',do:gear('armor',2,70)},
-      {t:'Capuz de Couro (25)',do:gear('helmet',1,25)},
-      {t:'Capa de Viagem (20)',do:gear('cape',1,20)},
-      {t:'Botas de Couro (25)',do:gear('boots',1,25)},
-      {t:'Amuleto Simples (40)',do:gear('jewel',1,40)},
-      {t:'Voltar',do:()=>main()}]});
-    return main();
-  },
   guarda(){
     if(P.quest<3)return{lines:['Fique de olho: os slimes da planície mordem!','Use a espada com o botão de ataque. Quanto mais slimes você derrota, mais forte você fica.']};
     if(P.quest>=27)return{lines:['O vulcão é implacável: os rios de lava não podem ser atravessados, e os gêiseres brilham antes de explodir.','O fogo deixa queimando aos poucos. Poção, maçã ou cura apagam as chamas. O Esqueleto Calcinado ainda bloqueia golpes de frente.']};
@@ -1457,7 +1434,7 @@ function refreshEquipIcons(){
 }
 function equipFromBag(i){const it=P.bag[i];if(!it)return;if(it.req&&P.lvl<it.req){toast('Requer nível '+it.req);return}const slot=GEAR[it.type].slot,old=P.eq[slot];P.bag.splice(i,1);if(old)P.bag.push(old);P.eq[slot]=it;sfx.coin();afterEquip()}
 function unequipSlot(slot){if(!P.eq[slot])return;if(P.bag.length>=BAG_MAX){toast('Mochila cheia');return}P.bag.push(P.eq[slot]);P.eq[slot]=null;sfx.coin();afterEquip()}
-function sellGear(i){const it=P.bag[i];if(!it)return;P.gold+=SELL[it.tier];P.bag.splice(i,1);toast('Vendeu '+it.n+' por '+SELL[it.tier]+' moedas');sfx.coin();saveGame();hud();refreshWins()}
+async function sellGear(i){const it=P.bag[i];if(!it)return;const n=it.n,price=SELL[it.tier];const res=await shopTransact('sell_item',{bagIndex:i});if(!res.ok){toast(res.error);return}toast('Vendeu '+n+' por '+price+' moedas');sfx.coin();refreshWins()}
 function selItem(s){if(!s)return null;return s.k==='eq'?P.eq[s.slot]:s.k==='bag'?P.bag[s.i]:null}
 function itemStatsHtml(it,equipped,noValue){
   const cur=P.eq[GEAR[it.type].slot],cmp=!equipped;
@@ -1513,7 +1490,7 @@ function bagAct(act){
   if(act==='sell'){
     if(!nearMerchant()){toast('Chegue perto do mercador');return}
     if(s.k==='bag')sellGear(s.i);
-    else if(s.key==='gem'&&P.gem>0){P.gem--;P.gold+=25;toast('Vendeu 1 gema por 25 moedas');sfx.coin();saveGame();hud()}
+    else if(s.key==='gem'&&P.gem>0)shopTransact('sell_gem',{qty:1}).then(res=>{if(!res.ok){toast(res.error);return}toast('Vendeu 1 gema por 25 moedas');sfx.coin();renderInv()});
     invSel=null;renderInv();return;
   }
   if(act==='disc'){
@@ -2124,8 +2101,11 @@ function scrAct(a,el){
     case 'cast':castSkill(el.dataset.id);renderScr();break;
     case 'skreset':{
       if(Object.values(P.sk).every(v=>v<=1)){toast('Nenhum ponto para redistribuir');break}
-      if(skResetArm>Date.now()){if(P.gold<30){toast('Você precisa de 30 moedas');skResetArm=0;break}P.gold-=30;P.sk={spin:1,dash:1,heal:1};skResetArm=0;sfx.level();toast('Pontos redistribuídos (30 moedas)');saveGame();hud();renderScr()}
-      else{skResetArm=Date.now()+3500;toast('Toque de novo para redistribuir (30 moedas)')}
+      if(skResetArm>Date.now()){
+        if(P.gold<30){toast('Você precisa de 30 moedas');skResetArm=0;break}
+        skResetArm=0;
+        shopTransact('skill_reset',{}).then(res=>{if(!res.ok){toast(res.error);return}sfx.level();toast('Pontos redistribuídos (30 moedas)');renderScr()});
+      }else{skResetArm=Date.now()+3500;toast('Toque de novo para redistribuir (30 moedas)')}
       break}
     case 'rename':{const n=($('#nameIn').value||'').trim().slice(0,14);if(!n){toast('Digite um nome');return}P.name=n;saveGame();toast('Nome salvo');renderScr();break}
     case 'up':{const id=el.dataset.id;if(skillPoints()>0&&P.sk[id]<3){P.sk[id]++;sfx.level();saveGame();toast('Habilidade melhorada!');renderScr()}break}
@@ -2144,7 +2124,7 @@ function scrAct(a,el){
     case 'save':saveGame();toast('Progresso salvo');break;
     case 'full':{const d=document,e=d.documentElement,on=d.fullscreenElement||d.webkitFullscreenElement;try{if(on)(d.exitFullscreen||d.webkitExitFullscreen).call(d);else if(e.requestFullscreen||e.webkitRequestFullscreen)(e.requestFullscreen||e.webkitRequestFullscreen).call(e);else toast('Tela cheia não disponível neste aparelho')}catch(err){toast('Tela cheia não disponível aqui')}break}
     case 'tp':{const d=el.dataset.w;closeScr();travel(d);break}
-    case 'buyportal':{const d=PORTAL_DESTS.find(x=>x.id===el.dataset.w);if(d&&!d.ok()&&d.price&&P.gold>=d.price){P.gold-=d.price;P.gunlock[d.id]=true;sfx.coin();toast(d.n+' liberado!');saveGame();renderScr()}break}
+    case 'buyportal':{const d=PORTAL_DESTS.find(x=>x.id===el.dataset.w);if(d&&!d.ok()&&d.price&&P.gold>=d.price)shopTransact('buy_portal',{dest:d.id}).then(res=>{if(!res.ok){toast(res.error);return}sfx.coin();toast(d.n+' liberado!');renderScr()});break}
     case 'dun':{const id=el.dataset.w,cfg=MASMORRA_CFG[id];if(!cfg||!cfg.ok())break;closeScr();delete worlds[id+'_d'];travel(id+'_d');break}
     case 'switchchar':saveGame();SAVE_READY=false;location.reload();break;
     case 'logout':saveGame();SAVE_READY=false;logoutOnline();location.reload();break;
@@ -2260,34 +2240,32 @@ function renderShop(){
   const sl1=el.querySelector('.slist');if(sl1)sl1.scrollTop=sc;
   winSigStr=winSig();
 }
-function shopDo(){
+let shopBusy=false;
+async function shopDo(){
+  if(shopBusy)return;
   const list=shopList(),r=list.find(x=>x.id===shopSel);if(!r)return;
   const d=shopRowData(r);
-  if(shopTab==='buy'){
-    const e=r.e,qty=e.kind==='stk'?shopQty:1,cost=e.price*qty;
-    if(e.minLvl&&e.minLvl>P.lvl){shopSay('Você ainda não tem experiência para isso. Volte no nível '+e.minLvl+'.');return}
-    if(P.gold<cost){shopSay('Ah, suas moedas não bastam por enquanto...');return}
-    if(e.kind==='gear'){
-      const slot=GEAR[e.type].slot;if(P.bag.length>=BAG_MAX&&P.eq[slot]){shopSay('Sua mochila está cheia, amigo.');return}
-      P.gold-=cost;const it=mkItem(e.type,e.tier),was=!P.eq[slot];giveItem(it);
-      shopMsg=was?'Levou '+it.n+'! Já deixei equipado para você.':'Levou '+it.n+'! Está na sua mochila.';
-    }else{
-      if(P[e.key]+qty>99){shopSay('Você não consegue carregar tanto assim.');return}
-      P.gold-=cost;P[e.key]+=qty;shopMsg=qty+'x '+d.name+'. Boa escolha!';
+  shopBusy=true;
+  try{
+    if(shopTab==='buy'){
+      const e=r.e,qty=e.kind==='stk'?shopQty:1;
+      if(e.minLvl&&e.minLvl>P.lvl){shopSay('Você ainda não tem experiência para isso. Volte no nível '+e.minLvl+'.');return}
+      const res=e.kind==='gear'?await shopTransact('buy_gear',{type:e.type,tier:e.tier}):await shopTransact('buy_stack',{key:e.key,qty});
+      if(!res.ok){shopSay(res.error);return}
+      shopMsg=e.kind==='gear'?'Levou '+d.name+'! Boa escolha!':qty+'x '+d.name+'. Boa escolha!';
+      sfx.coin();shopSel=null;renderShop();return;
     }
-    sfx.coin();saveGame();hud();renderShop();return;
-  }
-  if(shopTab==='sell'){
-    if(r.src==='bag'){const it=P.bag[r.i];P.bag.splice(r.i,1);P.gold+=r.price;shopSold.unshift({it,price:Math.ceil(r.price*1.5)});if(shopSold.length>10)shopSold.pop();shopMsg='Negócio fechado! '+r.price+' moedas por '+it.n+'.';shopSel=null}
-    else{const q=Math.min(shopQty,P.gem);P.gem-=q;P.gold+=q*25;shopMsg=q+' gema'+(q>1?'s':'')+' por '+(q*25)+' moedas. Que beleza!';if(!P.gem)shopSel=null}
-    sfx.coin();saveGame();hud();renderShop();return;
-  }
-  const s=shopSold[r.i],slot=GEAR[s.it.type].slot;
-  if(P.gold<s.price){shopSay('Sem moedas para recomprar isso...');return}
-  if(P.bag.length>=BAG_MAX&&P.eq[slot]){shopSay('Sua mochila está cheia, amigo.');return}
-  P.gold-=s.price;shopSold.splice(r.i,1);shopSel=null;giveItem(s.it);shopMsg='De volta com você: '+s.it.n+'!';sfx.coin();saveGame();hud();renderShop();
+    if(shopTab==='sell'){
+      const res=r.src==='bag'?await shopTransact('sell_item',{bagIndex:r.i}):await shopTransact('sell_gem',{qty:Math.min(shopQty,P.gem)||1});
+      if(!res.ok){shopSay(res.error);return}
+      shopMsg='Negócio fechado! '+d.price+' moedas por '+d.name+'.';sfx.coin();shopSel=null;renderShop();return;
+    }
+    const res=await shopTransact('buyback',{index:r.i});
+    if(!res.ok){shopSay(res.error);return}
+    shopMsg='De volta com você: '+d.name+'!';sfx.coin();shopSel=null;renderShop();
+  }finally{shopBusy=false}
 }
-$('#shop').addEventListener('click',e=>{
+$('#shop').addEventListener('click',async e=>{
   if(e.target.closest('[data-x]')){closeShop();return}
   const st=e.target.closest('[data-st]');if(st){shopTab=st.dataset.st;shopSel=null;shopQty=1;shopArm=0;renderShop();return}
   const sc=e.target.closest('[data-sc]');if(sc){shopCat=+sc.dataset.sc;shopSel=null;renderShop();return}
@@ -2298,9 +2276,14 @@ $('#shop').addEventListener('click',e=>{
     if(a.dataset.sa==='do')shopDo();
     else if(a.dataset.sa==='common'){
       if(shopArm<Date.now()){shopArm=Date.now()+3000;renderShop();setTimeout(()=>{if(shopOpen)renderShop()},3100);return}
-      shopArm=0;const com=P.bag.filter(i=>i.tier===1);if(!com.length)return;
-      let tot=0;for(let i=P.bag.length-1;i>=0;i--)if(P.bag[i].tier===1){tot+=SELL[1];shopSold.unshift({it:P.bag[i],price:Math.ceil(SELL[1]*1.5)});P.bag.splice(i,1)}
-      shopSold.length=Math.min(shopSold.length,10);P.gold+=tot;shopSel=null;shopMsg='Levei '+com.length+' item(ns) comum(ns) por '+tot+' moedas.';sfx.coin();saveGame();hud();renderShop();
+      shopArm=0;if(shopBusy)return;
+      const com=P.bag.filter(i=>i.tier===1);if(!com.length)return;
+      shopBusy=true;
+      try{
+        const res=await shopTransact('sell_common',{});
+        if(!res.ok){shopSay(res.error);return}
+        shopSel=null;shopMsg='Levei '+com.length+' item(ns) comum(ns).';sfx.coin();renderShop();
+      }finally{shopBusy=false}
     }
   }
 });
@@ -3191,6 +3174,25 @@ function queueCharSync(s){
   if(!ACC||!ACC.id||!CUR_CHAR||!authToken())return;
   charSyncPending=s;
   if(!charSyncTimer)charSyncTimer=setTimeout(flushCharSyncNow,8000);
+}
+/* ---- loja/economia server-autoritativa ---- */
+function itemName(type,tier){const g=GEAR[type];return g&&g.tiers[tier]?g.tiers[tier].n:'Item'}
+function applyShopResult(character){
+  const s=character.save;
+  P.gold=s.gold;P.gem=s.gem;P.pv=s.pv;P.pa=s.pa;P.ap=s.ap;P.scr=s.scr;
+  P.bag=(s.bag||[]).map(it=>({...it,n:itemName(it.type,it.tier)}));
+  for(const k of EQ_KEYS)P.eq[k]=s.eq&&s.eq[k]?{...s.eq[k],n:itemName(s.eq[k].type,s.eq[k].tier)}:null;
+  P.sk=Object.assign({},s.sk);P.gunlock=Object.assign({},s.gunlock);
+  recalc();hud();saveGame();
+}
+async function shopTransact(action,params){
+  if(!CUR_CHAR||!authToken())return{ok:false,error:'Entre com uma conta online para usar a loja'};
+  try{
+    const r=await authRequest('/api/characters/'+CUR_CHAR.id+'/shop',{method:'POST',token:authToken(),body:Object.assign({action},params)});
+    applyShopResult(r.character);
+    if(Array.isArray(r.shopSold))shopSold=r.shopSold;
+    return{ok:true};
+  }catch(e){return{ok:false,error:e.message||'Não foi possível concluir'}}
 }
 async function registerAcc(name,pw){
   name=(name||'').trim();
