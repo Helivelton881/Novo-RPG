@@ -2544,7 +2544,7 @@ function netConnect(){
 }
 function netUpdate(dt){
   if(!NET||NET.readyState!==1)return;netSendT-=dt;if(netSendT>0)return;netSendT=.09;
-  NET.send(JSON.stringify({type:'state',map:W_?W_.name:'vila',x:P.x,y:P.y,dir:P.dir,moving:P.moving,lvl:P.lvl}));
+  NET.send(JSON.stringify({type:'state',map:W_?W_.name:'vila',x:P.x,y:P.y,dir:P.dir,moving:P.moving,lvl:P.lvl,atkT:Math.max(0,P.atkT||0),atkAng:P.atkAng||0}));
 }
 function netChat(text){if(NET&&NET.readyState===1){NET.send(JSON.stringify({type:'chat',text}));return true}return false}
 addEventListener('keydown',e=>{
@@ -2821,7 +2821,20 @@ function drawRemote(p){
   if(!p||!W_||p.map!==W_.name)return;
   const img=IMG['hero_'+p.cls]||IMG.hero,fw=56,fh=74,row=clamp(p.dir|0,0,3);
   p.anim=(p.anim||0)+(p.moving?.13:.035);const col=p.moving?[3,4,5,4][Math.floor(p.anim)%4]:[0,1,2,1][Math.floor(p.anim/3)%4];
+  const attacking=(p.atkT||0)>0,prog=attacking?clamp(1-p.atkT/.3,0,1):-1,a=p.atkAng||0;
   shadow(p.x,p.y,15,6);ctx.drawImage(img,col*fw,row*fh,fw,fh,Math.round(p.x-fw/2),Math.round(p.y-fh),fw,fh);
+  if(attacking){
+    const ranged=p.cls!=='guerreiro';ctx.save();
+    if(ranged){
+      const wt=p.cls==='arqueiro'?'w_bow1':p.cls==='druida'?'w_staffd1':'w_staffm1',ic=IMG[wt];
+      ctx.translate(p.x+Math.cos(a)*12,p.y-28+Math.sin(a)*7);ctx.rotate(a+Math.PI/4);if(ic)ctx.drawImage(ic,-ic.width*.22,-ic.height*.72,ic.width*.72,ic.height*.72);
+      ctx.strokeStyle='rgba(150,225,255,'+(1-prog*.7)+')';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(10,0);ctx.lineTo(34+prog*20,0);ctx.stroke();
+    }else{
+      const a0=a-1.05,aa=a0+2.1*prog;ctx.strokeStyle='rgba(255,226,122,'+(.9*(1-prog*.55))+')';ctx.lineWidth=5;ctx.lineCap='round';ctx.beginPath();ctx.arc(p.x,p.y-24,44,a0,aa);ctx.stroke();
+      ctx.translate(p.x,p.y-24);ctx.rotate(aa+Math.PI/4);const ic=IMG.w_sword1;if(ic)ctx.drawImage(ic,-ic.width*.16,-ic.height*.86,ic.width*.9,ic.height*.9);
+    }
+    ctx.restore();
+  }
   ctx.font='700 13px "Pixelify Sans",ui-monospace,monospace';ctx.textAlign='center';ctx.lineWidth=3;ctx.strokeStyle='#15100b';ctx.fillStyle='#8ee8ff';
   const label=p.name+' · Lv '+p.lvl;ctx.strokeText(label,p.x,p.y-fh-7);ctx.fillText(label,p.x,p.y-fh-7);
 }
