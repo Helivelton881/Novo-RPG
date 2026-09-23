@@ -2615,6 +2615,8 @@ function netConnect(){
     else if(m.type==='authority'&&m.map===W_.name)NET_AUTH=m.authorityId;
     else if(m.type==='mob_state'&&m.map===W_.name)netApplyMob(m.mob,m.killerId);
     else if(m.type==='mob_snapshot'&&m.map===W_.name)for(const u of m.mobs||[]){const x=netMobById(u.id);if(x){x.netX=Number(u.x);x.netY=Number(u.y);x.netState=u.state||x.state}}
+    else if(m.type==='mob_positions'&&m.map===W_.name)for(const u of m.mobs||[]){const x=netMobById(u.id);if(x&&!x.dead){x.x=Number(u.x);x.y=Number(u.y);if(u.state)x.state=u.state}}
+    else if(m.type==='mob_hit'&&m.map===W_.name){const x=netMobById(m.mobId);hurtPlayer(m.dmg,x?{x:x.x,y:x.y}:null)}
     else if(m.type==='projectile'&&m.map===W_.name&&m.ownerId!==NET_ID){const p=m.projectile;if(p&&!RPROJ.some(x=>x.id===p.id))RPROJ.push(Object.assign({remote:true},p))}
     else if(m.type==='projectile_end'&&m.map===W_.name&&m.ownerId!==NET_ID){const i=RPROJ.findIndex(x=>x.id===m.id);if(i>=0)RPROJ.splice(i,1);if(m.boom)EFX.push({kind:'boom',x:m.x,y:m.y+22,t:0,life:.35,r:70,col:'255,140,40'})}
     else if(m.type==='chat'){chatAdd(m.from,m.text);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.from+': '+m.text)}
@@ -2862,6 +2864,13 @@ function updGoblin(s,dt){
 function updSlime(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0){Object.assign(s,newSlime(s.sx,s.sy,s.lvl))}return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;
+  // Fase 2 (unidade 1): com multiplayer online, o servidor ja simula
+  // posicao/perseguicao/dano de contato do slime (tickSlimes em server.js)
+  // e manda via mob_positions/mob_hit -- aqui so anima (acima) e desenha,
+  // nunca move nem causa dano, senao duplica. Efeitos de raiz/lentidao
+  // (s.root/s.slow) nao sao sincronizados pro servidor ainda -- mesma
+  // limitacao ja documentada pra PvP, nao afeta o slime local (offline).
+  if(s.netId&&NET&&NET.readyState===1)return;
   if(s.kx||s.ky){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(!blocked(nx,s.y,12,8))s.x=nx;if(!blocked(s.x,ny,12,8))s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
   const dx=P.x-s.x,dy=P.y-s.y,d=Math.hypot(dx,dy),home=Math.hypot(s.x-s.sx,s.y-s.sy);
   let tx,ty,spd;

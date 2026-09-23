@@ -28,7 +28,7 @@ const ALLOWED_CLASS = new Set(['guerreiro', 'druida', 'mago', 'arqueiro']);
 // tinha somado sozinho em P.xp.
 function mobStats(type, lvl, boss, k) {
   switch (type) {
-    case 'slime': { const t = { 1: { hp: 28, xp: 12 }, 2: { hp: 44, xp: 20 }, 3: { hp: 62, xp: 30 } }[lvl]; return t || null; }
+    case 'slime': { const t = { 1: { hp: 28, xp: 12, dmg: 6 }, 2: { hp: 44, xp: 20, dmg: 9 }, 3: { hp: 62, xp: 30, dmg: 12 } }[lvl]; return t || null; }
     case 'goblin': return boss ? { hp: 480, xp: 320 } : { hp: 70 + (lvl - 5) * 14, xp: 40 + (lvl - 5) * 9 };
     case 'skeleton': return boss ? { hp: 1800, xp: 800 } : { hp: 260 + (lvl - 10) * 36, xp: 100 + (lvl - 10) * 14 };
     case 'wolf': return boss ? { hp: 3400, xp: 1200 } : { hp: 420 + (lvl - 15) * 55, xp: 130 + (lvl - 15) * 16 };
@@ -1061,7 +1061,8 @@ wss.on('connection', ws => {
             const lvl=Math.max(1,Math.min(3,Math.round(Number(d.lvl))||1));
             const stats=mobStats('slime',lvl,false);
             if(!stats)continue;
-            state.mobs.set(id,{id,maxhp:stats.hp,hp:stats.hp,dead:false,x:Number(d.x)||0,y:Number(d.y)||0,state:'idle',respawnAt:0,boss:false,type:'slime',lvl});
+            const sx=Number(d.x)||0,sy=Number(d.y)||0;
+            state.mobs.set(id,{id,maxhp:stats.hp,hp:stats.hp,dead:false,x:sx,y:sy,sx,sy,state:'idle',respawnAt:0,boss:false,type:'slime',lvl});
           }
         } else {
           // masmorra (_d): layout aleatorio por instancia (mazeGen + trash
@@ -1165,8 +1166,59 @@ wss.on('connection', ws => {
 
 setInterval(()=>{
   const now=Date.now();
-  for(const state of maps.values())for(const mob of state.mobs.values())if(mob.dead&&mob.respawnAt&&now>=mob.respawnAt){mob.dead=false;mob.hp=mob.maxhp;mob.respawnAt=0;mob.x=Number(mob.x)||0;mob.y=Number(mob.y)||0;mob.state='idle';broadcastMap(state.id,{type:'mob_state',map:state.id,mob,killerId:null})}
+  for(const state of maps.values())for(const mob of state.mobs.values())if(mob.dead&&mob.respawnAt&&now>=mob.respawnAt){mob.dead=false;mob.hp=mob.maxhp;mob.respawnAt=0;mob.x=Number.isFinite(mob.sx)?mob.sx:(Number(mob.x)||0);mob.y=Number.isFinite(mob.sy)?mob.sy:(Number(mob.y)||0);mob.state='idle';broadcastMap(state.id,{type:'mob_state',map:state.id,mob,killerId:null})}
 },1000);
+
+// ===== Fase 2 (unidade 1): IA de slime no servidor =====
+// Espelha updSlime() do cliente (index.html) -- unico tipo sem maquina de
+// estado (so perseguicao direta + dano por contato), escolhido como
+// primeira unidade por ser o mais simples dos 12 tipos. So roda pra mapas
+// nao-masmorra (fora do escopo do roster, ver Fase 1). Sem dado de colisao
+// de terreno no servidor -- movimento nao respeita parede ainda (limite
+// documentado em LEIA-PRIMEIRO.md, nao escondido).
+const SLIME_TILE = 48; // = T no cliente (index.html), fronteira da vila que o slime nao cruza
+function tickSlimes() {
+  const dt = .15;
+  for (const state of maps.values()) {
+    if (state.id.endsWith('_d')) continue;
+    const present = playersOnMap(state.id);
+    if (!present.length) continue;
+    const moved = [];
+    for (const mob of state.mobs.values()) {
+      if (mob.dead || mob.type !== 'slime' || !Number.isFinite(mob.sx)) continue;
+      let nearest = null, nd = Infinity;
+      for (const [ws, pl] of present) { const d = Math.hypot(pl.x - mob.x, pl.y - mob.y); if (d < nd) { nd = d; nearest = [ws, pl]; } }
+      mob.cd = Math.max(0, (mob.cd || 0) - dt);
+      mob.anim = (mob.anim || 0) + dt;
+      const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+      let tx, ty, spd;
+      if (nearest && nd < 140 && home < 300 && mob.x > 29 * SLIME_TILE) { tx = nearest[1].x; ty = nearest[1].y; spd = 62; mob.state = 'chase'; }
+      else {
+        mob.wt = (mob.wt || 0) - dt;
+        if (home > 150) { tx = mob.sx; ty = mob.sy; spd = 40; mob.state = 'return'; }
+        else {
+          if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 90; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; }
+          tx = mob.tx; ty = mob.ty; spd = 28; mob.state = 'idle';
+        }
+      }
+      const ddx = (tx ?? mob.x) - mob.x, ddy = (ty ?? mob.y) - mob.y, dd = Math.hypot(ddx, ddy);
+      if (dd > 6) {
+        const hop = Math.max(0, Math.sin(mob.anim * 7)) * spd * dt * 1.7;
+        const nx = mob.x + ddx / dd * hop, ny = mob.y + ddy / dd * hop;
+        if (nx > 29.4 * SLIME_TILE) mob.x = nx;
+        mob.y = ny;
+      }
+      if (nearest && nd < 30 && mob.cd <= 0) {
+        mob.cd = 1.1;
+        const stats = mobStats('slime', mob.lvl, false);
+        if (stats) send(nearest[0], { type: 'mob_hit', map: state.id, mobId: mob.id, dmg: stats.dmg });
+      }
+      moved.push({ id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state });
+    }
+    if (moved.length) broadcastMap(state.id, { type: 'mob_positions', map: state.id, mobs: moved });
+  }
+}
+setInterval(tickSlimes, 150);
 
 setInterval(() => {
   for (const ws of clients.keys()) {
