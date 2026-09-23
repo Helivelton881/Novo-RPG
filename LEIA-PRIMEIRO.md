@@ -199,7 +199,7 @@ Suite formal em `test/*.test.js`, usando o test runner nativo do Node (`node --t
 
 **CI:** `.github/workflows/test.yml` — em todo push/PR: `npm install` → `node -c server.js` (sintaxe) → `npm test`, falha o workflow se qualquer teste falhar.
 
-**Decisão que só o usuário pode tomar, não assumida:** os testes de `auth`/`characters`/`progression`/`shop` (40 dos 61 testes) precisam de `SUPABASE_URL`/`SUPABASE_SECRET_KEY` configurados — sem isso, são **pulados** automaticamente (não falham), tanto local quanto no CI. Se essas variáveis forem as mesmas credenciais de produção (as que o Render já usa), os testes passam a criar contas e personagens reais de teste (`qa_xxxxxxxx`) **no banco de produção** a cada execução — funcional, mas suja o banco real com dado de teste ao longo do tempo, e uma falha de isolamento futura poderia (em teoria) esbarrar em dado real. A alternativa mais segura é um projeto Supabase **dedicado a teste**, com seu próprio `schema.sql` aplicado, apontado por esses mesmos nomes de segredo no repositório GitHub. Não criei um projeto novo nem toquei nos segredos do repositório — isso exige acesso e decisão que são do usuário.
+**Decisão que só o usuário pode tomar, não assumida:** os testes de `auth`/`characters`/`progression`/`shop` (40 dos 61 testes) precisam de `SUPABASE_URL`/`SUPABASE_SECRET_KEY` configurados — sem isso, são **pulados** automaticamente (não falham), tanto local quanto no CI. Se essas variáveis forem as mesmas credenciais de produção (as que o Render já usa), os testes passam a criar contas e personagens reais de teste (`qa_xxxxxxxx`) **no banco de produção** a cada execução — funcional, mas suja o banco real com dado de teste ao longo do tempo, e uma falha de isolamento futura poderia (em teoria) esbarrar em dado real. A alternativa mais segura é um projeto Supabase **dedicado a teste**, com as migrations de `supabase/migrations/` aplicadas nele, apontado por esses mesmos nomes de segredo no repositório GitHub. Não criei um projeto novo nem toquei nos segredos do repositório — isso exige acesso e decisão que são do usuário.
 
 ## Amigos e Grupo
 
@@ -218,7 +218,7 @@ SUPABASE_SECRET_KEY=sb_secret_...
 
 As rotas `/api/auth/register`, `/api/auth/login`, `/api/auth/session` e `/api/auth/logout` gravam contas e sessões no Supabase. Senhas novas usam `scrypt`; hashes `bcrypt` de uma versão anterior continuam válidos e são migrados no próximo login.
 
-Essas rotas leem/gravam nas tabelas `users` e `sessions`, definidas no `schema.sql` junto com `characters`. **Rodar o `schema.sql` atualizado no seu projeto Supabase** (SQL Editor ou `supabase db push`) antes de configurar as variáveis acima — sem essas tabelas as rotas de login vão falhar mesmo com o servidor configurado corretamente.
+Essas rotas leem/gravam nas tabelas `users` e `sessions`, definidas nas migrations em `supabase/migrations/` junto com `characters` e `friends`. **Aplicar as migrations no seu projeto Supabase** (ver seção abaixo) antes de configurar as variáveis acima — sem essas tabelas as rotas de login vão falhar mesmo com o servidor configurado corretamente.
 
 ## Save do personagem na nuvem
 
@@ -226,11 +226,29 @@ Com uma conta online, o progresso completo do personagem (nível, XP, inventári
 
 - O `localStorage` continua como cache local instantâneo (o jogo funciona igual offline); o envio ao servidor é em segundo plano, agrupado a cada ~8s e também forçado ao fechar a aba.
 - Ao logar em outro aparelho, o cliente busca os personagens da conta no servidor e substitui o cache local pelos dados mais recentes — inclusive promovendo para o servidor um personagem criado localmente antes de existir conta online.
-- **Importante:** `characters.user_id` referencia `public.users` (nosso login próprio), não `auth.users` do Supabase Auth — este projeto não usa Supabase Auth. Por isso `schema.sql` não tem mais policy pública de leitura/escrita: só o servidor acessa, via `SUPABASE_SECRET_KEY` (service role), igual a `users`/`sessions`.
+- **Importante:** `characters.user_id` referencia `public.users` (nosso login próprio), não `auth.users` do Supabase Auth — este projeto não usa Supabase Auth. Por isso não existe mais policy pública de leitura/escrita (ver migration `fix_characters_user_id_fk_and_policies` abaixo): só o servidor acessa, via `SUPABASE_SECRET_KEY` (service role), igual a `users`/`sessions`.
 
-## Supabase — schema.sql
+# Fase 4 — banco de dados e migrations
 
-`schema.sql` cria as tabelas `users`, `sessions`, `characters` e `friends` (com RLS habilitado e sem policy pública — acesso só via service role pelo servidor). `characters` guarda nível, mapa e o save completo (jsonb) por personagem.
+**Achado real da auditoria:** `schema.sql` (agora removido de conteúdo, só um ponteiro) definia `characters` com uma foreign key pra `public.users` *antes* de `public.users` sequer existir no arquivo — rodar do zero, de cima a baixo, falhava com "relation public.users does not exist". Também representava a estrutura como se tivesse sido construída "limpa" desde o início, quando na verdade não foi: consultei o histórico real de migrations já aplicado em produção (via `list_migrations`/`schema_migrations`, não fabricado) e `characters.user_id` chegou a referenciar `auth.users` (Supabase Auth, que este projeto não usa) com policies públicas usando `auth.uid()`, corrigido só numa migration posterior.
+
+## Supabase — migrations
+
+`supabase/migrations/` tem os 5 arquivos que **realmente** foram aplicados em produção, na ordem real, puxados diretamente do `supabase_migrations.schema_migrations` do projeto — não uma reconstrução fictícia:
+
+1. `20260922145956_replace_old_schema_with_mp_server` — cria `characters` (ainda referenciando `auth.users`, com policies públicas — o detour que existiu de verdade).
+2. `20260922150012_secure_touch_updated_at_search_path` — endurece o `search_path` da função de trigger (segurança).
+3. `20260922154406_add_users_sessions_for_online_login` — cria `users` e `sessions` (login próprio).
+4. `20260922193217_fix_characters_user_id_fk_and_policies` — corrige a FK de `characters` pra apontar pra `public.users` e remove as policies públicas (que nunca funcionariam mesmo, já que `auth.uid()` nunca bate sem Supabase Auth) — é aqui que o design final (service-role-only) se estabelece.
+5. `20260922195538_add_friends_table` — cria `friends`.
+
+Replayar os 5 em ordem, num projeto Supabase novo, chega exatamente no estado atual de produção (`auth.users` existe em qualquer projeto Supabase por padrão, mesmo sem uso — os primeiros passos "erram" mas o resultado final bate). **Aplicar**: pela SQL Editor do Supabase (colar cada arquivo em ordem), pela ferramenta `apply_migration` do MCP do Supabase (como foi feito de verdade), ou pelo `supabase db push` se você configurar a CLI localmente (`supabase link` primeiro).
+
+**Mudanças de schema daqui pra frente**: crie um novo arquivo em `supabase/migrations/` com timestamp+nome descritivo (`YYYYMMDDHHMMSS_descricao.sql`), nunca edite uma migration já aplicada. `schema.sql` não é mais a fonte de verdade — existe só como ponteiro pra esta seção.
+
+**Recuperação/rollback**: não há rollback automático (o Postgres do Supabase não guarda um "down" por migration aqui) — pra desfazer uma mudança, escreva uma migration nova que reverte a anterior (ex.: `alter table ... drop column ...`), nunca edite/apague o arquivo já aplicado. Antes de qualquer migration que apague ou altere coluna existente, garanta um backup (o Supabase já faz backup automático diário nos planos pagos; no free tier, exporte manualmente via `pg_dump` ou a aba Backups do painel antes de migrations destrutivas).
+
+**Decisão consciente, não esquecimento:** `inventory`, `character_items`, `equipment`, `quests`, `quest_progress`, `transactions`, `party`, `guilds` — nenhuma dessas tabelas foi criada. `characters.save` (jsonb) já guarda inventário/equipamento/progresso de missão, e as Fases 1-3 validaram extensivamente que esse formato funciona bem com validação server-autoritativa. Normalizar isso em tabelas próprias seria uma migração grande e arriscada sem benefício concreto hoje (a mandato da própria Fase 4 diz pra evitar normalizar prematuramente) — fica pra quando houver uma razão real (ex.: precisar consultar/agregar itens entre personagens, o que hoje ninguém pede). `party`/`guilds` continuam fora do banco de propósito — grupo já é efêmero em memória (documentado desde a Fase 1), guildas nem existem ainda no jogo (Fase 10 do roadmap).
 
 ## Produção (Render)
 
