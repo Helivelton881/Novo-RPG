@@ -596,6 +596,13 @@ async function handleCharacters(req, res, pathname) {
       // progresso real (personagem recem-criado, save ainda vazio -- inclusive
       // promover um personagem local antigo pra nuvem pela 1a vez) continua
       // confiando no que o cliente manda, como sempre foi.
+      //
+      // Ouro/gema NAO entram nessa trava, de proposito: loot de masmorra
+      // (fora do escopo do roster -- mazeGen nao e deterministico) ainda
+      // credita ouro/gema local mesmo com conta online (dropLoot/dropExtra
+      // so sao suprimidos pra abate de MAPA DE CAMPO, s.dun continua
+      // gerando item de chao normalmente). Travar ouro/gema aqui quebraria a
+      // sincronizacao desse ganho legitimo de masmorra pra nuvem.
       if (current) {
         const currentSave = sanitizeSave(current.save, current.lvl);
         const isTracked = current.lvl > 1 || currentSave.quest > 0 || currentSave.xp > 0;
