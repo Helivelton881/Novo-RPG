@@ -1064,7 +1064,7 @@ const GEAR={
   staffd:{icon:'w_staffd1',slot:'sword',label:'Arma',icons:[null,'w_staffd1','w_staffd2','w_staffd3','w_staffd4'],tiers:[null,{n:'Cajado de Vinhas',atk:2,req:1},{n:'Cajado do Bosque',atk:5,req:4},{n:'Cajado de Galhada',atk:9,req:8},{n:'Cajado Ancestral',atk:14,req:12},{n:'Cajado Primordial',atk:22,req:20}]},
   staffm:{icon:'w_staffm1',slot:'sword',label:'Arma',icons:[null,'w_staffm1','w_staffm2','w_staffm3','w_staffm4'],tiers:[null,{n:'Cajado de Cristal',atk:2,req:1},{n:'Cajado de Safira',atk:5,req:4},{n:'Cajado Lunar',atk:9,req:8},{n:'Cajado Arcano',atk:14,req:12},{n:'Cajado Celestial',atk:22,req:20}]},
   shield:{icon:'escudo',slot:'shield',label:'Escudo',tiers:[null,{n:'Escudo de Madeira',def:2,blk:.10},{n:'Escudo Reforçado',def:4,blk:.14},{n:'Escudo de Aço',def:7,blk:.18},{n:'Escudo Sombrio',def:11,blk:.22},{n:'Escudo da Aurora',def:16,blk:.26}]},
-  armor:{icon:'armadura',slot:'armor',label:'Peito',tiers:[null,{n:'Gibão de Couro',def:2,hp:10},{n:'Couraça Reforçada',def:4,hp:25},{n:'Armadura de Aço',def:7,hp:45},{n:'Manto Sombrio',def:10,hp:70},{n:'Armadura da Aurora',def:15,hp:105}]},
+  armor:{icon:'armadura',slot:'armor',label:'Peito',tiers:[null,{n:'Gibão de Couro',def:2,hp:10,req:1},{n:'Couraça Reforçada',def:4,hp:25,req:4},{n:'Armadura de Aço',def:7,hp:45,req:8},{n:'Manto Sombrio',def:10,hp:70,req:12},{n:'Armadura da Aurora',def:15,hp:105,req:20}]},
   helmet:{icon:'capacete',slot:'helmet',label:'Capacete',tiers:[null,{n:'Capuz de Couro',def:1,hp:6},{n:'Elmo de Ferro',def:3,hp:14},{n:'Elmo de Aço',def:5,hp:28},{n:'Elmo Sombrio',def:8,hp:44},{n:'Elmo da Aurora',def:12,hp:66}]},
   cape:{icon:'capa',slot:'cape',label:'Capa',tiers:[null,{n:'Capa de Viagem',def:1,hp:8},{n:'Capa Reforçada',def:2,hp:16},{n:'Capa do Andarilho',def:4,hp:30},{n:'Capa Sombria',def:6,hp:48},{n:'Capa da Aurora',def:9,hp:72}]},
   jewel:{icon:'joia',slot:'jewel',label:'Joia',tiers:[null,{n:'Amuleto Simples',atk:1,hp:5},{n:'Amuleto de Jade',atk:2,hp:12},{n:'Amuleto Arcano',atk:4,hp:20},{n:'Coração Sombrio',atk:6,hp:34},{n:'Amuleto da Aurora',atk:9,hp:52}]},
@@ -1881,7 +1881,8 @@ function statusHtml(extra){
 }
 let winSigStr='',mapTick=0,winDetailFocus=false;
 function winSig(){
-  return JSON.stringify([Object.keys(P.gunlock).join(),P.bar.join(),shopOpen,shopTab,shopCat,shopSel,shopSold.length,shopOpen?P.gold:0,invOpen,scrOpen,bagFilter,charTab,skSel,mapView,socTab,P.lvl,P.quest,P.kills,P.gk,P.ks,P.kw,P.kp,P.kt,P.ki,P.kv,P.gem,P.pv,P.pa,P.ap,P.key,P.scr,P.bag.map(i=>i.n).join(),Object.values(P.eq).map(i=>i&&i.n).join(),P.sl,P.gb,P.bs,P.dt,Math.floor(P.pt/60),P.chestOpen,FRIENDS.length,P.chat.length,!!PARTY,P.sk,skillPoints(),nearMerchant(),W_&&W_.name,P.name]);
+  const shownPlayMinutes=scrOpen==='char'&&charTab==='status'?Math.floor(P.pt/60):0;
+  return JSON.stringify([Object.keys(P.gunlock).join(),P.bar.join(),shopOpen,shopTab,shopCat,shopSel,shopSold.length,shopOpen?P.gold:0,invOpen,scrOpen,bagFilter,charTab,skSel,mapView,socTab,P.lvl,P.quest,P.kills,P.gk,P.ks,P.kw,P.kp,P.kt,P.ki,P.kv,P.gem,P.pv,P.pa,P.ap,P.key,P.scr,P.bag.map(i=>i.n).join(),Object.values(P.eq).map(i=>i&&i.n).join(),P.sl,P.gb,P.bs,P.dt,shownPlayMinutes,P.chestOpen,FRIENDS.length,P.chat.length,!!PARTY,P.sk,skillPoints(),nearMerchant(),W_&&W_.name,P.name]);
 }
 function tickWin(){
   if(shopOpen){const mn=NPCS.find(n=>n.id==='mercador');if(!mn||Math.hypot(mn.x-P.x,mn.y-P.y)>200){closeShop();toast('Você se afastou do mercador')}}
@@ -2201,9 +2202,9 @@ const TYPE_DESC={sword:'Uma arma para enfrentar os monstros.',bow:'Um arco leve 
 const TIER_DESC=[null,'Simples e barata.','Feita por bons artesãos.','Peça de qualidade superior.','Uma relíquia rara.','Uma peça lendária, forjada para heróis.'];
 let SHOP_CATALOG=[];
 function buildShop(){
-  const list=[],spec=[[CLS.weapon,[[1,60,1]]]];
+  const list=[],spec=[[CLS.weapon,[[1,60,1],[2,180,4],[3,450,8],[4,900,12]]]];
   if(CLS.shield)spec.push(['shield',[[1,25,1]]]);
-  spec.push(['armor',[[1,30,1]]],['helmet',[[1,25,1]]],['cape',[[1,20,1]]],['jewel',[[1,40,1]]],['boots',[[1,25,1]]]);
+  spec.push(['armor',[[1,30,1],[2,120,4],[3,320,8],[4,700,12]]],['helmet',[[1,25,1]]],['cape',[[1,20,1]]],['jewel',[[1,40,1]]],['boots',[[1,25,1]]]);
   spec.forEach(([ty,arr])=>arr.forEach(a=>list.push({id:ty+a[0],kind:'gear',type:ty,tier:a[0],price:a[1],minLvl:a[2]||1})));
   [['pv',10],['pa',10],['ap',5],['scr',30]].forEach(([k,p])=>list.push({id:k,kind:'stk',key:k,price:p}));
   SHOP_CATALOG=list;
@@ -2228,7 +2229,7 @@ function shopList(){
 function shopRowData(r){
   if(r.e){
     const e=r.e;
-    if(e.kind==='gear'){const it=mkItem(e.type,e.tier),lock=e.minLvl>P.lvl;return{id:r.id,it,name:it.n,icon:iconURL(it),tag:TYPE_TAG[e.type],sub:gearSummary(it),price:e.price,rc:RAR[it.tier].c,dim:lock,lock:lock?'Nv '+e.minLvl:''}}
+    if(e.kind==='gear'){const it=mkItem(e.type,e.tier),lock=e.minLvl>P.lvl;return{id:r.id,it,name:it.n,icon:iconURL(it),tag:TYPE_TAG[e.type],sub:CLS.name+' · Nv '+e.minLvl+' · '+gearSummary(it),price:e.price,rc:RAR[it.tier].c,dim:lock,lock:lock?'Nv '+e.minLvl:''}}
     const d=stkInfo(e.key);return{id:r.id,name:d[1],icon:iconURL(d[2]),tag:STK_TAG[e.key],sub:d[3],price:e.price,rc:null,stk:e.key}
   }
   if(r.it)return{id:r.id,it:r.it,name:r.it.n,icon:iconURL(r.it),tag:TYPE_TAG[r.it.type],sub:gearSummary(r.it),price:r.price,rc:RAR[r.it.tier].c};

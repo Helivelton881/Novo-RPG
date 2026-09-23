@@ -125,7 +125,7 @@ const GEAR_TIERS = {
   staffd: [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
   staffm: [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
   shield: [null,{def:2,blk:.10},{def:4,blk:.14},{def:7,blk:.18},{def:11,blk:.22},{def:16,blk:.26}],
-  armor:  [null,{def:2,hp:10},{def:4,hp:25},{def:7,hp:45},{def:10,hp:70},{def:15,hp:105}],
+  armor:  [null,{def:2,hp:10,req:1},{def:4,hp:25,req:4},{def:7,hp:45,req:8},{def:10,hp:70,req:12},{def:15,hp:105,req:20}],
   helmet: [null,{def:1,hp:6},{def:3,hp:14},{def:5,hp:28},{def:8,hp:44},{def:12,hp:66}],
   cape:   [null,{def:1,hp:8},{def:2,hp:16},{def:4,hp:30},{def:6,hp:48},{def:9,hp:72}],
   jewel:  [null,{atk:1,hp:5},{atk:2,hp:12},{atk:4,hp:20},{atk:6,hp:34},{atk:9,hp:52}],
@@ -238,8 +238,9 @@ const CLASS_ITEM_TYPES = {
 // Espelha os precos reais da loja (buildShop/shopDo em index.html) pra
 // validar compra/venda no servidor em vez de confiar no que o cliente manda.
 const GEAR_PRICES = {
-  sword: {1:60, 2:60}, bow: {1:60, 2:60}, staffd: {1:60, 2:60}, staffm: {1:60, 2:60},
-  shield: {1:25}, armor: {1:30, 2:70}, helmet: {1:25}, cape: {1:20}, jewel: {1:40}, boots: {1:25},
+  sword: {1:60, 2:180, 3:450, 4:900}, bow: {1:60, 2:180, 3:450, 4:900},
+  staffd: {1:60, 2:180, 3:450, 4:900}, staffm: {1:60, 2:180, 3:450, 4:900},
+  shield: {1:25}, armor: {1:30, 2:120, 3:320, 4:700}, helmet: {1:25}, cape: {1:20}, jewel: {1:40}, boots: {1:25},
 };
 const STK_PRICES = {pv:10, pa:10, ap:5, scr:30};
 const SELL_PRICES = [0, 8, 22, 60, 140, 320];
@@ -663,6 +664,7 @@ async function handleShop(req, res, pathname) {
       const price = GEAR_PRICES[type] && GEAR_PRICES[type][tier];
       const item = price ? sanitizeItem({type, tier}) : null;
       if (!item) error = 'Item inválido';
+      else if (!(CLASS_ITEM_TYPES[save.cls] || []).includes(type)) error = 'Item incompatível com a classe';
       else if (save.gold < price) error = 'Moedas insuficientes';
       else {
         const slot = typeSlot(type), canEquip = !save.eq[slot] && (!item.req || lvl >= item.req);
