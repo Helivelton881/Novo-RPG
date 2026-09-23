@@ -1,0 +1,35 @@
+name: Testes
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Verificar sintaxe do servidor
+        run: node -c server.js
+
+      - name: Executar testes
+        env:
+          # Opcionais: sem esses dois segredos configurados no repositório,
+          # os testes que dependem de Supabase (registro/login/personagem/
+          # loja/missão/baú) são pulados automaticamente, sem falhar o
+          # workflow -- os testes de WebSocket/combate/monstros/multiplayer
+          # não precisam deles e sempre rodam de verdade.
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: npm test
