@@ -2822,6 +2822,10 @@ function updGoblin(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0)Object.assign(s,newGoblin(s.sx,s.sy,s.lvl,s.boss,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1);
+  // Fase 2 (unidade 2): mesmo padrao da unidade 1 (slime) -- com multiplayer
+  // online o servidor ja simula posicao/ataque/dano do goblin (stepGoblin em
+  // server.js) e manda via mob_positions/mob_hit.
+  if(s.netId&&NET&&NET.readyState===1)return;
   const st=gobStats(s);
   if((s.kx||s.ky)&&s.state!=='dash'){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(!blocked(nx,s.y,12,8))s.x=nx;if(!blocked(s.x,ny,12,8))s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
   const dx=P.x-s.x,dy=P.y-s.y,d=Math.hypot(dx,dy)||1,home=Math.hypot(s.x-s.sx,s.y-s.sy);
