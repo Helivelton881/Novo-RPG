@@ -12,13 +12,13 @@ before(async () => { srv = await startServer(PORT); });
 after(() => stopServer(srv));
 
 const rnd = () => 'qa_' + Math.random().toString(36).slice(2, 10);
-async function newChar(gold) {
+async function newChar(gold, cls = 'guerreiro', lvl = 1) {
   const username = rnd(), password = 'SenhaForte123';
   const reg = await httpJson(srv, 'POST', '/api/auth/register', { username, password });
   const token = reg.json.token;
-  const created = await httpJson(srv, 'POST', '/api/characters', { slot: 0, name: 'Heroi', cls: 'guerreiro' }, token);
+  const created = await httpJson(srv, 'POST', '/api/characters', { slot: 0, name: 'Heroi', cls }, token);
   const id = created.json.character.id;
-  await httpJson(srv, 'PUT', '/api/characters/' + id, { lvl: 1, save: { gold: gold ?? 1000 } }, token);
+  await httpJson(srv, 'PUT', '/api/characters/' + id, { lvl, save: { gold: gold ?? 1000 } }, token);
   return { token, id };
 }
 async function shop(id, token, action, params) {
@@ -43,6 +43,42 @@ test('compra: item invalido (tipo/tier inexistente) e rejeitada', { skip: !hasSu
   const { token, id } = await newChar(1000);
   const r = await shop(id, token, 'buy_gear', { type: 'sword', tier: 99 });
   assert.equal(r.status, 400);
+});
+
+test('compra: arma de outra classe e rejeitada', { skip: !hasSupabase() }, async () => {
+  const { token, id } = await newChar(1000, 'mago');
+  const r = await shop(id, token, 'buy_gear', { type: 'sword', tier: 1 });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /classe/i);
+});
+
+test('compra: nivel insuficiente guarda item legitimo na mochila sem equipar', { skip: !hasSupabase() }, async () => {
+  const { token, id } = await newChar(1000, 'guerreiro', 1);
+  const r = await shop(id, token, 'buy_gear', { type: 'sword', tier: 2 });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.character.save.eq.sword, null);
+  assert.equal(r.json.character.save.bag[0].req, 4);
+});
+
+test('compra: preco e stats forjados sao ignorados e recalculados no servidor', { skip: !hasSupabase() }, async () => {
+  const { token, id } = await newChar(1000, 'arqueiro', 8);
+  const r = await shop(id, token, 'buy_gear', { type: 'bow', tier: 3, price: 1, atk: 9999, stats: { atk: 9999 } });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.character.save.gold, 550);
+  assert.equal(r.json.character.save.eq.sword.atk, 9);
+  assert.equal(r.json.character.save.eq.sword.req, 8);
+});
+
+test('compra: mochila cheia rejeita item que nao pode auto-equipar sem debitar ouro', { skip: !hasSupabase() }, async () => {
+  const { token, id } = await newChar(2000);
+  await shop(id, token, 'buy_gear', { type: 'sword', tier: 1 });
+  for (let i = 0; i < 12; i++) {
+    const r = await shop(id, token, 'buy_gear', { type: 'sword', tier: 1 });
+    assert.equal(r.status, 200);
+  }
+  const before = await shop(id, token, 'buy_gear', { type: 'sword', tier: 1 });
+  assert.equal(before.status, 400);
+  assert.match(before.json.error, /Mochila cheia/);
 });
 
 test('compra em pilha: potao de vida (10 ouro cada) soma a quantidade certa', { skip: !hasSupabase() }, async () => {
