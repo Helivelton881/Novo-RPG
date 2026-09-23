@@ -62,6 +62,14 @@ Testado com um script de unidade que roda o trecho real de `server.js` (`QUEST_R
 
 **O que essa unidade NÃO cobre:** XP/ouro/item ganho ao matar monstro (`killMob()` e as ~10 funções `killX()` por tipo) continuam 100% client-side — é a maior fatia da lacuna e fica pra próxima unidade da Fase 1, junto com o `lvl` do personagem ainda ser aceito direto do que o cliente manda no `PUT /api/characters/:id` (só limitado a 1–99, sem validar contra XP acumulado).
 
+## Fase 1 (unidade 2) — arma equipada não pode ficar acima do nível real
+
+Ao reconstruir o save (`sanitizeSave`), se uma arma equipada (`eq.sword` — só armas têm `req`; escudo/armadura/capacete/capa/joia/bota nunca tiveram exigência de nível no jogo real) tem `req` maior que o `lvl` real do personagem, ela é desequipada e devolvida pra mochila (nunca descartada; se a mochila já estiver no limite de 24, aí sim é descartada, igual a qualquer outro excesso de itens). Isso nunca deveria acontecer com um cliente honesto — tanto `giveItem` quanto a compra na loja só equipam automaticamente se `lvl>=req` — então só existe pra fechar a brecha de editar o save/localStorage direto pra equipar um item acima do nível.
+
+Testado com um teste de unidade rodando o trecho real de `sanitizeSave`/`sanitizeItem` via `vm`: item acima do nível é desequipado e preservado na mochila; no nível exato do requisito continua equipado; itens sem `req` (armadura, escudo, etc.) nunca são afetados; mochila cheia não estoura o limite de 24.
+
+**Descoberta importante durante a investigação desta fase, que muda a ordem planejada:** o servidor **não tem um roster de monstros próprio** — `map_join` aceita a lista de monstros (`id`, `maxhp`, posição, `boss`) que o *primeiro cliente a entrar no mapa* manda (`server.js`, handler de `map_join`). Isso é inofensivo hoje porque matar um monstro só zera o HP dele no servidor, sem conceder nada. Mas é um bloqueio direto pra "XP por abate de monstro" (a próxima unidade cogitada): sem um roster autoritativo, um cliente adulterado poderia inventar um monstro fake com 1 de HP e farmar XP infinita. Mover XP/loot de abate pro servidor vai exigir resolver isso primeiro (roster de monstro autoritativo por mapa) — maior que uma unidade isolada, então a Fase 1 seguiu por um alvo menor e mais seguro nesta rodada (requisito de equipamento) em vez disso.
+
 ## Amigos e Grupo
 
 Reais, não só decorativos: `/api/friends` (listar/adicionar/remover, por usuário da conta) e `/api/party` (`POST` cria, `/join` entra com código, `/leave` sai). Status "Online" é verdadeiro — o servidor rastreia quais contas têm um WebSocket conectado agora (`accountSockets`, populado pelo `userId` que o cliente manda no `join`). A tela Social faz polling a cada 5s enquanto aberta. Grupo é efêmero (fica só em memória no servidor, como a autoridade de monstros — não sobrevive a um restart); Amigos persiste na tabela `friends` do Supabase.

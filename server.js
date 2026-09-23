@@ -190,7 +190,15 @@ function sanitizeSave(raw, lvl) {
     chat: Array.isArray(save.chat) ? save.chat.slice(-40).map(m => ({n: cleanText(m && m.n, 20), t: cleanText(m && m.t, 240), sys: !!(m && m.sys)})) : [],
   };
   for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
-  for (const s of EQ_SLOTS) out.eq[s] = save.eq && save.eq[s] ? sanitizeItem(save.eq[s]) : null;
+  // Um item equipado com req (nivel minimo) maior que o nivel real nunca
+  // acontece num cliente honesto (giveItem/loja so equipam se lvl>=req) --
+  // so surge editando o save direto. Em vez de aceitar, desequipa e devolve
+  // pra mochila (nunca perde o item, so tira a vantagem indevida do slot).
+  for (const s of EQ_SLOTS) {
+    let item = save.eq && save.eq[s] ? sanitizeItem(save.eq[s]) : null;
+    if (item && item.req && item.req > lvl) { if (out.bag.length < 24) out.bag.push(item); item = null; }
+    out.eq[s] = item;
+  }
   return out;
 }
 
