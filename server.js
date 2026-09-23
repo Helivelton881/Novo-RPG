@@ -149,6 +149,79 @@ function killCounterFields(type, lvl, boss) {
   else fields.push('gb'); // goblin comum
   return fields;
 }
+// Espelha dropLoot/dropExtra por tipo/chefe (index.html: killSkeleton,
+// killWolf, killSwamp, killCaster, killSky, killVulcao, killLorde, mais
+// slime/goblin em killMob). So mapas de campo: nenhuma dessas funcoes chama
+// dropItem -- equipamento nesses mapas so vem de loja/bau (dropItem so
+// existe no loot de masmorra, fora do escopo do roster). Sequitos
+// temporarios (mob.temp) nao dropam nada no cliente (bloco inteiro pulado
+// via `else if(!s.temp)`), diferente do XP que ainda paga metade -- por
+// isso rollMobLoot nunca e chamado pra mob.temp (ver mob_damage).
+function rollMobLoot(type, boss, lvl) {
+  let p;
+  if (type === 'slime') p = { coins: Math.random() < .75 ? 1 + Math.floor(Math.random() * (lvl + 1)) : 0, maxv: lvl, pPot: .09, pGem: 0, pApple: .16, pScroll: 0 };
+  else if (type === 'goblin') p = boss ? { coins: 8, maxv: 4, pPot: 1, pGem: 2, pApple: .5, pScroll: .6 } : { coins: 2 + Math.floor(Math.random() * 3), maxv: 3, pPot: .14, pGem: .07, pApple: .15, pScroll: .05 };
+  else if (type === 'skeleton') p = boss ? { coins: 12, maxv: 5, pPot: 1, pGem: 3, pApple: .6, pScroll: .7 } : { coins: 3 + Math.floor(Math.random() * 4), maxv: 4, pPot: .16, pGem: .1, pApple: .16, pScroll: .06 };
+  else if (type === 'wolf') p = boss ? { coins: 14, maxv: 6, pPot: 1, pGem: 3, pApple: .7, pScroll: .8 } : { coins: 3 + Math.floor(Math.random() * 4), maxv: 5, pPot: .16, pGem: .12, pApple: .16, pScroll: .08 };
+  else if (type === 'bat') p = { coins: 3 + Math.floor(Math.random() * 4), maxv: 6, pPot: .16, pGem: .12, pApple: .16, pScroll: .08 }; // bat nunca e chefe
+  else if (type === 'toxic') p = boss ? { coins: 16, maxv: 7, pPot: 1, pGem: 4, pApple: .7, pScroll: .8 } : { coins: 3 + Math.floor(Math.random() * 4), maxv: 6, pPot: .16, pGem: .12, pApple: .16, pScroll: .08 };
+  else if (type === 'caster') p = boss ? { coins: 20, maxv: 8, pPot: 1, pGem: 5, pApple: .8, pScroll: .9 } : { coins: 3 + Math.floor(Math.random() * 4), maxv: 7, pPot: .16, pGem: .14, pApple: .16, pScroll: .1 };
+  else if (type === 'sky') p = boss ? { coins: 24, maxv: 9, pPot: 1, pGem: 6, pApple: .9, pScroll: 1 } : { coins: 4 + Math.floor(Math.random() * 4), maxv: 8, pPot: .16, pGem: .16, pApple: .16, pScroll: .12 };
+  else if (type === 'sala' || type === 'elem' || type === 'calc' || type === 'cinza') p = { coins: 4 + Math.floor(Math.random() * 4), maxv: 8, pPot: .16, pGem: .16, pApple: .16, pScroll: .12 };
+  else if (type === 'lorde') p = { coins: 26, maxv: 10, pPot: 1, pGem: 7, pApple: 1, pScroll: 1 };
+  else return null;
+  let gold = 0; for (let i = 0; i < p.coins; i++) gold += 1 + Math.floor(Math.random() * p.maxv);
+  return {
+    gold,
+    gem: p.pGem >= 1 ? p.pGem : (Math.random() < p.pGem ? 1 : 0),
+    pv: Math.random() < p.pPot ? 1 : 0,
+    ap: Math.random() < p.pApple ? 1 : 0,
+    scr: Math.random() < p.pScroll ? 1 : 0,
+  };
+}
+// Chefe derrotado solta 1 chave (drops.push({kind:'key',...})) so se o baui
+// daquele mapa ainda nao foi aberto (mesma condicao do cliente: if(!P.chestOpenN)).
+const BOSS_CHEST_FIELD = { goblin: 'chest', skeleton: 'chest2', wolf: 'chest3', toxic: 'chest4', caster: 'chest5', sky: 'chest6', lorde: 'chest7' };
+
+// Espelha a maquina de estados de progressao de P.quest: os ~15 checkpoints
+// "if(P.quest===N)" dentro de killMob/killSkeleton/killWolf/killSwamp/
+// killCaster/killSky/killVulcao/killLorde no cliente. So estagios IMPARES
+// avancam por abate (contador ou chefe direto); os PARES so avancam por
+// dialogo (ja tratado em handleQuest/QUEST_REWARDS, unidade 1). Roda so em
+// cima de abates ja confirmados pelo servidor -- fecha a brecha de forjar
+// P.quest/contador via PUT bruto pra reivindicar recompensa sem ter matado
+// nada. killLorde no cliente muda P.quest=30 sem nenhuma checagem previa
+// (unico chefe sem gate) -- aqui o gate em 29 e aplicado de qualquer forma,
+// fechando esse detalhe tambem.
+const QUEST_COUNTER_CAP = { kills: 999999 };
+function advanceQuestOnKill(save, type, boss, lvl) {
+  const q = save.quest, changed = {};
+  const bump = (field, need, next) => {
+    const cap = QUEST_COUNTER_CAP[field] || 999;
+    save[field] = Math.min(cap, (save[field] || 0) + 1); changed[field] = save[field];
+    if (save[field] >= need) { save.quest = next; changed.quest = next; }
+  };
+  const flip = (from, to) => { if (q === from) { save.quest = to; changed.quest = to; } };
+  if (type === 'slime' && !boss && q === 1) bump('kills', 3, 2);
+  else if (type === 'goblin' && !boss && q === 3) bump('gk', 5, 4);
+  else if (type === 'goblin' && boss) flip(5, 6);
+  else if (type === 'skeleton' && !boss && q === 7) bump('ks', 8, 8);
+  else if (type === 'skeleton' && !boss && q === 19 && lvl >= 25) bump('kt', 12, 20);
+  else if (type === 'skeleton' && boss) flip(9, 10);
+  else if (type === 'wolf' && !boss && q === 11) bump('kw', 10, 12);
+  else if (type === 'wolf' && boss) flip(13, 14);
+  else if ((type === 'bat' || type === 'toxic') && !boss && q === 15) bump('kp', 12, 16);
+  else if (type === 'bat' && !boss && q === 23 && lvl >= 30) bump('ki', 14, 24);
+  else if (type === 'toxic' && boss) flip(17, 18);
+  else if (type === 'caster' && !boss && q === 19) bump('kt', 12, 20);
+  else if (type === 'caster' && boss) flip(21, 22);
+  else if (type === 'sky' && !boss && q === 23) bump('ki', 14, 24);
+  else if (type === 'sky' && boss) flip(25, 26);
+  else if ((type === 'sala' || type === 'elem' || type === 'calc' || type === 'cinza') && q === 27) bump('kv', 16, 28);
+  else if (type === 'lorde') flip(29, 30);
+  return changed;
+}
+
 // Espelha classTypes() do cliente: quais tipos de item cada classe pode
 // receber de sorteio (a propria arma da classe, e escudo so pro guerreiro).
 const CLASS_ITEM_TYPES = {
@@ -711,7 +784,7 @@ async function handleChest(req, res, pathname) {
 // rota HTTP. So roda se a conexao tem charId (personagem) e userId (dono),
 // senao nao ha onde persistir (offline ou sem conta) e o calculo local de
 // sempre no cliente e o unico que existe, como antes desta fase.
-async function creditKillReward(ws, p, xpGain, fields) {
+async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, questInfo) {
   if (!p.charId || !p.userId) return;
   try {
     const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
@@ -721,8 +794,19 @@ async function creditKillReward(ws, p, xpGain, fields) {
     const leveled = applyXpGain(save, lvl, xpGain);
     save.xp = leveled.xp; lvl = leveled.lvl; save.lvl = lvl;
     for (const f of fields) save[f] = Math.min(999, (save[f] || 0) + 1);
+    const pushed = {};
+    if (loot) {
+      save.gold = Math.min(500000, save.gold + loot.gold);
+      save.gem = Math.min(5000, save.gem + loot.gem);
+      save.pv = Math.min(999, save.pv + loot.pv);
+      save.ap = Math.min(999, save.ap + loot.ap);
+      save.scr = Math.min(999, save.scr + loot.scr);
+      Object.assign(pushed, { gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr });
+    }
+    if (bossChestField && !save[bossChestField]) { save.key = Math.min(999, (save.key || 0) + 1); pushed.key = save.key; }
+    if (questInfo) Object.assign(pushed, advanceQuestOnKill(save, questInfo.type, questInfo.boss, questInfo.lvl));
     await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
-    send(ws, {type:'kill_reward', xp: save.xp, lvl, fields: Object.fromEntries(fields.map(f => [f, save[f]]))});
+    send(ws, {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)});
   } catch (err) {
     console.error('kill_reward_error', err.message, err.status || '', err.detail || '');
   }
@@ -1003,7 +1087,10 @@ wss.on('connection', ws => {
           const stats=mobStats(mob.type,mob.lvl,mob.boss,mob.k);
           if(stats){
             const xpGain=mob.temp?Math.round(stats.xp*.5):stats.xp;
-            creditKillReward(ws,p,xpGain,killCounterFields(mob.type,mob.lvl,mob.boss));
+            const loot=mob.temp?null:rollMobLoot(mob.type,mob.boss,mob.lvl);
+            const bossChestField=mob.boss?BOSS_CHEST_FIELD[mob.type]:null;
+            const questInfo=mob.temp?null:{type:mob.type,boss:mob.boss,lvl:mob.lvl};
+            creditKillReward(ws,p,xpGain,killCounterFields(mob.type,mob.lvl,mob.boss),loot,bossChestField,questInfo);
           }
         }
       }
