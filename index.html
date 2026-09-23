@@ -1405,10 +1405,22 @@ function pickup(d){
 function dropIcon(d){
   switch(d.kind){case 'coin':return IMG.moeda;case 'gem':return IMG.gema;case 'apple':return IMG.maca;case 'key':return IMG.chave;case 'scr':return IMG.pergaminho;case 'item':return itemCanvas(d.item);default:return IMG.pocao_v}
 }
-function openChest(ch){
+async function openChest(ch){
   if(ch.open){toast('O baú está vazio');return}
   if(P.key<=0){toast('Trancado. '+(ch.hint||'O Brutamontes deve ter a chave.'));sfx.talk();return}
-  P.key--;ch.open=true;P[ch.flag||'chestOpen']=true;P.gold+=(ch.gold||60);
+  const flag=ch.flag||'chestOpen';
+  if(CUR_CHAR&&authToken()){
+    const beforeGold=P.gold;
+    const r=await chestOpenNet(flag);
+    if(r){
+      ch.open=true;
+      const gained=P.gold-beforeGold,itemMsg=r.item?itemName(r.item.type,r.item.tier):'nada de novo pra mochila (cheia)';
+      sfx.level();toast('Baú aberto: '+itemMsg+' e '+gained+' moedas!');
+      return;
+    }
+  }
+  // sem conta online, ou a chamada ao servidor falhou -- calculo local de sempre
+  P.key--;ch.open=true;P[flag]=true;P.gold+=(ch.gold||60);
   const it=mkItem((()=>{const ct=classTypes();return ct[Math.floor(Math.random()*ct.length)]})(),ch.tier||4);
   if(P.bag.length>=BAG_MAX&&P.eq[GEAR[it.type].slot])drops.push({kind:'item',item:it,x:ch.x,y:ch.y+20,t:0});else giveItem(it);
   sfx.level();toast('Baú aberto: '+it.n+' e '+(ch.gold||60)+' moedas!');saveGame();hud();
@@ -3259,6 +3271,23 @@ async function claimQuestReward(from){
   if(CUR_CHAR&&authToken())ok=await questReward(from);
   if(!ok){P.quest=r.next;P.gold+=r.gold;P.gem+=r.gem;if(r.pv)P.pv++;gainXp(r.xp)}
   sfx.coin();toast(r.msg);saveGame();
+}
+/* ---- bau server-autoritativo ---- */
+function applyChestResult(character){
+  const s=character.save;
+  P.gold=s.gold;P.key=s.key;
+  P.chestOpen=!!s.chest;P.chestOpen2=!!s.chest2;P.chestOpen3=!!s.chest3;P.chestOpen4=!!s.chest4;P.chestOpen5=!!s.chest5;P.chestOpen6=!!s.chest6;P.chestOpen7=!!s.chest7;
+  P.bag=(s.bag||[]).map(it=>({...it,n:itemName(it.type,it.tier)}));
+  for(const k of EQ_KEYS)P.eq[k]=s.eq&&s.eq[k]?{...s.eq[k],n:itemName(s.eq[k].type,s.eq[k].tier)}:null;
+  recalc();hud();saveGame();
+}
+async function chestOpenNet(flag){
+  if(!CUR_CHAR||!authToken())return null;
+  try{
+    const r=await authRequest('/api/characters/'+CUR_CHAR.id+'/chest',{method:'POST',token:authToken(),body:{flag}});
+    applyChestResult(r.character);
+    return r;
+  }catch(e){return null}
 }
 async function registerAcc(name,pw){
   name=(name||'').trim();

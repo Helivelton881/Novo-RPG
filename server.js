@@ -36,6 +36,14 @@ const GEAR_TIERS = {
 };
 const EQ_SLOTS = ['sword','shield','armor','helmet','cape','jewel','boots'];
 const COUNTER_FIELDS = ['gk','ki','kit','kt','ktt','kp','kpt','ks','ke','kw','kwt','kv','kvt','ap','key','scr','sl','gb','bs','dt'];
+// Espelha classTypes() do cliente: quais tipos de item cada classe pode
+// receber de sorteio (a propria arma da classe, e escudo so pro guerreiro).
+const CLASS_ITEM_TYPES = {
+  guerreiro: ['sword','shield','armor','helmet','cape','jewel','boots'],
+  druida:    ['staffd','armor','helmet','cape','jewel','boots'],
+  mago:      ['staffm','armor','helmet','cape','jewel','boots'],
+  arqueiro:  ['bow','armor','helmet','cape','jewel','boots'],
+};
 
 // Espelha os precos reais da loja (buildShop/shopDo em index.html) pra
 // validar compra/venda no servidor em vez de confiar no que o cliente manda.
@@ -72,6 +80,33 @@ const questNeed = l => 30 * l;
 function applyQuestXp(save, lvl, xpGain) {
   let xp = save.xp + xpGain;
   while (xp >= questNeed(lvl)) { xp -= questNeed(lvl); lvl = Math.min(99, lvl + 1); }
+  return { xp, lvl };
+}
+
+// Espelha os 7 bauis de mapa (um por area de campo, floresta..vulcao -- o
+// baui de masmorra usa outro fluxo, sem flag persistido, fora do escopo) --
+// cada `flag` e o nome que o cliente usa em P[ch.flag] (openChest em
+// index.html); `field` e o nome correspondente gravado no save (chest,
+// chest2..chest7). So abre uma vez por personagem: field vira true e trava.
+const CHEST_REWARDS = {
+  chestOpen:  {field:'chest',  gold:60,  tier:4},
+  chestOpen2: {field:'chest2', gold:60,  tier:4},
+  chestOpen3: {field:'chest3', gold:60,  tier:4},
+  chestOpen4: {field:'chest4', gold:100, tier:5},
+  chestOpen5: {field:'chest5', gold:150, tier:5},
+  chestOpen6: {field:'chest6', gold:200, tier:5},
+  chestOpen7: {field:'chest7', gold:250, tier:5},
+};
+function rollChestItem(save, lvl, tier) {
+  const types = CLASS_ITEM_TYPES[save.cls] || ['armor'];
+  const type = types[Math.floor(Math.random() * types.length)];
+  const item = sanitizeItem({ type, tier });
+  if (!item) return null;
+  const slot = typeSlot(type), canEquip = !save.eq[slot] && (!item.req || lvl >= item.req);
+  if (canEquip) save.eq[slot] = item;
+  else if (save.bag.length < 24) save.bag.push(item);
+  else return null;
+  return item;
   return { xp, lvl };
 }
 
@@ -382,6 +417,7 @@ async function handleCharacters(req, res, pathname) {
 
 const SHOP_ID_RE = /^\/api\/characters\/([0-9a-fA-F-]{8,36})\/shop$/;
 const QUEST_ID_RE = /^\/api\/characters\/([0-9a-fA-F-]{8,36})\/quest$/;
+const CHEST_ID_RE = /^\/api\/characters\/([0-9a-fA-F-]{8,36})\/chest$/;
 
 // Loja/economia server-autoritativa: le o save atual do personagem no banco,
 // aplica a transacao contra as tabelas de preco acima (nunca confia em preco
@@ -516,6 +552,41 @@ async function handleQuest(req, res, pathname) {
   } catch (err) {
     console.error('quest_error', err.message, err.status || '', err.detail || '');
     if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Missões online ainda não configuradas no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+async function handleChest(req, res, pathname) {
+  const m = CHEST_ID_RE.exec(pathname);
+  if (!m) return false;
+  if (req.method !== 'POST') { json(res,405,{error:'Método não permitido'}); return true; }
+  const charId = m[1];
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
+    const row = rows0[0];
+    if (!row) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+    const lvl = row.lvl;
+    const save = sanitizeSave(row.save, lvl);
+    const input = await readJson(req);
+    const reward = CHEST_REWARDS[String(input.flag || '')];
+
+    if (!reward) { json(res,400,{error:'Baú inválido'}); return true; }
+    if (save[reward.field]) { json(res,400,{error:'Esse baú já foi aberto'}); return true; }
+    if (save.key < 1) { json(res,400,{error:'Sem chave'}); return true; }
+
+    save.key -= 1;
+    save[reward.field] = true;
+    save.gold = Math.min(500000, save.gold + reward.gold);
+    const item = rollChestItem(save, lvl, reward.tier);
+
+    const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
+    if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+    json(res,200,{character: rows[0], item}); return true;
+  } catch (err) {
+    console.error('chest_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Baús online ainda não configurados no servidor.':'Não foi possível concluir. Tente novamente.'});
     return true;
   }
 }
@@ -667,6 +738,7 @@ const server = http.createServer(async (req, res) => {
   if (await handleAuth(req, res, pathname)) return;
   if (await handleShop(req, res, pathname)) return;
   if (await handleQuest(req, res, pathname)) return;
+  if (await handleChest(req, res, pathname)) return;
   if (await handleCharacters(req, res, pathname)) return;
   if (await handleFriends(req, res, pathname)) return;
   if (await handleParty(req, res, pathname)) return;
