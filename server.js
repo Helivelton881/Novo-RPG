@@ -1832,6 +1832,15 @@ const MOB_AI_STEP = {
   bat: stepBat, cinza: stepCinza, toxic: stepToxic, caster: stepCaster,
   sky: stepSky, sala: stepSala, elem: stepElem, calc: stepCalc, lorde: stepLorde,
 };
+const MOB_VISUAL_FIELDS = ['t', 't0', 'la', 'lx', 'ly', 'tx', 'ty', 'atk', 'k', 'heavy', 'bx', 'by', 'enr', 'face', 'cmb', 'guard', 'al'];
+function mobPositionPayload(mob, moving) {
+  const out = { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state, moving };
+  for (const key of MOB_VISUAL_FIELDS) {
+    const value = mob[key];
+    if ((typeof value === 'number' && Number.isFinite(value)) || typeof value === 'string' || typeof value === 'boolean') out[key] = value;
+  }
+  return out;
+}
 let mobAiLastTick = performance.now();
 function tickMobAI() {
   const now = performance.now();
@@ -1848,9 +1857,18 @@ function tickMobAI() {
       const stepFn = MOB_AI_STEP[mob.type];
       if (!stepFn) continue;
       mob.map = state.id;
+      const startX = mob.x, startY = mob.y;
       let upd = null;
-      for (let i = 0; i < slices; i++) upd = stepFn(mob, dt, present) || upd;
-      if (upd && Number.isFinite(mob.x) && Number.isFinite(mob.y)) moved.push(upd);
+      for (let i = 0; i < slices; i++) {
+        const previousState = mob.state;
+        upd = stepFn(mob, dt, present) || upd;
+        if (mob.state !== previousState && Number.isFinite(mob.t) && mob.t > 0) mob.t0 = mob.t;
+      }
+      if (upd && Number.isFinite(mob.x) && Number.isFinite(mob.y)) {
+        const moving = Math.hypot(mob.x - startX, mob.y - startY) > .01;
+        if (Math.abs(mob.x - startX) > .01) mob.face = mob.x < startX ? -1 : 1;
+        moved.push(mobPositionPayload(mob, moving));
+      }
     }
     if (moved.length) broadcastMap(state.id, { type: 'mob_positions', map: state.id, mobs: moved });
   }

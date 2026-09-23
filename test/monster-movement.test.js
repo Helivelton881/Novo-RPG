@@ -29,6 +29,7 @@ test('cliente online nao envia nem aplica autoridade local de posicao dos monstr
   assert.match(runtime, /serverX/);
   assert.match(runtime, /1-Math\.exp\(-18\*/, 'interpolacao deve ser independente do FPS');
   assert.match(runtime, /netLockMobs\(dt\)/, 'interpolacao deve rodar no update com dt');
+  assert.match(runtime, /MOB_NET_VISUAL_FIELDS/, 'cliente deve aplicar o estado visual autoritativo dos ataques');
 });
 
 test('dispatcher cobre os 13 tipos e todo deslocamento usa dt medido e limitado', () => {
@@ -41,6 +42,20 @@ test('dispatcher cobre os 13 tipos e todo deslocamento usa dt medido e limitado'
   assert.match(block, /Math\.min\(\.2,/);
   assert.match(block, /Math\.ceil\(elapsed \/ \.05\)/);
   assert.doesNotMatch(src, /msg\.type === ['"]mob_snapshot['"]/, 'servidor ainda aceita posicao forjada do cliente');
+  assert.match(block, /mobPositionPayload\(mob, moving\)/, 'broadcast deve incluir estado visual autoritativo');
+});
+
+test('broadcast sincroniza telegraph de ataque sem dar autoridade ao cliente', async () => {
+  const c = await joinWs(srv, { name: 'Attack Visual', lvl: 20 });
+  c.ws.send(JSON.stringify({ type: 'state', map: 'floresta', x: 460, y: 300, dir: 0, moving: false, lvl: 20 }));
+  await sleep(60);
+  c.ws.send(JSON.stringify({ type: 'map_join', map: 'floresta', mobs: Array.from({ length: 19 }, (_, i) => ({ id: 'attack-ai-' + i, x: 400 + (i % 10) * 120, y: 300 + Math.floor(i / 10) * 150 })) }));
+  const telegraph = await waitFor(c.msgs, m => m.type === 'mob_positions' && m.mobs.some(x => x.state === 'wind' && Number.isFinite(x.t) && Number.isFinite(x.t0) && Number.isFinite(x.lx) && Number.isFinite(x.ly)), 5000);
+  const mob = telegraph.mobs.find(x => x.state === 'wind' && Number.isFinite(x.t) && Number.isFinite(x.t0));
+  assert.equal(typeof mob.moving, 'boolean');
+  assert.ok(mob.t0 > 0 && mob.t <= mob.t0, 'temporizacao do telegraph invalida');
+  await waitFor(c.msgs, m => m.type === 'mob_hit' && m.mobId === mob.id, 5000);
+  c.close();
 });
 
 test('snapshot forjado pelo cliente nao altera a posicao autoritativa', async () => {

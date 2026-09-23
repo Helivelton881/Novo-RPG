@@ -2589,6 +2589,7 @@ const REMOTE=new Map();
 const RPROJ=[];
 let NET=null,NET_ID=null,NET_MAP='',netSendT=0,netRetry=0;
 let netProjectileSeq=0;
+const MOB_NET_VISUAL_FIELDS=['t','t0','la','lx','ly','tx','ty','atk','k','heavy','bx','by','enr','face','moving','cmb','guard','al'];
 function netLabel(text,on){const e=$('#net');if(!e)return;e.textContent=text;e.classList.toggle('online',!!on);e.classList.toggle('offline',!on)}
 function netMobById(id){return MOBS.find(m=>m.netId===id)}
 function netJoinMap(){
@@ -2616,7 +2617,7 @@ function netConnect(){
     else if(m.type==='player_leave'){REMOTE.delete(m.id);netLabel((REMOTE.size+1)+' online',true)}
     else if(m.type==='map_state'&&m.map===W_.name){for(const u of m.mobs||[])netApplyMob(u,null)}
     else if(m.type==='mob_state'&&m.map===W_.name)netApplyMob(m.mob,m.killerId);
-    else if(m.type==='mob_positions'&&m.map===W_.name)for(const u of m.mobs||[]){const x=netMobById(u.id),sx=Number(u.x),sy=Number(u.y);if(x&&!x.dead&&Number.isFinite(sx)&&Number.isFinite(sy)){x.serverX=sx;x.serverY=sy;x.netState=u.state||x.netState}}
+    else if(m.type==='mob_positions'&&m.map===W_.name)for(const u of m.mobs||[]){const x=netMobById(u.id),sx=Number(u.x),sy=Number(u.y);if(x&&!x.dead&&Number.isFinite(sx)&&Number.isFinite(sy)){x.serverX=sx;x.serverY=sy;x.netState=u.state||x.netState;x.state=x.netState;for(const k of MOB_NET_VISUAL_FIELDS)if(Object.prototype.hasOwnProperty.call(u,k)){const v=u[k];if((typeof v==='number'&&Number.isFinite(v))||typeof v==='string'||typeof v==='boolean')x[k]=v}}}
     else if(m.type==='mob_hit'&&m.map===W_.name){const x=netMobById(m.mobId);hurtPlayer(m.dmg,x?{x:x.x,y:x.y}:null)}
     else if(m.type==='projectile'&&m.map===W_.name&&m.ownerId!==NET_ID){const p=m.projectile;if(p&&!RPROJ.some(x=>x.id===p.id))RPROJ.push(Object.assign({remote:true},p))}
     else if(m.type==='projectile_end'&&m.map===W_.name&&m.ownerId!==NET_ID){const i=RPROJ.findIndex(x=>x.id===m.id);if(i>=0)RPROJ.splice(i,1);if(m.boom)EFX.push({kind:'boom',x:m.x,y:m.y+22,t:0,life:.35,r:70,col:'255,140,40'})}
