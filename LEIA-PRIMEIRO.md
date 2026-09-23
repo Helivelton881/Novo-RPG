@@ -68,6 +68,12 @@ Ao reconstruir o save (`sanitizeSave`), se uma arma equipada (`eq.sword` — só
 
 Testado com um teste de unidade rodando o trecho real de `sanitizeSave`/`sanitizeItem` via `vm`: item acima do nível é desequipado e preservado na mochila; no nível exato do requisito continua equipado; itens sem `req` (armadura, escudo, etc.) nunca são afetados; mochila cheia não estoura o limite de 24.
 
+## Fase 1 (unidade 3) — pontos de habilidade não podem passar do nível real
+
+`sanitizeSave` agora soma quanto cada personagem gastou em rank de skill (`Σ(rank-1)` das 3 skills da própria classe — `CLASS_SKILLS`, já usado desde a Fase B pra validar `cast_skill`) e compara contra o orçamento real (`lvl-1`, a mesma conta que `skillPoints()` faz no cliente). Se o gasto excede o orçamento — só possível editando o save direto, já que o cliente nunca deixa subir rank sem ponto livre — as 3 skills da classe voltam pro rank base (1), o mesmo resultado que a ação "redistribuir habilidades" da loja já produz normalmente. Skills de outra classe que sobrarem no save (ex.: troca de classe nunca existiu no jogo, mas um save adulterado podia ter lixo) são descartadas nesse mesmo passo.
+
+Testado com um teste de unidade rodando o trecho real de `sanitizeSave` via `vm`: nível 1 com as 3 skills adulteradas pro máximo reseta; nível 7 com o máximo *legítimo* (6 pontos = orçamento exato) se mantém; gasto parcial dentro do orçamento se mantém; gasto estourando o orçamento reseta; skill de outra classe é descartada; save novo/vazio recebe o baseline rank 1 nas 3 skills da classe.
+
 **Descoberta importante durante a investigação desta fase, que muda a ordem planejada:** o servidor **não tem um roster de monstros próprio** — `map_join` aceita a lista de monstros (`id`, `maxhp`, posição, `boss`) que o *primeiro cliente a entrar no mapa* manda (`server.js`, handler de `map_join`). Isso é inofensivo hoje porque matar um monstro só zera o HP dele no servidor, sem conceder nada. Mas é um bloqueio direto pra "XP por abate de monstro" (a próxima unidade cogitada): sem um roster autoritativo, um cliente adulterado poderia inventar um monstro fake com 1 de HP e farmar XP infinita. Mover XP/loot de abate pro servidor vai exigir resolver isso primeiro (roster de monstro autoritativo por mapa) — maior que uma unidade isolada, então a Fase 1 seguiu por um alvo menor e mais seguro nesta rodada (requisito de equipamento) em vez disso.
 
 ## Amigos e Grupo

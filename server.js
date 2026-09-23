@@ -199,6 +199,16 @@ function sanitizeSave(raw, lvl) {
     if (item && item.req && item.req > lvl) { if (out.bag.length < 24) out.bag.push(item); item = null; }
     out.eq[s] = item;
   }
+  // Pontos de habilidade gastos (rank-1 por skill) nunca podem passar de
+  // lvl-1 disponivel (skillPoints() no cliente) -- um cliente honesto nunca
+  // sobe rank sem ter ponto livre. Sem isso, um save editado podia upar as
+  // 3 skills da classe pro rank maximo (3) em qualquer nivel. Se o total
+  // gasto excede o orcamento, reseta as 3 pro rank base -- mesmo resultado
+  // que a acao "redistribuir" da loja ja produz normalmente.
+  const validSkills = CLASS_SKILLS[out.cls] || [];
+  const filteredSk = {}; for (const id of validSkills) filteredSk[id] = out.sk[id] || 1;
+  const spentPts = validSkills.reduce((sum, id) => sum + (filteredSk[id] - 1), 0);
+  out.sk = spentPts > Math.max(0, lvl - 1) ? Object.fromEntries(validSkills.map(id => [id, 1])) : filteredSk;
   return out;
 }
 
