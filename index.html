@@ -2587,7 +2587,7 @@ const keys={};let started=false;
 const stage=$('#stage'),ctx=stage.getContext('2d');
 const REMOTE=new Map();
 const RPROJ=[];
-let NET=null,NET_ID=null,NET_AUTH=null,NET_MAP='',netSendT=0,netMobT=0,netRetry=0;
+let NET=null,NET_ID=null,NET_MAP='',netSendT=0,netRetry=0;
 let netProjectileSeq=0;
 function netLabel(text,on){const e=$('#net');if(!e)return;e.textContent=text;e.classList.toggle('online',!!on);e.classList.toggle('offline',!on)}
 function netMobById(id){return MOBS.find(m=>m.netId===id)}
@@ -2598,9 +2598,11 @@ function netJoinMap(){
 }
 function netApplyMob(u,killerId){
   if(!u||u.id==null)return;const m=netMobById(u.id);if(!m)return;
-  m.netHp=Math.max(0,Number(u.hp));m.netDead=!!u.dead;m.netX=Number(u.x);m.netY=Number(u.y);m.netState=u.state||m.state;
+  const first=!Number.isFinite(m.serverX)||!Number.isFinite(m.serverY),sx=Number(u.x),sy=Number(u.y);
+  m.netHp=Math.max(0,Number(u.hp));m.netDead=!!u.dead;m.serverX=sx;m.serverY=sy;m.netState=u.state||m.state;
+  if(first&&Number.isFinite(sx)&&Number.isFinite(sy)){m.x=sx;m.y=sy}
   if(m.netDead&&!m.dead){m.hp=0;if(killerId===NET_ID){killMob(m);for(const z of MOBS)if(z!==m&&z.dead&&!z.netDead&&z.netId)netMobDamage(z,z.maxhp||999999)}else{m.dead=true;m.respawn=1e9;m.bar=0;if(tgt===m)clearTarget()}}
-  else if(!m.netDead&&m.dead){m.dead=false;m.respawn=0;m.hp=m.maxhp;m.x=m.sx;m.y=m.sy;m.state='idle'}
+  else if(!m.netDead&&m.dead){m.dead=false;m.respawn=0;m.hp=m.maxhp;if(Number.isFinite(sx)&&Number.isFinite(sy)){m.x=sx;m.y=sy}m.state='idle'}
   m.hp=m.netHp;
 }
 function netConnect(){
@@ -2612,11 +2614,9 @@ function netConnect(){
     if(m.type==='welcome'){NET_ID=m.id;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel((REMOTE.size+1)+' online',true);netJoinMap()}
     else if(m.type==='player_join'||m.type==='state'){const p=m.player;if(p&&p.id!==NET_ID){const old=REMOTE.get(p.id);REMOTE.set(p.id,Object.assign(old||{},p));netLabel((REMOTE.size+1)+' online',true)}}
     else if(m.type==='player_leave'){REMOTE.delete(m.id);netLabel((REMOTE.size+1)+' online',true)}
-    else if(m.type==='map_state'&&m.map===W_.name){NET_AUTH=m.authorityId;for(const u of m.mobs||[])netApplyMob(u,null)}
-    else if(m.type==='authority'&&m.map===W_.name)NET_AUTH=m.authorityId;
+    else if(m.type==='map_state'&&m.map===W_.name){for(const u of m.mobs||[])netApplyMob(u,null)}
     else if(m.type==='mob_state'&&m.map===W_.name)netApplyMob(m.mob,m.killerId);
-    else if(m.type==='mob_snapshot'&&m.map===W_.name)for(const u of m.mobs||[]){const x=netMobById(u.id);if(x){x.netX=Number(u.x);x.netY=Number(u.y);x.netState=u.state||x.state}}
-    else if(m.type==='mob_positions'&&m.map===W_.name)for(const u of m.mobs||[]){const x=netMobById(u.id);if(x&&!x.dead){x.x=Number(u.x);x.y=Number(u.y);if(u.state)x.state=u.state}}
+    else if(m.type==='mob_positions'&&m.map===W_.name)for(const u of m.mobs||[]){const x=netMobById(u.id),sx=Number(u.x),sy=Number(u.y);if(x&&!x.dead&&Number.isFinite(sx)&&Number.isFinite(sy)){x.serverX=sx;x.serverY=sy;x.netState=u.state||x.netState}}
     else if(m.type==='mob_hit'&&m.map===W_.name){const x=netMobById(m.mobId);hurtPlayer(m.dmg,x?{x:x.x,y:x.y}:null)}
     else if(m.type==='projectile'&&m.map===W_.name&&m.ownerId!==NET_ID){const p=m.projectile;if(p&&!RPROJ.some(x=>x.id===p.id))RPROJ.push(Object.assign({remote:true},p))}
     else if(m.type==='projectile_end'&&m.map===W_.name&&m.ownerId!==NET_ID){const i=RPROJ.findIndex(x=>x.id===m.id);if(i>=0)RPROJ.splice(i,1);if(m.boom)EFX.push({kind:'boom',x:m.x,y:m.y+22,t:0,life:.35,r:70,col:'255,140,40'})}
@@ -2635,13 +2635,12 @@ function netConnect(){
       hud();
     }
   };
-  NET.onclose=()=>{NET_ID=null;NET_AUTH=null;NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};
+  NET.onclose=()=>{NET_ID=null;NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};
   NET.onerror=()=>NET.close();
 }
 function netUpdate(dt){
   if(!NET||NET.readyState!==1)return;
   netSendT-=dt;if(netSendT<=0){netSendT=.09;NET.send(JSON.stringify({type:'state',map:W_?W_.name:'vila',x:P.x,y:P.y,dir:P.dir,moving:P.moving,lvl:P.lvl,atkT:Math.max(0,P.atkT||0),atkAng:P.atkAng||0}));if(W_&&NET_MAP!==W_.name)netJoinMap()}
-  netMobT-=dt;if(netMobT<=0&&NET_AUTH===NET_ID&&W_){netMobT=.2;NET.send(JSON.stringify({type:'mob_snapshot',map:W_.name,mobs:MOBS.filter(m=>!m.dead&&m.netId).map(m=>({id:m.netId,x:m.x,y:m.y,state:m.state}))}))}
 }
 function netMobDamage(m,damage,skill,splash){if(NET&&NET.readyState===1&&m.netId){NET.send(JSON.stringify({type:'mob_damage',map:W_.name,id:m.netId,skill:skill||'basic',atk:P.atk,splash:!!splash}));return true}return false}
 function pvpOn(){return !!(W_&&W_.name!=='vila')}
@@ -2649,7 +2648,18 @@ function netPlayerDamage(rp,skill,splash){if(!pvpOn()||!NET||NET.readyState!==1|
 function remotesInMap(){const l=[];for(const p of REMOTE.values())if(p.map===W_.name)l.push(p);return l}
 function netProjectile(p){if(!NET||NET.readyState!==1||!W_)return;p.nid=NET_ID+':p'+(++netProjectileSeq);NET.send(JSON.stringify({type:'projectile',map:W_.name,id:p.nid,kind:p.kind,x:p.x,y:p.y,vx:p.vx,vy:p.vy,life:p.life,r:p.r,pierce:p.pierce}))}
 function netProjectileEnd(p){if(NET&&NET.readyState===1&&p.nid)NET.send(JSON.stringify({type:'projectile_end',map:W_.name,id:p.nid,x:p.x,y:p.y,boom:!!p.splash}))}
-function netLockMobs(){if(!NET_ID)return;for(const m of MOBS){if(m.netHp!=null)m.hp=m.netHp;if(m.netDead)m.dead=true;if(NET_AUTH!==NET_ID&&!m.dead&&Number.isFinite(m.netX)){m.x=m.netX;m.y=m.netY;if(m.netState)m.state=m.netState}}}
+function netLockMobs(dt){
+  if(!NET_ID)return;const k=1-Math.exp(-18*Math.min(.1,Math.max(0,Number(dt)||0)));
+  for(const m of MOBS){
+    if(m.netHp!=null)m.hp=m.netHp;if(m.netDead)m.dead=true;
+    if(!m.dead&&Number.isFinite(m.serverX)&&Number.isFinite(m.serverY)){
+      const dx=m.serverX-m.x,dy=m.serverY-m.y;
+      if(!Number.isFinite(m.x)||!Number.isFinite(m.y)||Math.hypot(dx,dy)>240){m.x=m.serverX;m.y=m.serverY}
+      else{m.x+=dx*k;m.y+=dy*k}
+      if(m.netState)m.state=m.netState;
+    }
+  }
+}
 function netChat(text){if(NET&&NET.readyState===1){NET.send(JSON.stringify({type:'chat',text}));return true}return false}
 addEventListener('keydown',e=>{
   if(!started||(e.target&&(e.target.tagName==='INPUT'||e.target.tagName==='TEXTAREA')))return;
@@ -2745,7 +2755,7 @@ function travel(to){
 function update(dt){
   time+=dt;
   netUpdate(dt);
-  netLockMobs();
+  netLockMobs(dt);
   if(traveling||uiBusy())return;
   P.pt+=dt;skillUpdate(dt);
   if(P.cd>0)P.cd-=dt;if(P.inv>0)P.inv-=dt;if(P.hurtT>0)P.hurtT-=dt;if(P.atkT>0){P.atkT-=dt;if(!P.hitDone&&P.atkT<.2){P.hitDone=true;doHits()}}
@@ -3084,7 +3094,6 @@ function drawFloaters(){
   ctx.globalAlpha=1;
 }
 function draw(){
-  netLockMobs();
   const tx=P.x,ty=P.y-30;
   camX=Math.round(clamp(tx-vw*focX,0,WPX-vw));camY=Math.round(clamp(ty-vh*focY,0,HPX-vh));
   ctx.setTransform(zoom,0,0,zoom,-camX*zoom,-camY*zoom);

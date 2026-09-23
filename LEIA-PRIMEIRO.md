@@ -17,7 +17,7 @@ O cliente descobre o endereço do WebSocket sozinho (`wss://` ou `ws://` + o hos
 
 - entrada, saída, posição, direção, animação, classe e nível dos jogadores no mesmo mapa;
 - HP, dano, morte e respawn dos monstros — o servidor arbitra o estado real;
-- uma autoridade de movimentação dos monstros por mapa (um dos clientes conectados), com troca automática se ela desconectar;
+- IA e posição dos monstros autoritativas no servidor, compartilhadas por todos os clientes do mapa;
 - layout determinístico das masmorras, para todos entrarem no mesmo labirinto;
 - projéteis de mago, arqueiro e druida (disparo, trajetória, impacto);
 - contador de jogadores online, heartbeat e validação básica de mensagens.
@@ -32,7 +32,7 @@ O cliente manda `cast_skill` (`id`, `sk`=rank, `atk`) toda vez que usa uma habil
 
 ## Fase C1 — validação de alcance (sem reescrever IA)
 
-Sem simular monstro nenhum: o servidor já sabe a posição real do jogador (via `state`, enviado a cada ~90ms) e a última posição conhecida do monstro (via `mob_snapshot`, hoje só retransmitida do cliente-autoridade). Em todo `mob_damage`, rejeita o golpe se a distância entre as duas for maior que 550 — generoso o bastante pra cobrir o pior caso real do jogo (Flecha Perfurante viaja ~476; Raízes/Campo de Espinhos podem mirar um alvo a até 320 de distância + 90 de raio), mas suficiente pra travar "bater em monstro que está do outro lado do mapa" ou que nem existe de verdade pra você. Testado com um monstro movido artificialmente pra longe via `mob_snapshot` falso: o golpe foi corretamente rejeitado; movido pra uma distância moderada, voltou a funcionar.
+Na etapa histórica C1, antes da IA server-side, o servidor usava a última posição recebida por `mob_snapshot` para validar o alcance de 550px. Desde a Fase 2.1 esse pacote não é mais aceito: a mesma validação usa a posição simulada pelo próprio servidor.
 
 Isso não substitui a Fase C completa — a posição do monstro em si ainda vem do cliente-autoridade, não de uma simulação do servidor. É uma auditoria sobre o que já se recebe, não uma fonte de verdade nova.
 
@@ -131,7 +131,7 @@ Testado com um teste de unidade (`vm` sobre o trecho real de decisão, sem os do
 
 Com a Fase 1 (progressão/economia) substancialmente fechada, a Fase 2 ataca a peça que ficou de fora o tempo todo: hoje o servidor só arbitra HP/morte/respawn de monstro, mas **posição, perseguição e dano de monstro→jogador são 100% do cliente** — `hurtPlayer()` nunca manda nada pro servidor, então um cliente adulterado pode simplesmente nunca perder HP de monstro (mesmo continuando a ganhar XP/ouro/loot validados dos próprios abates que reporta). Diferente de toda a Fase 1 — onde dava pra validar o que o cliente reporta — aqui não existe atalho: quem se beneficiaria de sub-relatar dano recebido é a vítima, então autorrelato nunca é confiável nessa direção. Fechar isso de verdade exige o servidor decidir sozinho quando um ataque de monstro acerta, ou seja, simular posição de verdade — não um validador leve como o resto da Fase 1.
 
-A IA hoje é **12 funções `updX(s,dt)` independentes** no cliente (uma por tipo de monstro), cada uma reimplementando o mesmo padrão comum (`idle`→`chase`→`wind`/telegraph→resolve→`recover`→`chase`, com leash de retorno pro spawn) mais 1-3 estados de ataque especial próprios. `aggro(s)`/`alertPack(s)` fazem uma varredura de TODOS os monstros do mapa (sem índice espacial, sem checagem de distância no alerta de grupo) sempre que o jogador acerta um golpe. A autoridade de movimento (`chooseAuthority`, cliente mais antigo conectado no mapa) manda posição a cada 200ms via `mob_snapshot`; os demais clientes fazem **snap duro**, sem interpolação — não existe suavização pra preservar. Confirmado que `authorityId`/`NET_AUTH`/`mob_snapshot` não são usados por mais nada no projeto — seguros de remover conforme cada tipo migrar pro servidor.
+Na auditoria inicial da Fase 2, a IA era formada por funções `updX(s,dt)` independentes no cliente. A antiga autoridade de movimento (`chooseAuthority`) enviava `mob_snapshot` a cada 200ms e os demais clientes faziam snap duro. Esse diagnóstico histórico motivou a migração server-side; a Fase 2.1 abaixo remove definitivamente o caminho de snapshot e adiciona interpolação visual.
 
 **Bloqueio adicional real:** o servidor não tem nenhum dado de colisão/terreno (`blocked()` só existe no cliente) — simular movimento sem isso faz monstro atravessar parede. Fica como limitação conhecida por enquanto, não escondida.
 
@@ -181,6 +181,16 @@ Testado com um teste de integração via WebSocket real cobrindo os 6 mapas rest
 **Descoberta durante o teste, não um bug:** morcego (e os subtipos do céu com ataque à distância/investida) têm um alcance **mínimo** de engajamento (`d>50`) no próprio design original — eles mergulham de uma certa distância, não atacam colados. Um teste que persegue a posição exata do monstro nunca dispara o ataque por design, não por falha do servidor; corrigido no teste (mantém ~120px de distância), não no comportamento.
 
 Isso encerra o que esta sessão considera **Fase 2 completável sem uma extensão de arquitetura maior**. O que resta é genuinamente fora de alcance com a base atual: colisão de terreno no servidor (portar `blocked()`/dados de mapa) e simulação de IA de chefe completa (revivência de sequitos, barreiras, invocações) — cada um comparável em tamanho a esta fase inteira.
+
+## Fase 2.1 — estabilização de movimento e sincronização
+
+O servidor agora é a única fonte da posição dos monstros online. O caminho antigo `mob_snapshot` foi removido dos dois lados: nenhum cliente, inclusive o antigo `authorityId`, pode sobrescrever `x/y/state`. `tickMobAI()` mede o tempo real com `performance.now()`, limita atrasos a 200ms e subdivide o movimento em passos de no máximo 50ms. Todos os 13 `stepX` passam deslocamento normal e dash por `moveMob()`, que rejeita valores não finitos, limita cada subpasso a 32px e mantém a posição dentro de `0..2880 × 0..2112`. Velocidades, raios, cooldowns e dano não foram rebalanceados.
+
+O cliente guarda `serverX/serverY` separados de `x/y`: estes últimos são apenas a posição visual, aproximada com uma exponencial baseada em `dt` (`1-exp(-18*dt)`). O estado chega imediatamente, mas posição não sofre snap a cada broadcast. O fallback offline permanece nas funções `updX`; a saída antecipada com WebSocket conectado impede dupla simulação online.
+
+Alvos continuam estáveis enquanto válidos. Se o alvo desconecta ou troca de mapa, estados de telegraph/dash não mudam de jogador no meio do ataque; após o estado terminar, `targetPlayer()` seleciona um jogador válido restante. Ao concluir `return`, `settleAtSpawn()` fixa exatamente `x=sx` e `y=sy`, limpa `tgt` e volta a `idle`. Respawn também limpa alvo, cooldown/timers e nasce exatamente em `sx/sy`.
+
+**Colisão server-side nesta fase:** foi adicionada a camada mínima segura de limites do mapa, validação finita, limite de salto e aplicação centralizada também para dash. Paredes, pedras e construções internas ainda não são conhecidas pelo servidor porque `blocked()` consome geometria gerada exclusivamente em `index.html`. Portar isso corretamente exige extrair um manifesto compartilhado de terreno; não foi duplicado um segundo mapa divergente nesta correção. Portanto, a Fase 2.1 impede sair do mundo e reduz tunneling/saltos, mas colisão completa com obstáculos internos permanece uma tarefa arquitetural explícita.
 
 # Fase 3 — testes automáticos + CI
 

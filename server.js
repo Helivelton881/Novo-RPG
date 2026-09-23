@@ -971,15 +971,10 @@ function broadcastMap(map, payload) {
 
 function mapState(id) {
   let state=maps.get(id);
-  if(!state){state={id,mobs:new Map(),authorityId:null,hitGuard:new Map(),pvpGuard:new Map()};maps.set(id,state)}
+  if(!state){state={id,mobs:new Map(),hitGuard:new Map(),pvpGuard:new Map()};maps.set(id,state)}
   return state;
 }
 
-function chooseAuthority(state) {
-  const present=playersOnMap(state.id);
-  if(!present.some(([,p])=>p.id===state.authorityId)) state.authorityId=present[0]?.[1].id||null;
-  return state.authorityId;
-}
 
 function publicPlayer(player) {
   return {id:player.id,name:player.name,cls:player.cls,map:player.map,x:player.x,y:player.y,dir:player.dir,moving:player.moving,lvl:player.lvl,atkT:player.atkT||0,atkAng:player.atkAng||0};
@@ -1028,9 +1023,8 @@ wss.on('connection', ws => {
       if (!ALLOWED_MAP.test(map)) return;
       const x = Number(msg.x), y = Number(msg.y);
       if (!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>2880||y>2112) return;
-      const oldMap=p.map,atkT=Math.max(0,Math.min(.4,Number(msg.atkT)||0)),atkAng=Number(msg.atkAng)||0;
+      const atkT=Math.max(0,Math.min(.4,Number(msg.atkT)||0)),atkAng=Number(msg.atkAng)||0;
       Object.assign(p,{map,x,y,dir:Math.max(0,Math.min(3,Number(msg.dir)|0)),moving:!!msg.moving,lvl:Math.max(1,Math.min(99,Number(msg.lvl)||1)),atkT,atkAng:Math.max(-Math.PI*2,Math.min(Math.PI*2,atkAng))});
-      if(oldMap!==map){const oldState=maps.get(oldMap);if(oldState){chooseAuthority(oldState);broadcastMap(oldMap,{type:'authority',map:oldMap,authorityId:oldState.authorityId})}}
       broadcast({type:'state',player:publicPlayer(p)},ws);
     } else if (msg.type === 'map_join') {
       const map=cleanText(msg.map,24);if(!ALLOWED_MAP.test(map)||map!==p.map)return;
@@ -1078,9 +1072,7 @@ wss.on('connection', ws => {
           }
         }
       }
-      chooseAuthority(state);
-      send(ws,{type:'map_state',map,authorityId:state.authorityId,mobs:[...state.mobs.values()]});
-      broadcastMap(map,{type:'authority',map,authorityId:state.authorityId});
+      send(ws,{type:'map_state',map,mobs:[...state.mobs.values()]});
     } else if (msg.type === 'cast_skill') {
       const map=cleanText(msg.map,24);if(map!==p.map)return;
       const id=cleanText(msg.id,16),sk=Math.max(1,Math.min(3,Math.round(Number(msg.sk))||1)),atk=clampAtk(msg.atk);
@@ -1099,12 +1091,11 @@ wss.on('connection', ws => {
       const mobId=cleanText(msg.id,48),mob=state.mobs.get(mobId);
       if(!mob||mob.dead)return;
       // alcance plausivel: usa a posicao real do jogador (rastreada via
-      // 'state') e a ultima posicao conhecida do monstro (rastreada via
-      // mob_snapshot) para rejeitar um golpe em algo longe demais pra
+      // 'state') e a posicao do monstro simulada pelo servidor para rejeitar
+      // um golpe em algo longe demais pra
       // qualquer ataque do jogo (o maior caso real e a Flecha Perfurante,
       // que viaja ate ~476; roots/thorns podem mirar ate 320 de distancia
-      // + 90 de raio). O servidor ainda nao simula a posicao do monstro
-      // (isso seria a Fase C completa) -- aqui so audita o que ja recebe.
+      // + 90 de raio).
       if(Math.hypot(mob.x-p.x,mob.y-p.y)>550)return;
       // anti-spam por (jogador,monstro): bloqueia macro/cliente adulterado
       // batendo no mesmo alvo rapido demais.
@@ -1147,10 +1138,6 @@ wss.on('connection', ws => {
       if(!dmg)return;
       state.pvpGuard.set(gk,now);
       broadcastMap(map,{type:'player_hit',map,targetId,attackerId:p.id,attackerName:p.name,dmg});
-    } else if (msg.type === 'mob_snapshot') {
-      const map=cleanText(msg.map,24),state=maps.get(map);if(!state||map!==p.map||state.authorityId!==p.id||!Array.isArray(msg.mobs))return;
-      for(const u of msg.mobs.slice(0,120)){const mob=state.mobs.get(cleanText(u.id,48));if(!mob||mob.dead)continue;const x=Number(u.x),y=Number(u.y);if(Number.isFinite(x)&&Number.isFinite(y)&&x>=0&&x<=2880&&y>=0&&y<=2112){mob.x=x;mob.y=y;mob.state=cleanText(u.state,16)||'idle'}}
-      broadcastMap(map,{type:'mob_snapshot',map,mobs:msg.mobs.slice(0,120)},ws);
     } else if (msg.type === 'projectile') {
       const map=cleanText(msg.map,24),id=cleanText(msg.id,64),kind=cleanText(msg.kind,12);
       if(map!==p.map||!ALLOWED_MAP.test(map)||!id||!['arrow','bolt','leaf','fire'].includes(kind))return;
@@ -1164,12 +1151,12 @@ wss.on('connection', ws => {
       const text=cleanText(msg.text,160);if(text)broadcast({type:'chat',from:p.name,text,at:Date.now()});
     }
   });
-  ws.on('close', () => { const p=clients.get(ws);if(p){clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id});const state=maps.get(p.map);if(state){chooseAuthority(state);broadcastMap(p.map,{type:'authority',map:p.map,authorityId:state.authorityId})}} });
+  ws.on('close', () => { const p=clients.get(ws);if(p){clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
 });
 
 setInterval(()=>{
   const now=Date.now();
-  for(const state of maps.values())for(const mob of state.mobs.values())if(mob.dead&&mob.respawnAt&&now>=mob.respawnAt){mob.dead=false;mob.hp=mob.maxhp;mob.respawnAt=0;mob.x=Number.isFinite(mob.sx)?mob.sx:(Number(mob.x)||0);mob.y=Number.isFinite(mob.sy)?mob.sy:(Number(mob.y)||0);mob.state='idle';broadcastMap(state.id,{type:'mob_state',map:state.id,mob,killerId:null})}
+  for(const state of maps.values())for(const mob of state.mobs.values())if(mob.dead&&mob.respawnAt&&now>=mob.respawnAt){mob.dead=false;mob.hp=mob.maxhp;mob.respawnAt=0;mob.x=Number.isFinite(mob.sx)?mob.sx:(Number(mob.x)||0);mob.y=Number.isFinite(mob.sy)?mob.sy:(Number(mob.y)||0);mob.state='idle';mob.tgt=null;mob.cd=0;mob.ret=0;mob.t=0;mob.hit=false;broadcastMap(state.id,{type:'mob_state',map:state.id,mob,killerId:null})}
 },1000);
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
@@ -1186,6 +1173,34 @@ function nearestPlayer(mob, present) {
   let best = null, bd = Infinity;
   for (const pair of present) { const d = Math.hypot(pair[1].x - mob.x, pair[1].y - mob.y); if (d < bd) { bd = d; best = pair; } }
   return best ? { ws: best[0], p: best[1], d: bd } : null;
+}
+const MOB_TARGET_LOCK_STATES = new Set(['wind','wind2','dash','slam','pounce','swoop','spit','blink','cast','gust','heal','leap','charge','meteor','recover']);
+function targetPlayer(mob, present) {
+  const locked = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (locked) return locked;
+  if (mob.tgt && MOB_TARGET_LOCK_STATES.has(mob.state)) return null;
+  mob.tgt = null;
+  const near = nearestPlayer(mob, present), target = near ? [near.ws, near.p] : null;
+  if (target && mob.state === 'chase') mob.tgt = target[1].id;
+  return target;
+}
+const MOB_WORLD_W = 2880, MOB_WORLD_H = 2112, MOB_MAX_STEP = 32;
+function moveMob(mob, dx, dy) {
+  dx = Number(dx); dy = Number(dy);
+  if (!Number.isFinite(mob.x) || !Number.isFinite(mob.y) || !Number.isFinite(dx) || !Number.isFinite(dy)) return false;
+  const len = Math.hypot(dx, dy), scale = len > MOB_MAX_STEP ? MOB_MAX_STEP / len : 1;
+  dx *= scale; dy *= scale;
+  // Camada minima server-side: limites do mundo e aplicacao separada por eixo.
+  // A geometria de paredes ainda vive no cliente e sera compartilhada numa fase propria.
+  const nx = Math.max(0, Math.min(MOB_WORLD_W, mob.x + dx));
+  const ny = Math.max(0, Math.min(MOB_WORLD_H, mob.y + dy));
+  mob.x = nx; mob.y = ny;
+  return true;
+}
+function settleAtSpawn(mob) {
+  if (!Number.isFinite(mob.sx) || !Number.isFinite(mob.sy)) return false;
+  mob.x = mob.sx; mob.y = mob.sy; mob.state = 'idle'; mob.tgt = null; mob.hp = mob.maxhp;
+  return true;
 }
 // Cada steperX(mob,dt,present) atualiza um monstro por tick e devolve
 // {x,y,state} pra broadcast; espelha exatamente a updX() correspondente do
@@ -1209,9 +1224,8 @@ function stepSlime(mob, dt, present) {
   const ddx = (tx ?? mob.x) - mob.x, ddy = (ty ?? mob.y) - mob.y, dd = Math.hypot(ddx, ddy);
   if (dd > 6) {
     const hop = Math.max(0, Math.sin(mob.anim * 7)) * spd * dt * 1.7;
-    const nx = mob.x + ddx / dd * hop, ny = mob.y + ddy / dd * hop;
-    if (nx > 29.4 * SLIME_TILE) mob.x = nx;
-    mob.y = ny;
+    const dx = ddx / dd * hop, dy = ddy / dd * hop;
+    moveMob(mob, mob.x + dx > 29.4 * SLIME_TILE ? dx : 0, dy);
   }
   if (near && near.d < 30 && mob.cd <= 0) {
     mob.cd = 1.1;
@@ -1231,15 +1245,14 @@ function stepGoblin(mob, dt, present) {
   mob.ret = Math.max(0, (mob.ret || 0) - dt);
   const st = mobStats('goblin', mob.lvl, mob.boss);
   if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
   const step = (tx, ty, spd) => {
     const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy);
     if (dd < 4) return;
-    mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt;
+    moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt);
   };
   switch (mob.state) {
     case 'idle': default: {
@@ -1272,7 +1285,7 @@ function stepGoblin(mob, dt, present) {
       break;
     case 'dash': {
       mob.t -= dt;
-      mob.x += mob.lx * 470 * dt; mob.y += mob.ly * 470 * dt;
+      moveMob(mob, mob.lx * 470 * dt, mob.ly * 470 * dt);
       if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 34) { mob.hit = true; send(target[0], { type: 'mob_hit', map: mob.map, mobId: mob.id, dmg: st.dmg }); }
       if (mob.t <= 0) { mob.state = 'recover'; mob.t = mob.boss ? .75 : 1; mob.cd = 1.3; }
       break;
@@ -1282,7 +1295,7 @@ function stepGoblin(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, 92); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 40);
-      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < 14) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < 110) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1311,12 +1324,11 @@ function stepSkeleton(mob, dt, present) {
   if (!Number.isFinite(mob.sx)) return null;
   mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
   const st = mobStats('skeleton', mob.lvl, mob.boss); if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity, toP = Math.atan2(dy, dx);
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt); };
   switch (mob.state) {
     case 'idle': default:
       if (tp && mob.ret <= 0 && d < (mob.boss ? 230 : 160) && home < 480) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
@@ -1346,7 +1358,7 @@ function stepSkeleton(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, 90); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 45);
-      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < 14) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < 110) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1359,12 +1371,11 @@ function stepWolf(mob, dt, present) {
   if (mob.boss && !mob.enr && mob.hp < mob.maxhp * .4) mob.enr = true;
   const st = mobStats('wolf', mob.lvl, mob.boss); if (!st) return null;
   const sm = mob.enr ? 1.2 : 1;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt * sm; mob.y += ddy / dd * spd * dt * sm; };
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; moveMob(mob, ddx / dd * spd * dt * sm, ddy / dd * spd * dt * sm); };
   switch (mob.state) {
     case 'idle': default:
       if (tp && mob.ret <= 0 && d < (mob.boss ? 260 : 190) && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
@@ -1381,7 +1392,7 @@ function stepWolf(mob, dt, present) {
       mob.t -= dt; if (mob.t <= 0) { mob.state = 'pounce'; mob.t = .28; }
       break;
     case 'pounce': {
-      mob.t -= dt; const sp = mob.boss ? 600 : 540; mob.x += mob.lx * sp * dt; mob.y += mob.ly * sp * dt;
+      mob.t -= dt; const sp = mob.boss ? 600 : 540; moveMob(mob, mob.lx * sp * dt, mob.ly * sp * dt);
       if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 38) { mob.hit = true; hitTarget(target, mob, st.dmg); }
       if (mob.t <= 0) {
         mob.cmb--;
@@ -1395,7 +1406,7 @@ function stepWolf(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, 110); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 50);
-      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < 14) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < 120) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1410,12 +1421,11 @@ function stepFlyer(mob, dt, present, type, statsFor, dmgOf, leech) {
   mob.cd = Math.max(0, (mob.cd || 0) - dt);
   mob.ret = Math.max(0, (mob.ret || 0) - dt);
   const st = statsFor(mob); if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const fly = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 3) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  const fly = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 3) return; moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt); };
   switch (mob.state) {
     case 'idle': default:
       if (tp && mob.ret <= 0 && d < 200 && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
@@ -1432,7 +1442,7 @@ function stepFlyer(mob, dt, present, type, statsFor, dmgOf, leech) {
       mob.t -= dt; if (mob.t <= 0) { mob.state = 'swoop'; mob.t = .3; }
       break;
     case 'swoop': {
-      mob.t -= dt; mob.x += mob.lx * 440 * dt; mob.y += mob.ly * 440 * dt;
+      mob.t -= dt; moveMob(mob, mob.lx * 440 * dt, mob.ly * 440 * dt);
       if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 38) {
         mob.hit = true; const dmg = dmgOf(st, mob.lvl); hitTarget(target, mob, dmg);
         if (leech) mob.hp = Math.min(mob.maxhp, mob.hp + Math.round(dmg * .5));
@@ -1445,7 +1455,7 @@ function stepFlyer(mob, dt, present, type, statsFor, dmgOf, leech) {
       break;
     case 'return':
       fly(mob.sx, mob.sy, 120); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 50);
-      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < 14) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < 130) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1458,12 +1468,11 @@ function stepToxic(mob, dt, present) {
   if (!Number.isFinite(mob.sx)) return null;
   mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
   const st = mobStats('toxic', mob.lvl, mob.boss); if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 6) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 6) return; moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt); };
   if (!mob.boss) {
     if (tp && d < 230 && home < 420) step(tp.x, tp.y, 52);
     else {
@@ -1487,7 +1496,7 @@ function stepToxic(mob, dt, present) {
       mob.t -= dt; if (mob.t <= 0) { mob.state = 'leap'; mob.t = .5; mob.lx = ((mob.tx ?? mob.x) - mob.x) / .5; mob.ly = ((mob.ty ?? mob.y) - mob.y) / .5; }
       break;
     case 'leap':
-      mob.t -= dt; mob.x += mob.lx * dt; mob.y += mob.ly * dt;
+      mob.t -= dt; moveMob(mob, mob.lx * dt, mob.ly * dt);
       if (mob.t <= 0) {
         if (target && Math.hypot(target[1].x - mob.x, (target[1].y - mob.y) * 1.3) < 105) hitTarget(target, mob, st.dmg);
         mob.state = 'recover'; mob.t = 1.2; mob.cd = 2;
@@ -1498,7 +1507,7 @@ function stepToxic(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, 80); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 80);
-      if (home < 16) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < 16) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < 130) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1514,13 +1523,12 @@ function stepCaster(mob, dt, present) {
   if (!Number.isFinite(mob.sx)) return null;
   mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
   const st = mobStats('caster', mob.lvl, mob.boss); if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
   const aggroR = mob.boss ? 320 : 260, giveD = mob.boss ? 520 : 470, giveH = mob.boss ? 640 : 650, atkR = mob.boss ? 430 : 320, spd = mob.boss ? 80 : 72;
-  const step = (tx, ty, sp) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * sp * dt; mob.y += ddy / dd * sp * dt; };
+  const step = (tx, ty, sp) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; moveMob(mob, ddx / dd * sp * dt, ddy / dd * sp * dt); };
   switch (mob.state) {
     case 'idle': default:
       if (tp && mob.ret <= 0 && d < aggroR && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
@@ -1546,7 +1554,7 @@ function stepCaster(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, mob.boss ? 110 : 90); mob.hp = Math.min(mob.maxhp, mob.hp + dt * (mob.boss ? 90 : 60));
-      if (home < (mob.boss ? 16 : 14)) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < (mob.boss ? 16 : 14)) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < (mob.boss ? 140 : 130)) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1561,12 +1569,11 @@ function stepSky(mob, dt, present) {
   if (!Number.isFinite(mob.sx)) return null;
   mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
   const st = mobStats('sky', mob.lvl, mob.boss, mob.k); if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity, toP = Math.atan2(dy, dx);
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt); };
   if (mob.state === 'idle' || !mob.state) {
     if (tp && mob.ret <= 0 && d < (mob.boss ? 340 : 280) && home < 560) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
     else {
@@ -1578,7 +1585,7 @@ function stepSky(mob, dt, present) {
   }
   if (mob.state === 'return') {
     step(mob.sx, mob.sy, 100); mob.hp = Math.min(mob.maxhp, mob.hp + dt * (mob.boss ? 120 : 70));
-    if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+    if (home < 14) settleAtSpawn(mob);
     if (tp && mob.ret <= 0 && d < 130) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
     return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
   }
@@ -1618,7 +1625,7 @@ function stepSky(mob, dt, present) {
         mob.t -= dt; if (mob.t <= 0) { mob.state = 'charge'; mob.t = .42; }
         break;
       case 'charge':
-        mob.t -= dt; mob.x += mob.lx * 520 * dt; mob.y += mob.ly * 520 * dt;
+        mob.t -= dt; moveMob(mob, mob.lx * 520 * dt, mob.ly * 520 * dt);
         if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 42) { mob.hit = true; hitTarget(target, mob, st.dmg); }
         if (mob.t <= 0) { mob.state = 'recover'; mob.t = 1; mob.cd = 2.2; }
         break;
@@ -1648,12 +1655,11 @@ function stepSala(mob, dt, present) {
   mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
   if (!mob.enr && mob.hp < mob.maxhp * .4) mob.enr = true;
   const st = mobStats('sala', mob.lvl, false); if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity, toP = Math.atan2(dy, dx);
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt); };
   switch (mob.state) {
     case 'idle': default:
       if (tp && mob.ret <= 0 && d < 190 && home < 480) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
@@ -1683,7 +1689,7 @@ function stepSala(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, 110); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 50);
-      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; mob.enr = false; }
+      if (home < 14) { settleAtSpawn(mob); mob.enr = false; }
       if (tp && mob.ret <= 0 && d < 120) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1694,12 +1700,11 @@ function stepElem(mob, dt, present) {
   if (!Number.isFinite(mob.sx)) return null;
   mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
   const st = mobStats('elem', mob.lvl, false); if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt); };
   switch (mob.state) {
     case 'idle': default:
       if (tp && mob.ret <= 0 && d < 170 && home < 440) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
@@ -1724,7 +1729,7 @@ function stepElem(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, 70); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 70);
-      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < 14) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < 120) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1735,12 +1740,11 @@ function stepCalc(mob, dt, present) {
   if (!Number.isFinite(mob.sx)) return null;
   mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
   const st = mobStats('calc', mob.lvl, false); if (!st) return null;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity, toP = Math.atan2(dy, dx);
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt); };
   switch (mob.state) {
     case 'idle': default:
       if (tp && mob.ret <= 0 && d < 170 && home < 480) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
@@ -1770,7 +1774,7 @@ function stepCalc(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, 90); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 45);
-      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < 14) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < 110) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1787,12 +1791,11 @@ function stepLorde(mob, dt, present) {
   if (!mob.enr && mob.hp < mob.maxhp * .25) mob.enr = true;
   mob.tMet = (mob.tMet === undefined ? 0 : mob.tMet) - dt;
   mob.tSlam = (mob.tSlam === undefined ? 3 : mob.tSlam) - dt;
-  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
-  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const target = targetPlayer(mob, present);
   const tp = target ? target[1] : null;
   const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
   const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
-  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; moveMob(mob, ddx / dd * spd * dt, ddy / dd * spd * dt); };
   switch (mob.state) {
     case 'idle': default:
       if (tp && mob.ret <= 0 && d < 300 && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
@@ -1817,7 +1820,7 @@ function stepLorde(mob, dt, present) {
       break;
     case 'return':
       step(mob.sx, mob.sy, 120); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 130);
-      if (home < 16) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (home < 16) settleAtSpawn(mob);
       if (tp && mob.ret <= 0 && d < 150) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
       break;
   }
@@ -1829,8 +1832,12 @@ const MOB_AI_STEP = {
   bat: stepBat, cinza: stepCinza, toxic: stepToxic, caster: stepCaster,
   sky: stepSky, sala: stepSala, elem: stepElem, calc: stepCalc, lorde: stepLorde,
 };
+let mobAiLastTick = performance.now();
 function tickMobAI() {
-  const dt = .15;
+  const now = performance.now();
+  const elapsed = Math.max(0, Math.min(.2, (now - mobAiLastTick) / 1000));
+  mobAiLastTick = now;
+  const slices = Math.max(1, Math.ceil(elapsed / .05)), dt = elapsed / slices;
   for (const state of maps.values()) {
     if (state.id.endsWith('_d')) continue;
     const present = playersOnMap(state.id);
@@ -1841,8 +1848,9 @@ function tickMobAI() {
       const stepFn = MOB_AI_STEP[mob.type];
       if (!stepFn) continue;
       mob.map = state.id;
-      const upd = stepFn(mob, dt, present);
-      if (upd) moved.push(upd);
+      let upd = null;
+      for (let i = 0; i < slices; i++) upd = stepFn(mob, dt, present) || upd;
+      if (upd && Number.isFinite(mob.x) && Number.isFinite(mob.y)) moved.push(upd);
     }
     if (moved.length) broadcastMap(state.id, { type: 'mob_positions', map: state.id, mobs: moved });
   }
