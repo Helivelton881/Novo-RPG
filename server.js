@@ -17,6 +17,103 @@ const clients = new Map();
 const maps = new Map();
 const ALLOWED_MAP = /^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)(?:_d)?$/;
 const ALLOWED_CLASS = new Set(['guerreiro', 'druida', 'mago', 'arqueiro']);
+
+// ===== Roster de monstro autoritativo (Fase 1) =====
+// Espelha exatamente as formulas de hp/xp por tipo do index.html (SLIME_STATS,
+// gobStats, skStats, wfStats, btStats, txStats, caStats, skyStats, vlStats) --
+// usado pra: (1) nunca aceitar o maxhp que o cliente reivindica pra um
+// monstro, sempre recalcular a partir do tipo/nivel real; (2) calcular o XP
+// exato concedido quando o servidor confirma que aquele monstro morreu de
+// verdade (mob.hp<=0 em mob_damage), nunca aceitando o que o cliente ja
+// tinha somado sozinho em P.xp.
+function mobStats(type, lvl, boss, k) {
+  switch (type) {
+    case 'slime': { const t = { 1: { hp: 28, xp: 12 }, 2: { hp: 44, xp: 20 }, 3: { hp: 62, xp: 30 } }[lvl]; return t || null; }
+    case 'goblin': return boss ? { hp: 480, xp: 320 } : { hp: 70 + (lvl - 5) * 14, xp: 40 + (lvl - 5) * 9 };
+    case 'skeleton': return boss ? { hp: 1800, xp: 800 } : { hp: 260 + (lvl - 10) * 36, xp: 100 + (lvl - 10) * 14 };
+    case 'wolf': return boss ? { hp: 3400, xp: 1200 } : { hp: 420 + (lvl - 15) * 55, xp: 130 + (lvl - 15) * 16 };
+    case 'bat': return lvl >= 30 ? { hp: 1700 + (lvl - 30) * 180, xp: 300 + (lvl - 30) * 30 } : { hp: 340 + (lvl - 20) * 50, xp: 160 + (lvl - 20) * 20 };
+    case 'toxic': return boss ? { hp: 5200, xp: 2000 } : { hp: 520 + (lvl - 20) * 70, xp: 170 + (lvl - 20) * 22 };
+    case 'caster': return boss ? { hp: 9000, xp: 3500 } : { hp: 1400 + (lvl - 25) * 160, xp: 240 + (lvl - 25) * 30 };
+    case 'sky': {
+      if (k === 'b') return { hp: 14000, xp: 6000 };
+      const d = lvl - 30;
+      if (k === 'h') return { hp: 1900 + d * 220, xp: 300 + d * 36 };
+      if (k === 's') return { hp: 2100 + d * 240, xp: 320 + d * 38 };
+      return { hp: 2900 + d * 300, xp: 360 + d * 40 }; // 'g' (guardiao)
+    }
+    case 'lorde': return { hp: 26000, xp: 9000 };
+    case 'sala': { const d = lvl - 35; return { hp: 2600 + d * 280, xp: 400 + d * 44 }; }
+    case 'elem': { const d = lvl - 35; return { hp: 4200 + d * 380, xp: 440 + d * 48 }; }
+    case 'calc': case 'cinza': { const d = lvl - 35; return { hp: 3200 + d * 320, xp: 420 + d * 46 }; } // cinza usa a formula de calc de proposito -- e o mesmo "bug" que o cliente ja tem (newCinza so escala o hp de spawn com base em sala*.6, mas o xp em killVulcao recalcula com vlStats(s) que cai no default = calc)
+    default: return null;
+  }
+}
+// newCinza (index.html) fixa o hp de spawn como Math.round(hp da formula de
+// sala * .6) em vez de usar a formula default (calc) que mobStats('cinza',..)
+// devolve -- so pro HP DE SPAWN precisamos espelhar essa excecao; o XP de
+// abate usa mobStats('cinza',...) normalmente (bate com o cliente).
+function cinzaSpawnHp(lvl) { const d = lvl - 35; return Math.round((2600 + d * 280) * .6); }
+
+// Cada entrada mistura contagem+nivel exatos com o que os packs literais do
+// cliente definem (buildFloresta/buildCripta/... em index.html) -- nao e
+// posicao (isso continua vindo do cliente, so nunca decide premio/hp). So
+// 'vila' (slime) fica de fora: a posicao/nivel de cada spawn ali vem de
+// amostragem por rejeicao contra o mapa real (blocked()), sem um array
+// literal pra espelhar sem portar o tilemap inteiro -- pra ela, valida so
+// contagem (<=15) e nivel (1..3) com hp exato por nivel, mais solto que o
+// roster exato dos outros mapas.
+function flattenLevels(packs, type, idx) {
+  const out = [];
+  for (const p of packs) for (const lvl of p[idx]) out.push({ type, lvl, boss: false });
+  return out;
+}
+function flattenLetterLevels(packs, typeByLetter, letterIdx, levelsIdx) {
+  const out = [];
+  for (const p of packs) { const type = typeByLetter[p[letterIdx]]; for (const lvl of p[levelsIdx]) out.push({ type, lvl, boss: false }); }
+  return out;
+}
+function flattenNested(packs, typeByLetter) {
+  const out = [];
+  for (const p of packs) for (const [k, lvl] of p[1]) { const type = typeByLetter[k]; out.push(type === 'bat' ? { type, lvl, boss: false } : { type, lvl, boss: false, k }); }
+  return out;
+}
+const MOB_MANIFEST = {
+  floresta: [
+    ...flattenLevels([[18, 32, [5, 5]], [24, 28.5, [5, 6]], [14, 21, [6, 6]], [31, 22, [6, 7, 7]], [36, 29, [7, 7]], [39, 17, [8, 8]], [43, 14.8, [8, 9]], [47, 29.5, [7, 8]], [27, 36, [5]]], 'goblin', 2),
+    { type: 'goblin', lvl: 10, boss: true },
+  ],
+  cripta: [
+    ...flattenLevels([[18, 32, [10, 10]], [24, 27.5, [10, 11]], [14, 21, [11, 11]], [29, 22, [11, 12, 12]], [36, 26, [12, 12]], [38, 17, [13, 13]], [43, 15, [13, 14]], [47, 29.5, [12, 13]], [27, 36, [10]]], 'skeleton', 2),
+    { type: 'skeleton', lvl: 15, boss: true },
+    { type: 'skeleton', lvl: 11, boss: false, temp: true }, { type: 'skeleton', lvl: 11, boss: false, temp: true }, { type: 'skeleton', lvl: 11, boss: false, temp: true },
+  ],
+  serra: [
+    ...flattenLevels([[18, 35, [15, 15]], [24, 31, [15, 16, 16]], [19, 26, [16, 16]], [27, 22.5, [16, 17, 17]], [34, 25, [17, 17]], [38, 19, [17, 18, 18]], [35, 15, [18, 18]], [41, 12, [18, 19]], [47, 29.5, [17, 18]], [13, 20, [15, 16]]], 'wolf', 2),
+    { type: 'wolf', lvl: 20, boss: true },
+    { type: 'wolf', lvl: 17, boss: false, temp: true }, { type: 'wolf', lvl: 17, boss: false, temp: true },
+  ],
+  pantano: [
+    ...flattenLetterLevels([[18, 34, 'b', [20, 20, 21]], [24, 29.5, 't', [21, 21]], [15, 25, 'b', [21, 21, 22]], [29, 25.5, 't', [22, 22]], [33, 19, 'b', [22, 22, 23]], [38, 22, 't', [23, 23]], [35, 14, 'b', [23, 23, 24]], [41, 14, 't', [24, 24]], [46, 29, 'b', [22, 23]], [40, 29, 't', [22, 23]], [12, 22, 't', [21, 22]]], { b: 'bat', t: 'toxic' }, 2, 3),
+    { type: 'toxic', lvl: 25, boss: true },
+    { type: 'toxic', lvl: 22, boss: false, temp: true }, { type: 'toxic', lvl: 22, boss: false, temp: true }, { type: 'toxic', lvl: 22, boss: false, temp: true },
+  ],
+  torre: [
+    ...flattenLetterLevels([[18, 34, 's', [25, 25]], [24, 29.5, 'c', [25, 26]], [15, 25, 'c', [26, 26]], [29, 25.5, 's', [26, 27]], [33, 19, 'c', [27, 27, 28]], [38, 22, 's', [27, 28]], [35, 14, 'c', [28, 28]], [41, 14, 's', [28, 29]], [46, 29, 'c', [27, 28]], [40, 29, 's', [27, 28]], [12, 22, 'c', [25, 26]]], { s: 'skeleton', c: 'caster' }, 2, 3),
+    { type: 'caster', lvl: 30, boss: true },
+    { type: 'caster', lvl: 27, boss: false, temp: true }, { type: 'caster', lvl: 27, boss: false, temp: true },
+  ],
+  ilhas: [
+    ...flattenNested([[[17, 29], [['g', 30], ['g', 30], ['h', 30]]], [[28, 33], [['h', 31], ['h', 31], ['s', 31]]], [[24, 22], [['g', 31], ['g', 32], ['s', 32], ['b', 30], ['b', 30], ['b', 31]]], [[12, 17], [['h', 31], ['h', 32], ['b', 31], ['b', 31]]], [[37, 27], [['g', 32], ['g', 33], ['s', 32], ['s', 33], ['h', 32]]], [[31.5, 14.5], [['b', 32], ['b', 32], ['b', 33], ['g', 33], ['s', 33]]], [[46, 32], [['h', 33], ['h', 33], ['g', 33]]], [[50, 20], [['s', 34], ['b', 33], ['b', 34], ['b', 34], ['h', 34]]], [[21, 8.5], [['h', 32], ['h', 33], ['s', 33]]]], { g: 'sky', h: 'sky', s: 'sky', b: 'bat' }),
+    { type: 'sky', k: 'b', lvl: 35, boss: true },
+    { type: 'sky', k: 'h', lvl: 33, boss: false, temp: true }, { type: 'sky', k: 'h', lvl: 33, boss: false, temp: true },
+  ],
+  vulcao: [
+    ...flattenLetterLevels([[18, 34, 'e', [35, 35]], [24, 29.5, 'c', [35, 36]], [15, 25, 's', [36, 36]], [29, 25.5, 'e', [36, 37]], [33, 19, 'c', [37, 37, 38]], [38, 22, 's', [37, 38]], [35, 14, 'e', [38, 38]], [41, 14, 'c', [38, 39]], [46, 29, 's', [37, 38]], [40, 29, 'e', [37, 38]], [12, 22, 's', [35, 36]], [20, 17, 'b', [35, 36]], [44, 20, 'b', [36, 37]], [16, 29, 'b', [36, 37]]], { e: 'elem', c: 'calc', s: 'sala', b: 'cinza' }, 2, 3),
+    { type: 'lorde', lvl: 40, boss: true },
+    { type: 'sala', lvl: 35, boss: false, temp: true }, { type: 'sala', lvl: 35, boss: false, temp: true }, { type: 'sala', lvl: 35, boss: false, temp: true },
+  ],
+};
 const MIME = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.json':'application/json; charset=utf-8'};
 
 // Espelha GEAR/tiers do index.html (so os campos usados pela validacao
@@ -36,6 +133,22 @@ const GEAR_TIERS = {
 };
 const EQ_SLOTS = ['sword','shield','armor','helmet','cape','jewel','boots'];
 const COUNTER_FIELDS = ['gk','ki','kit','kt','ktt','kp','kpt','ks','ke','kw','kwt','kv','kvt','ap','key','scr','sl','gb','bs','dt'];
+// Espelha exatamente a cadeia de contadores no comeco de killMob() (index.html):
+// qual(is) campo(s) de COUNTER_FIELDS um abate real incrementa, por tipo.
+function killCounterFields(type, lvl, boss) {
+  const fields = [];
+  if (type === 'slime') fields.push('sl');
+  else if (type === 'skeleton') { fields.push('ke'); if (lvl >= 25) fields.push('ktt'); if (boss) fields.push('bs'); }
+  else if (type === 'wolf') { fields.push('kwt'); if (boss) fields.push('bs'); }
+  else if (type === 'bat' || type === 'toxic') { fields.push('kpt'); if (type === 'bat' && lvl >= 30) fields.push('kit'); if (boss) fields.push('bs'); }
+  else if (type === 'sky') { fields.push('kit'); if (boss) fields.push('bs'); }
+  else if (type === 'sala' || type === 'elem' || type === 'calc' || type === 'cinza') { fields.push('kvt'); if (boss) fields.push('bs'); }
+  else if (type === 'lorde') fields.push('bs');
+  else if (type === 'caster') { fields.push('ktt'); if (boss) fields.push('bs'); }
+  else if (boss) fields.push('bs'); // goblin boss
+  else fields.push('gb'); // goblin comum
+  return fields;
+}
 // Espelha classTypes() do cliente: quais tipos de item cada classe pode
 // receber de sorteio (a propria arma da classe, e escudo so pro guerreiro).
 const CLASS_ITEM_TYPES = {
@@ -76,8 +189,9 @@ const QUEST_REWARDS = {
   28: {next:29, gold:1000, gem:7, xp:2500},
 };
 // Espelha need() do cliente (index.html): XP necessario pra passar do nivel l.
+// Generico -- usado tanto pra recompensa de missao quanto pra XP de abate.
 const questNeed = l => 30 * l;
-function applyQuestXp(save, lvl, xpGain) {
+function applyXpGain(save, lvl, xpGain) {
   let xp = save.xp + xpGain;
   while (xp >= questNeed(lvl)) { xp -= questNeed(lvl); lvl = Math.min(99, lvl + 1); }
   return { xp, lvl };
@@ -541,7 +655,7 @@ async function handleQuest(req, res, pathname) {
     save.gold = Math.min(500000, save.gold + reward.gold);
     save.gem = Math.min(5000, save.gem + reward.gem);
     if (reward.pv) save.pv = Math.min(999, save.pv + reward.pv);
-    const leveled = applyQuestXp(save, lvl, reward.xp);
+    const leveled = applyXpGain(save, lvl, reward.xp);
     save.xp = leveled.xp; lvl = leveled.lvl;
     save.quest = reward.next;
     save.lvl = lvl;
@@ -588,6 +702,29 @@ async function handleChest(req, res, pathname) {
     console.error('chest_error', err.message, err.status || '', err.detail || '');
     if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Baús online ainda não configurados no servidor.':'Não foi possível concluir. Tente novamente.'});
     return true;
+  }
+}
+
+// Credita XP + contador de abate real (mob.hp<=0 confirmado em mob_damage)
+// direto no personagem no Supabase -- mesma leitura-altera-grava usada em
+// handleQuest/handleChest, so que disparada de dentro do WS em vez de uma
+// rota HTTP. So roda se a conexao tem charId (personagem) e userId (dono),
+// senao nao ha onde persistir (offline ou sem conta) e o calculo local de
+// sempre no cliente e o unico que existe, como antes desta fase.
+async function creditKillReward(ws, p, xpGain, fields) {
+  if (!p.charId || !p.userId) return;
+  try {
+    const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
+    const row = rows0[0]; if (!row) return;
+    let lvl = row.lvl;
+    const save = sanitizeSave(row.save, lvl);
+    const leveled = applyXpGain(save, lvl, xpGain);
+    save.xp = leveled.xp; lvl = leveled.lvl; save.lvl = lvl;
+    for (const f of fields) save[f] = Math.min(999, (save[f] || 0) + 1);
+    await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
+    send(ws, {type:'kill_reward', xp: save.xp, lvl, fields: Object.fromEntries(fields.map(f => [f, save[f]]))});
+  } catch (err) {
+    console.error('kill_reward_error', err.message, err.status || '', err.detail || '');
   }
 }
 
@@ -762,7 +899,8 @@ wss.on('connection', ws => {
     let p = clients.get(ws);
     if (msg.type === 'join' && !p) {
       const userId = typeof msg.userId === 'string' && /^[0-9a-f-]{36}$/i.test(msg.userId) ? msg.userId : null;
-      p = {id:crypto.randomUUID(),userId,name:cleanText(msg.name,14)||'Herói',cls:ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',map:'vila',x:720,y:1258,dir:0,moving:false,lvl:Math.max(1,Math.min(99,Number(msg.lvl)||1)),atkT:0,atkAng:0};
+      const charId = typeof msg.charId === 'string' && /^[0-9a-fA-F-]{8,36}$/.test(msg.charId) ? msg.charId : null;
+      p = {id:crypto.randomUUID(),userId,charId,name:cleanText(msg.name,14)||'Herói',cls:ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',map:'vila',x:720,y:1258,dir:0,moving:false,lvl:Math.max(1,Math.min(99,Number(msg.lvl)||1)),atkT:0,atkAng:0};
       clients.set(ws,p);
       if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
       send(ws,{type:'welcome',id:p.id,players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
@@ -782,9 +920,46 @@ wss.on('connection', ws => {
     } else if (msg.type === 'map_join') {
       const map=cleanText(msg.map,24);if(!ALLOWED_MAP.test(map)||map!==p.map)return;
       const state=mapState(map),defs=Array.isArray(msg.mobs)?msg.mobs.slice(0,120):[];
-      if(!state.mobs.size) for(const d of defs){
-        const id=cleanText(d.id,48),maxhp=Math.max(1,Math.min(1000000,Number(d.maxhp)||1));if(!id)continue;
-        state.mobs.set(id,{id,maxhp,hp:maxhp,dead:false,x:Number(d.x)||0,y:Number(d.y)||0,state:'idle',respawnAt:0,boss:!!d.boss});
+      const isDungeon=map.endsWith('_d'),baseMap=map.replace(/_d$/,''),manifest=MOB_MANIFEST[baseMap];
+      if(!state.mobs.size){
+        if(!isDungeon&&manifest){
+          // roster autoritativo: tipo/nivel/contagem vem do manifesto real
+          // do mapa (espelha os packs literais de buildFloresta/buildCripta/...
+          // em index.html), nunca do que o cliente reivindica -- so id/x/y
+          // (cosmeticos, nunca usados pra conceder nada) vem do def do
+          // cliente, casado por posicao com o manifesto (mesma ordem de
+          // insercao em MOBS: pacotes primeiro, chefe, depois sequitos).
+          manifest.forEach((entry,i)=>{
+            const d=defs[i]||{};
+            const id=cleanText(d.id,48)||(map+':'+i);
+            const stats=mobStats(entry.type,entry.lvl,entry.boss,entry.k);
+            if(!stats)return;
+            const maxhp=entry.type==='cinza'?cinzaSpawnHp(entry.lvl):stats.hp;
+            state.mobs.set(id,{id,maxhp,hp:maxhp,dead:!!entry.temp,x:Number(d.x)||0,y:Number(d.y)||0,state:'idle',respawnAt:0,boss:!!entry.boss,type:entry.type,lvl:entry.lvl,k:entry.k,temp:!!entry.temp});
+          });
+        } else if(!isDungeon&&baseMap==='vila'){
+          // vila (slime): sem array literal pra espelhar sem portar o
+          // tilemap inteiro (posicao/nivel vem de amostragem por rejeicao
+          // contra blocked()) -- valida so contagem (<=15) e nivel (1..3),
+          // hp sempre recalculado a partir do nivel real, nunca aceito do
+          // cliente.
+          for(const d of defs.slice(0,15)){
+            const id=cleanText(d.id,48);if(!id)continue;
+            const lvl=Math.max(1,Math.min(3,Math.round(Number(d.lvl))||1));
+            const stats=mobStats('slime',lvl,false);
+            if(!stats)continue;
+            state.mobs.set(id,{id,maxhp:stats.hp,hp:stats.hp,dead:false,x:Number(d.x)||0,y:Number(d.y)||0,state:'idle',respawnAt:0,boss:false,type:'slime',lvl});
+          }
+        } else {
+          // masmorra (_d): layout aleatorio por instancia (mazeGen + trash
+          // com Math.random()), sem roster fixo pra validar contra -- fica
+          // como estava antes (confia no que o cliente relata), fora do
+          // escopo desta fase (documentado em LEIA-PRIMEIRO.md).
+          for(const d of defs){
+            const id=cleanText(d.id,48),maxhp=Math.max(1,Math.min(1000000,Number(d.maxhp)||1));if(!id)continue;
+            state.mobs.set(id,{id,maxhp,hp:maxhp,dead:false,x:Number(d.x)||0,y:Number(d.y)||0,state:'idle',respawnAt:0,boss:!!d.boss});
+          }
+        }
       }
       chooseAuthority(state);
       send(ws,{type:'map_state',map,authorityId:state.authorityId,mobs:[...state.mobs.values()]});
@@ -822,7 +997,16 @@ wss.on('connection', ws => {
       if(!dmg)return;
       state.hitGuard.set(mobId,{playerId:p.id,at:now});
       mob.hp=Math.max(0,mob.hp-dmg);
-      if(mob.hp<=0){mob.dead=true;mob.respawnAt=Date.now()+(mob.boss?60000:30000)}
+      if(mob.hp<=0){
+        mob.dead=true;mob.respawnAt=Date.now()+(mob.boss?60000:30000);
+        if(mob.type){
+          const stats=mobStats(mob.type,mob.lvl,mob.boss,mob.k);
+          if(stats){
+            const xpGain=mob.temp?Math.round(stats.xp*.5):stats.xp;
+            creditKillReward(ws,p,xpGain,killCounterFields(mob.type,mob.lvl,mob.boss));
+          }
+        }
+      }
       broadcastMap(map,{type:'mob_state',map,mob,killerId:mob.dead?p.id:null});
     } else if (msg.type === 'player_damage') {
       // PvP: liberado fora da vila. O servidor nunca rastreia o HP do

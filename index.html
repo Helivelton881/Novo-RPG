@@ -2583,7 +2583,7 @@ function netLabel(text,on){const e=$('#net');if(!e)return;e.textContent=text;e.c
 function netMobById(id){return MOBS.find(m=>m.netId===id)}
 function netJoinMap(){
   if(!NET||NET.readyState!==1||!W_)return;NET_MAP=W_.name;RPROJ.length=0;
-  const mobs=MOBS.map((m,i)=>{m.netId=NET_MAP+':'+i;return{id:m.netId,maxhp:m.maxhp,x:m.sx??m.x,y:m.sy??m.y,boss:!!m.boss}});
+  const mobs=MOBS.map((m,i)=>{m.netId=NET_MAP+':'+i;return{id:m.netId,maxhp:m.maxhp,x:m.sx??m.x,y:m.sy??m.y,boss:!!m.boss,lvl:m.lvl||1}});
   NET.send(JSON.stringify({type:'map_join',map:NET_MAP,mobs}));
 }
 function netApplyMob(u,killerId){
@@ -2597,7 +2597,7 @@ function netConnect(){
   if(!started||!CUR_CHAR||NET&&NET.readyState<2)return;
   const proto=location.protocol==='https:'?'wss:':'ws:';
   NET=new WebSocket(proto+'//'+location.host+'/game');netLabel('Conectando...',false);
-  NET.onopen=()=>{netRetry=0;NET.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined}))};
+  NET.onopen=()=>{netRetry=0;NET.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined,charId:(CUR_CHAR&&CUR_CHAR.id)||undefined}))};
   NET.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch(err){return}
     if(m.type==='welcome'){NET_ID=m.id;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel((REMOTE.size+1)+' online',true);netJoinMap()}
     else if(m.type==='player_join'||m.type==='state'){const p=m.player;if(p&&p.id!==NET_ID){const old=REMOTE.get(p.id);REMOTE.set(p.id,Object.assign(old||{},p));netLabel((REMOTE.size+1)+' online',true)}}
@@ -2612,6 +2612,15 @@ function netConnect(){
     else if(m.type==='player_hit'&&m.map===W_.name){
       if(m.targetId===NET_ID){const atkP=REMOTE.get(m.attackerId);hurtPlayer(m.dmg,atkP?{x:atkP.x,y:atkP.y}:null)}
       else{const tp=REMOTE.get(m.targetId);if(tp)floater(tp.x,tp.y-70,'-'+m.dmg,'#ff6a5a')}
+    }
+    else if(m.type==='kill_reward'){
+      // reconciliacao silenciosa: o cliente ja mostrou o feedback local
+      // (gainXp/toast) no momento do abate; isso so corrige o numero final
+      // pro valor autoritativo do servidor, sem repetir a celebracao.
+      P.xp=m.xp;
+      if(typeof m.lvl==='number'&&m.lvl!==P.lvl){const up=m.lvl>P.lvl;P.lvl=m.lvl;recalc();if(up){P.hp=P.maxhp;P.mp=P.maxmp}}
+      if(m.fields)Object.assign(P,m.fields);
+      hud();
     }
   };
   NET.onclose=()=>{NET_ID=null;NET_AUTH=null;NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};
