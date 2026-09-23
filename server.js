@@ -194,6 +194,10 @@ const BOSS_CHEST_FIELD = { goblin: 'chest', skeleton: 'chest2', wolf: 'chest3', 
 // (unico chefe sem gate) -- aqui o gate em 29 e aplicado de qualquer forma,
 // fechando esse detalhe tambem.
 const QUEST_COUNTER_CAP = { kills: 999999 };
+// Os 8 contadores que travam avanco de missao (advanceQuestOnKill) -- usado
+// tambem pelo PUT de personagem pra saber quais campos travar depois que o
+// personagem ja tem progresso real (ver isTracked em handleCharacters).
+const QUEST_GATE_FIELDS = ['kills', 'gk', 'ks', 'kw', 'kp', 'kt', 'ki', 'kv'];
 function advanceQuestOnKill(save, type, boss, lvl) {
   const q = save.quest, changed = {};
   const bump = (field, need, next) => {
@@ -579,9 +583,27 @@ async function handleCharacters(req, res, pathname) {
     const idMatch = CHAR_ID_RE.exec(pathname);
     if (idMatch && req.method === 'PUT') {
       const id = idMatch[1];
+      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}&limit=1`});
+      const current = rows0[0];
       const input = await readJson(req);
-      const lvl = Math.max(1, Math.min(99, Number(input.lvl) || 1));
+      let lvl = Math.max(1, Math.min(99, Number(input.lvl) || 1));
       const save = sanitizeSave(input.save, lvl);
+      // "Personagem ja rastreado" (teve progresso real nalgum PUT ou credito
+      // anterior): trava lvl/xp/quest/contadores-de-missao no que o servidor
+      // ja tem, nunca aceita do que o cliente manda daqui pra frente -- daqui
+      // em diante so avancam pelos dois caminhos validados (handleQuest,
+      // creditKillReward), nunca pelo PUT generico. So o PRIMEIRO PUT com
+      // progresso real (personagem recem-criado, save ainda vazio -- inclusive
+      // promover um personagem local antigo pra nuvem pela 1a vez) continua
+      // confiando no que o cliente manda, como sempre foi.
+      if (current) {
+        const currentSave = sanitizeSave(current.save, current.lvl);
+        const isTracked = current.lvl > 1 || currentSave.quest > 0 || currentSave.xp > 0;
+        if (isTracked) {
+          lvl = current.lvl; save.lvl = lvl; save.xp = currentSave.xp; save.quest = currentSave.quest;
+          for (const f of QUEST_GATE_FIELDS) save[f] = currentSave[f];
+        }
+      }
       const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}`, body:{lvl, map: save.map, save}, prefer:'return=representation'});
       if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
       json(res,200,{character: rows[0]}); return true;
