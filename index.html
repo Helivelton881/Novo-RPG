@@ -1189,33 +1189,33 @@ const NPC_SCRIPT={
   aldea(){
     if(P.quest===0)return{lines:['Olá, viajante! Seja bem-vindo à nossa vila.','Os slimes da planície andam invadindo as hortas. Derrote 3 deles e eu te recompenso!','A planície fica a leste, passando pelo portão.'],end(){P.quest=1;toast('Missão aceita: derrote 3 slimes');saveGame()}};
     if(P.quest===1)return{lines:['Ainda faltam '+Math.max(0,3-P.kills)+' slimes. Cuidado com as mordidas!']};
-    if(P.quest===2)return{lines:['Você conseguiu! Aqui está sua recompensa: 30 moedas e uma poção de vida.','A Praça dos Portais se abriu! Ela leva à Floresta dos Goblins. Derrote 5 deles e volte aqui. Eles são bem mais espertos que os slimes.'],end(){P.quest=3;P.gold+=30;P.pv++;gainXp(20);sfx.coin();toast('Portal da praça liberado!');saveGame()}};
+    if(P.quest===2)return{lines:['Você conseguiu! Aqui está sua recompensa: 30 moedas e uma poção de vida.','A Praça dos Portais se abriu! Ela leva à Floresta dos Goblins. Derrote 5 deles e volte aqui. Eles são bem mais espertos que os slimes.'],end(){claimQuestReward(2)}};
     if(P.quest===3)return{lines:['Ainda faltam '+Math.max(0,5-P.gk)+' goblins. Lembre: eles avisam antes de atacar. Desvie!']};
-    if(P.quest===4)return{lines:['Você limpou o caminho! Aqui está: 60 moedas, uma gema e 80 de experiência.','Mas o Goblin Brutamontes ainda comanda o acampamento, a nordeste da floresta. Leve poções!'],end(){P.quest=5;P.gold+=60;P.gem++;gainXp(80);sfx.coin();toast('Recompensa: 60 moedas, 1 gema e 80 XP');saveGame()}};
+    if(P.quest===4)return{lines:['Você limpou o caminho! Aqui está: 60 moedas, uma gema e 80 de experiência.','Mas o Goblin Brutamontes ainda comanda o acampamento, a nordeste da floresta. Leve poções!'],end(){claimQuestReward(4)}};
     if(P.quest===5)return{lines:['O Brutamontes fica no acampamento, a nordeste da floresta. Ele é forte: aprenda o ritmo dos golpes dele.']};
     if(P.quest===6)return{lines:['Você derrotou o Brutamontes! Mas tenho más notícias: esqueletos estão saindo da Cripta dos Esqueletos, e eles usam escudos.','O portal da praça agora leva até lá. Derrote 8 deles. Golpes de frente são bloqueados: ataque pelos lados ou pelas costas!'],end(){P.quest=7;toast('Portal da Cripta liberado!');sfx.level();saveGame()}};
     if(P.quest===7)return{lines:['Ainda faltam '+Math.max(0,8-(P.ks||0))+' esqueletos. O escudo bloqueia golpes de frente: dê a volta e ataque pelo lado.']};
-    if(P.quest===8)return{lines:['Incrível! Aqui está sua recompensa: 150 moedas, 2 gemas e 300 de experiência.','Agora o Capitão Esqueleto espera no centro da cripta, a nordeste. Ele chama os mortos quando está ferido. Leve poções!'],end(){P.quest=9;P.gold+=150;P.gem+=2;gainXp(300);sfx.coin();toast('Recompensa: 150 moedas, 2 gemas e 300 XP');saveGame()}};
+    if(P.quest===8)return{lines:['Incrível! Aqui está sua recompensa: 150 moedas, 2 gemas e 300 de experiência.','Agora o Capitão Esqueleto espera no centro da cripta, a nordeste. Ele chama os mortos quando está ferido. Leve poções!'],end(){claimQuestReward(8)}};
     if(P.quest===9)return{lines:['O Capitão fica no centro da cripta, a nordeste. Ele golpeia duas vezes seguidas: espere o golpe passar e ataque pelo lado.']};
     if(P.quest===10)return{lines:['Você derrotou o Capitão Esqueleto! Mas ouça: uivos ecoam da Serra dos Lobos, ao norte das montanhas.','O portal já reconhece o caminho. Derrote 10 lobos. Eles são rápidos, atacam em matilha e a mordida faz sangrar: poção, maçã ou cura estancam.'],end(){P.quest=11;toast('Portal da Serra liberado!');sfx.level();saveGame()}};
     if(P.quest===11)return{lines:['Ainda faltam '+Math.max(0,10-(P.kw||0))+' lobos. Depois do bote eles ficam expostos: essa é a hora de atacar!']};
-    if(P.quest===12)return{lines:['Que coragem! Aqui está: 250 moedas, 3 gemas e 500 de experiência.','O Lobo Alfa lidera a matilha na toca, a nordeste da serra. Ele uiva para chamar reforços e fica furioso quando ferido. Leve poções!'],end(){P.quest=13;P.gold+=250;P.gem+=3;gainXp(500);sfx.coin();toast('Recompensa: 250 moedas, 3 gemas e 500 XP');saveGame()}};
+    if(P.quest===12)return{lines:['Que coragem! Aqui está: 250 moedas, 3 gemas e 500 de experiência.','O Lobo Alfa lidera a matilha na toca, a nordeste da serra. Ele uiva para chamar reforços e fica furioso quando ferido. Leve poções!'],end(){claimQuestReward(12)}};
     if(P.quest===13)return{lines:['O Lobo Alfa fica na toca, a nordeste da serra. Desvie do bote e ataque quando ele estiver cansado.']};
     if(P.quest===14)return{lines:['Você derrotou o Lobo Alfa! Mas o pior ainda vem: o Pântano Sombrio está contaminado, e morcegos e slimes tóxicos saem de lá.','O portal já reconhece o caminho. Derrote 12 criaturas. A lama atrasa você, as poças e mordidas envenenam, e os morcegos roubam vida. Poção, maçã ou cura removem o veneno.'],end(){P.quest=15;toast('Portal do Pântano liberado!');sfx.level();saveGame()}};
     if(P.quest===15)return{lines:['Ainda faltam '+Math.max(0,12-(P.kp||0))+' criaturas. Fuja da lama e das poças verdes: elas envenenam.']};
-    if(P.quest===16)return{lines:['Impressionante! Aqui está: 400 moedas, 4 gemas e 800 de experiência.','O Rei Lodoso vive no poço do pântano, a nordeste. Ele salta, cospe poças de veneno e se divide quando está ferido. Leve muitas poções!'],end(){P.quest=17;P.gold+=400;P.gem+=4;gainXp(800);sfx.coin();toast('Recompensa: 400 moedas, 4 gemas e 800 XP');saveGame()}};
+    if(P.quest===16)return{lines:['Impressionante! Aqui está: 400 moedas, 4 gemas e 800 de experiência.','O Rei Lodoso vive no poço do pântano, a nordeste. Ele salta, cospe poças de veneno e se divide quando está ferido. Leve muitas poções!'],end(){claimQuestReward(16)}};
     if(P.quest===17)return{lines:['O Rei Lodoso fica no poço, a nordeste do pântano. Saia do círculo vermelho antes do salto e das poças.']};
     if(P.quest===18)return{lines:['Você derrotou o Rei Lodoso! Mas uma luz roxa brilha no alto da Torre do Feiticeiro, e seus seguidores descem para nossas terras.','O portal já reconhece o caminho. Derrote 12 deles. Os acólitos conjuram de longe: aproxime-se ou use cobertura. As sentinelas têm escudo. E cuidado com as runas no chão: elas brilham e depois explodem!'],end(){P.quest=19;toast('Portal da Torre liberado!');sfx.level();saveGame()}};
     if(P.quest===19)return{lines:['Ainda faltam '+Math.max(0,12-(P.kt||0))+' seguidores. Saia de cima das runas quando elas ficarem vermelhas!']};
-    if(P.quest===20)return{lines:['Extraordinário! Aqui está: 600 moedas, 5 gemas e 1200 de experiência.','O Feiticeiro Sombrio espera no salão do trono, a nordeste. Ele lança feitiços, faz chover explosões e se protege com uma barreira quando ferido. Leve poções!'],end(){P.quest=21;P.gold+=600;P.gem+=5;gainXp(1200);sfx.coin();toast('Recompensa: 600 moedas, 5 gemas e 1200 XP');saveGame()}};
+    if(P.quest===20)return{lines:['Extraordinário! Aqui está: 600 moedas, 5 gemas e 1200 de experiência.','O Feiticeiro Sombrio espera no salão do trono, a nordeste. Ele lança feitiços, faz chover explosões e se protege com uma barreira quando ferido. Leve poções!'],end(){claimQuestReward(20)}};
     if(P.quest===21)return{lines:['O Feiticeiro fica no salão do trono, a nordeste. Quebre a barreira dele com dano forte e fuja dos círculos vermelhos.']};
     if(P.quest===22)return{lines:['Você derrotou o Feiticeiro Sombrio! Mas o céu se abriu: ilhas flutuantes surgiram sobre as montanhas, cheias de caçadores, xamãs e guardiões.','O portal já reconhece o caminho. Derrote 14 habitantes. Cuidado com o vento: xamãs e tornados empurram você, e o guardião atordoa ao investir. Não há chão fora das ilhas, só as pontes!'],end(){P.quest=23;toast('Portal das Ilhas liberado!');sfx.level();saveGame()}};
     if(P.quest===23)return{lines:['Ainda faltam '+Math.max(0,14-(P.ki||0))+' habitantes. Derrote os xamãs primeiro: eles curam os outros!']};
-    if(P.quest===24)return{lines:['Que façanha! Aqui está: 800 moedas, 6 gemas e 1800 de experiência.','A Senhora das Tempestades reina na ilha maior, a nordeste. Ela faz chover raios, invoca tornados e empurra com o vento. Leve muitas poções!'],end(){P.quest=25;P.gold+=800;P.gem+=6;gainXp(1800);sfx.coin();toast('Recompensa: 800 moedas, 6 gemas e 1800 XP');saveGame()}};
+    if(P.quest===24)return{lines:['Que façanha! Aqui está: 800 moedas, 6 gemas e 1800 de experiência.','A Senhora das Tempestades reina na ilha maior, a nordeste. Ela faz chover raios, invoca tornados e empurra com o vento. Leve muitas poções!'],end(){claimQuestReward(24)}};
     if(P.quest===25)return{lines:['A Senhora das Tempestades fica na ilha maior, a nordeste. Fuja dos círculos vermelhos e não deixe os tornados encostarem em você.']};
     if(P.quest===26)return{lines:['Você derrotou a Senhora das Tempestades! Mas um vulcão despertou ao longe, e criaturas de lava e brasa descem a montanha.','O portal já reconhece o caminho. Derrote 16 delas. O chão tem rios de lava intransponíveis e gêiseres que explodem: fique longe quando brilharem! O fogo deixa queimando; poção, maçã ou cura apagam.'],end(){P.quest=27;toast('Portal do Vulcão liberado!');sfx.level();saveGame()}};
     if(P.quest===27)return{lines:['Ainda faltam '+Math.max(0,16-(P.kv||0))+' criaturas. O Esqueleto Calcinado ainda usa escudo: ataque pelos lados.']};
-    if(P.quest===28)return{lines:['Fantástico! Aqui está: 1000 moedas, 7 gemas e 2500 de experiência.','O Senhor das Chamas espera na cratera, a nordeste. Ele chama meteoros, abre ondas de lava e invoca salamandras quando ferido. Leve muitas poções!'],end(){P.quest=29;P.gold+=1000;P.gem+=7;gainXp(2500);sfx.coin();toast('Recompensa: 1000 moedas, 7 gemas e 2500 XP');saveGame()}};
+    if(P.quest===28)return{lines:['Fantástico! Aqui está: 1000 moedas, 7 gemas e 2500 de experiência.','O Senhor das Chamas espera na cratera, a nordeste. Ele chama meteoros, abre ondas de lava e invoca salamandras quando ferido. Leve muitas poções!'],end(){claimQuestReward(28)}};
     if(P.quest===29)return{lines:['O Senhor das Chamas fica na cratera, a nordeste. Fuja das ondas de lava e dos círculos de meteoro, e cuidado quando ele ficar furioso.']};
     return{lines:['Você derrotou o Senhor das Chamas! O reino está em paz... por enquanto. Novas aventuras aguardam no horizonte.']};
   },
@@ -3221,6 +3221,44 @@ async function shopTransact(action,params){
     if(Array.isArray(r.shopSold))shopSold=r.shopSold;
     return{ok:true};
   }catch(e){return{ok:false,error:e.message||'Não foi possível concluir'}}
+}
+/* ---- recompensa de missão server-autoritativa ---- */
+// Espelha os 8 estágios de NPC_SCRIPT.aldea que pagam prêmio (ouro/gema/XP).
+// Com conta online o servidor confere P.quest atual e concede o prêmio
+// (fecha a brecha de editar localStorage pra repetir/adiantar recompensa);
+// sem conta, ou se a chamada falhar, cai no cálculo local de sempre — o
+// progresso da missão nunca fica travado por causa da rede.
+const QUEST_REWARDS_LOCAL={
+  2:{next:3,gold:30,gem:0,xp:20,pv:1,msg:'Portal da praça liberado!'},
+  4:{next:5,gold:60,gem:1,xp:80,msg:'Recompensa: 60 moedas, 1 gema e 80 XP'},
+  8:{next:9,gold:150,gem:2,xp:300,msg:'Recompensa: 150 moedas, 2 gemas e 300 XP'},
+  12:{next:13,gold:250,gem:3,xp:500,msg:'Recompensa: 250 moedas, 3 gemas e 500 XP'},
+  16:{next:17,gold:400,gem:4,xp:800,msg:'Recompensa: 400 moedas, 4 gemas e 800 XP'},
+  20:{next:21,gold:600,gem:5,xp:1200,msg:'Recompensa: 600 moedas, 5 gemas e 1200 XP'},
+  24:{next:25,gold:800,gem:6,xp:1800,msg:'Recompensa: 800 moedas, 6 gemas e 1800 XP'},
+  28:{next:29,gold:1000,gem:7,xp:2500,msg:'Recompensa: 1000 moedas, 7 gemas e 2500 XP'},
+};
+function applyQuestResult(character){
+  const s=character.save,leveledUp=s.lvl>P.lvl;
+  P.gold=s.gold;P.gem=s.gem;P.pv=s.pv;P.xp=s.xp;P.quest=s.quest;P.lvl=s.lvl;
+  recalc();
+  if(leveledUp){P.hp=P.maxhp;P.mp=P.maxmp;sfx.level();toast('Nível '+P.lvl+'! HP e MP restaurados');floater(P.x,P.y-80,'NÍVEL '+P.lvl,'#ffe27a')}
+  hud();saveGame();
+}
+async function questReward(from){
+  if(!CUR_CHAR||!authToken())return false;
+  try{
+    const r=await authRequest('/api/characters/'+CUR_CHAR.id+'/quest',{method:'POST',token:authToken(),body:{from}});
+    applyQuestResult(r.character);
+    return true;
+  }catch(e){return false}
+}
+async function claimQuestReward(from){
+  const r=QUEST_REWARDS_LOCAL[from];if(!r)return;
+  let ok=false;
+  if(CUR_CHAR&&authToken())ok=await questReward(from);
+  if(!ok){P.quest=r.next;P.gold+=r.gold;P.gem+=r.gem;if(r.pv)P.pv++;gainXp(r.xp)}
+  sfx.coin();toast(r.msg);saveGame();
 }
 async function registerAcc(name,pw){
   name=(name||'').trim();

@@ -51,6 +51,30 @@ const SKILL_RESET_PRICE = 30;
 const SHOP_BAG_MAX = 12;
 function typeSlot(type) { return (type === 'sword' || type === 'bow' || type === 'staffd' || type === 'staffm') ? 'sword' : type; }
 
+// Espelha as recompensas de missao dos dialogos (NPC_SCRIPT em index.html,
+// callbacks end() dos estagios que dao premio) pra conceder ouro/gema/XP no
+// servidor em vez de aceitar o que o cliente ja gravou no P.gold/P.gem/P.xp.
+// So os 8 estagios que realmente pagam premio estao aqui; os demais (aceitar
+// missao, "portal liberado" sem recompensa) nao movem nada de valor e
+// continuam so no cliente.
+const QUEST_REWARDS = {
+  2:  {next:3,  gold:30,   gem:0, xp:20,   pv:1},
+  4:  {next:5,  gold:60,   gem:1, xp:80},
+  8:  {next:9,  gold:150,  gem:2, xp:300},
+  12: {next:13, gold:250,  gem:3, xp:500},
+  16: {next:17, gold:400,  gem:4, xp:800},
+  20: {next:21, gold:600,  gem:5, xp:1200},
+  24: {next:25, gold:800,  gem:6, xp:1800},
+  28: {next:29, gold:1000, gem:7, xp:2500},
+};
+// Espelha need() do cliente (index.html): XP necessario pra passar do nivel l.
+const questNeed = l => 30 * l;
+function applyQuestXp(save, lvl, xpGain) {
+  let xp = save.xp + xpGain;
+  while (xp >= questNeed(lvl)) { xp -= questNeed(lvl); lvl = Math.min(99, lvl + 1); }
+  return { xp, lvl };
+}
+
 // shopSold e efemero por personagem (lista de recompra), como party --
 // nao sobrevive a um restart, nao precisa de tabela.
 const shopSoldByChar = new Map();
@@ -339,6 +363,7 @@ async function handleCharacters(req, res, pathname) {
 }
 
 const SHOP_ID_RE = /^\/api\/characters\/([0-9a-fA-F-]{8,36})\/shop$/;
+const QUEST_ID_RE = /^\/api\/characters\/([0-9a-fA-F-]{8,36})\/quest$/;
 
 // Loja/economia server-autoritativa: le o save atual do personagem no banco,
 // aplica a transacao contra as tabelas de preco acima (nunca confia em preco
@@ -436,6 +461,43 @@ async function handleShop(req, res, pathname) {
   } catch (err) {
     console.error('shop_error', err.message, err.status || '', err.detail || '');
     if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Loja online ainda não configurada no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+async function handleQuest(req, res, pathname) {
+  const m = QUEST_ID_RE.exec(pathname);
+  if (!m) return false;
+  if (req.method !== 'POST') { json(res,405,{error:'Método não permitido'}); return true; }
+  const charId = m[1];
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
+    const row = rows0[0];
+    if (!row) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+    let lvl = row.lvl;
+    const save = sanitizeSave(row.save, lvl);
+    const input = await readJson(req);
+    const from = Math.round(Number(input.from));
+    const reward = QUEST_REWARDS[from];
+
+    if (!reward || save.quest !== from) { json(res,400,{error:'Missão inválida ou já concluída'}); return true; }
+
+    save.gold = Math.min(500000, save.gold + reward.gold);
+    save.gem = Math.min(5000, save.gem + reward.gem);
+    if (reward.pv) save.pv = Math.min(999, save.pv + reward.pv);
+    const leveled = applyQuestXp(save, lvl, reward.xp);
+    save.xp = leveled.xp; lvl = leveled.lvl;
+    save.quest = reward.next;
+    save.lvl = lvl;
+
+    const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{lvl, save}, prefer:'return=representation'});
+    if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+    json(res,200,{character: rows[0]}); return true;
+  } catch (err) {
+    console.error('quest_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Missões online ainda não configuradas no servidor.':'Não foi possível concluir. Tente novamente.'});
     return true;
   }
 }
@@ -586,6 +648,7 @@ const server = http.createServer(async (req, res) => {
   const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
   if (await handleAuth(req, res, pathname)) return;
   if (await handleShop(req, res, pathname)) return;
+  if (await handleQuest(req, res, pathname)) return;
   if (await handleCharacters(req, res, pathname)) return;
   if (await handleFriends(req, res, pathname)) return;
   if (await handleParty(req, res, pathname)) return;

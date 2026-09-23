@@ -52,6 +52,16 @@ O diálogo antigo do mercador (`NPC_SCRIPT.mercador`) era código morto — `ope
 
 **Limite dessa fase:** isso fecha a brecha de "comprar sem ter o ouro" e "vender item que não existe com stats inflados". Não fecha 100%: recompensas de missão (`P.gold+=X` no `end()` de cada diálogo) ainda são só client-side, então um save editado via console ainda pode inflar ouro até o teto genérico (500.000) do `sanitizeSave`. Fechar isso de vez exigiria mover recompensa de missão pro servidor também — fora do escopo desta fase.
 
+## Fase 1 (unidade 1) — recompensa de missão server-autoritativa
+
+Os 8 estágios de `NPC_SCRIPT.aldea` que pagam prêmio (missão 2, 4, 8, 12, 16, 20, 24, 28 — ouro/gema/XP, um deles também dá uma poção) não chamam mais `P.gold+=X;P.gem+=Y;gainXp(Z)` direto. Com conta online, o cliente manda só a intenção (`POST /api/characters/:id/quest`, `{from: N}`); o servidor lê o `save.quest` real gravado no Supabase, confere se bate exatamente com `N` (rejeita repetir a mesma recompensa ou pular estágio), aplica a tabela de prêmios espelhada (`QUEST_REWARDS`) e o mesmo cálculo de XP/level-up do cliente (`questNeed(l)=30*l`, igual ao `need()` do `index.html`) e só então grava. A resposta manda de volta o personagem já atualizado; o cliente aplica os valores autoritativos em vez de ter calculado sozinho.
+
+Sem conta online — ou se a chamada ao servidor falhar por qualquer motivo (rede, sessão expirada) — o cliente cai no cálculo local de sempre, byte a byte igual ao que já existia. O progresso da missão nunca fica travado por causa da rede; a diferença é só que, com conta online, o valor final vem do servidor.
+
+Testado com um script de unidade que roda o trecho real de `server.js` (`QUEST_REWARDS`/`questNeed`/`applyQuestXp`) via `vm` — confirma os 8 estágios, o `next` de cada um e o level-up múltiplo (missão 28 a partir de `xp:25,lvl:1` sobe pra `lvl:13,xp:185`) — e testado ao vivo no navegador chamando `claimQuestReward()` sem conta (caminho offline), confirmando o mesmo resultado que o cálculo do cliente sempre deu.
+
+**O que essa unidade NÃO cobre:** XP/ouro/item ganho ao matar monstro (`killMob()` e as ~10 funções `killX()` por tipo) continuam 100% client-side — é a maior fatia da lacuna e fica pra próxima unidade da Fase 1, junto com o `lvl` do personagem ainda ser aceito direto do que o cliente manda no `PUT /api/characters/:id` (só limitado a 1–99, sem validar contra XP acumulado).
+
 ## Amigos e Grupo
 
 Reais, não só decorativos: `/api/friends` (listar/adicionar/remover, por usuário da conta) e `/api/party` (`POST` cria, `/join` entra com código, `/leave` sai). Status "Online" é verdadeiro — o servidor rastreia quais contas têm um WebSocket conectado agora (`accountSockets`, populado pelo `userId` que o cliente manda no `join`). A tela Social faz polling a cada 5s enquanto aberta. Grupo é efêmero (fica só em memória no servidor, como a autoridade de monstros — não sobrevive a um restart); Amigos persiste na tabela `friends` do Supabase.
