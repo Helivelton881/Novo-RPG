@@ -1297,6 +1297,13 @@ function doHits(){
     floater(s.x,s.y-(mobDims(s).h+6),'-'+dmg,sMul<1?'#9ad0ff':'#fff');
     if(!onlineHit&&s.hp<=0)killMob(s);
   }
+  if(pvpOn())for(const rp of remotesInMap()){
+    const reach=86,dx=rp.x-P.x,dy=(rp.y-8)-(P.y-22),d=Math.hypot(dx,dy);
+    if(d>reach)continue;
+    if(d>16&&(dx*v[0]+dy*v[1])/d<.2)continue;
+    const dmg=Math.round((baseDmg()+P.atk)*buffMul())+Math.floor(Math.random()*4);
+    netPlayerDamage(rp,'basic');floater(rp.x,rp.y-70,'-'+dmg,'#fff');any=true;
+  }
   if(any)sfx.hit();
 }
 function dropLoot(s,coins,maxv,pPot,pGem){
@@ -1647,12 +1654,14 @@ function basicShot(a){
 function explode(p,skip){
   EFX.push({kind:'boom',x:p.x,y:p.y+22,t:0,life:.35,r:70,col:'255,140,40'});sfx.boom();
   for(const m of MOBS){if(m.dead||m===skip)continue;if(Math.hypot(m.x-p.x,(m.y-10)-p.y)<70)skillHit(m,Math.round(p.dmg*.6),120,'#ffb060','fireball',true)}
+  if(pvpOn())for(const rp of remotesInMap()){if(rp===skip)continue;if(Math.hypot(rp.x-p.x,(rp.y-10)-p.y)<70){netPlayerDamage(rp,'fireball',true);floater(rp.x,rp.y-70,'-'+Math.round(p.dmg*.6),'#ffb060')}}
 }
 /* ---- efeitos de cada habilidade ---- */
 const SKILL_FX={
   spin(s,r){
     sfx.swing();EFX.push({kind:'spin',x:P.x,y:P.y,t:0,life:.38});let any=false;
     for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-P.x,(m.y-8)-(P.y-22))<=(m.boss?110:92)){skillHit(m,Math.round(skBase()*(1.4+.3*(r-1))),300,undefined,'spin');any=true}}
+    if(pvpOn())for(const rp of remotesInMap()){if(Math.hypot(rp.x-P.x,(rp.y-8)-(P.y-22))<=92){netPlayerDamage(rp,'spin');floater(rp.x,rp.y-70,'-'+Math.round(skBase()*(1.4+.3*(r-1))),'#fff');any=true}}
     if(any)sfx.hit();
   },
   dash(s,r){const v=dirVec[P.dir];P.dashT=.16;P.dashV=[v[0]*700,v[1]*700];P.dashHit=new Set();P.dashNoHit=false;P.dashMul=1.2+.25*(r-1);P.inv=Math.max(P.inv,.35);sfx.dash()},
@@ -1671,6 +1680,7 @@ const SKILL_FX={
   frost(s,r){
     EFX.push({kind:'frost',x:P.x,y:P.y,t:0,life:.5});sfx.frost();
     for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-P.x,m.y-P.y)<95+(m.boss?20:0)){skillHit(m,Math.round(skBase()*(1+.25*(r-1))),120,'#bfe9ff','frost');m.slow=3+(r-1)}}
+    if(pvpOn())for(const rp of remotesInMap()){if(Math.hypot(rp.x-P.x,rp.y-P.y)<95){netPlayerDamage(rp,'frost');floater(rp.x,rp.y-70,'-'+Math.round(skBase()*(1+.25*(r-1))),'#bfe9ff')}}
   },
   barrier(s,r){P.shield=barrierAmt(r);P.shieldT=time+8;EFX.push({kind:'aura',x:P.x,y:P.y,t:0,life:.6,col:'110,170,255'});sfx.cast()},
   heal(s,r){
@@ -1680,6 +1690,7 @@ const SKILL_FX={
   roots(s,r){
     const c=castPos();EFX.push({kind:'roots',x:c.x,y:c.y,t:0,life:.6});sfx.cast();
     for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-c.x,m.y-c.y)<85){skillHit(m,Math.round(skBase()*(.8+.2*(r-1))),20,'#9dff8a','roots');m.root=2+.5*(r-1)}}
+    if(pvpOn())for(const rp of remotesInMap()){if(Math.hypot(rp.x-c.x,rp.y-c.y)<85){netPlayerDamage(rp,'roots');floater(rp.x,rp.y-70,'-'+Math.round(skBase()*(.8+.2*(r-1))),'#9dff8a')}}
   },
   thorns(s,r){const c=castPos();ZONES.push({x:c.x,y:c.y,r:90,t:0,life:3,acc:.3,tick:.6,mult:.45+.1*(r-1)});sfx.cast()}
 };
@@ -1707,7 +1718,10 @@ function skillUpdate(dt){
     if(!blocked(P.x+mx,P.y,10,10)&&!npcBlock(P.x+mx,P.y))P.x+=mx;
     if(!blocked(P.x,P.y+my,10,10)&&!npcBlock(P.x,P.y+my))P.y+=my;
     P.inv=Math.max(P.inv,.2);EFX.push({kind:'ghost',x:P.x,y:P.y,dir:P.dir,t:0,life:.25});
-    if(!P.dashNoHit)for(const m of MOBS){if(m.dead||P.dashHit.has(m))continue;if(Math.hypot(m.x-P.x,m.y-P.y)<52){P.dashHit.add(m);skillHit(m,Math.round(skBase()*(P.dashMul||1.2)),200,undefined,'dash');sfx.hit()}}
+    if(!P.dashNoHit){
+      for(const m of MOBS){if(m.dead||P.dashHit.has(m))continue;if(Math.hypot(m.x-P.x,m.y-P.y)<52){P.dashHit.add(m);skillHit(m,Math.round(skBase()*(P.dashMul||1.2)),200,undefined,'dash');sfx.hit()}}
+      if(pvpOn())for(const rp of remotesInMap()){if(P.dashHit.has(rp)||Math.hypot(rp.x-P.x,rp.y-P.y)>=52)continue;P.dashHit.add(rp);netPlayerDamage(rp,'dash');floater(rp.x,rp.y-70,'-'+Math.round(skBase()*(P.dashMul||1.2)),'#fff');sfx.hit()}
+    }
   }
   for(let i=PROJ.length-1;i>=0;i--){
     const p=PROJ[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;let done=p.life<=0;
@@ -1715,12 +1729,17 @@ function skillUpdate(dt){
       if(m.dead||p.hit.has(m))continue;const dm=mobDims(m);
       if(Math.hypot(m.x-p.x,(m.y-(m.hov||0)-dm.h*.3)-p.y)<dm.w*.38+p.r){p.hit.add(m);skillHit(m,p.dmg,p.kb,p.basic?'#fff':'#ffe27a',p.basic?'basic':p.skill);sfx.hit();if(p.splash)explode(p,m);if(!p.pierce){done=true;break}}
     }
+    if(!done&&pvpOn())for(const rp of remotesInMap()){
+      if(p.hit.has(rp))continue;
+      if(Math.hypot(rp.x-p.x,(rp.y-30)-p.y)<26+p.r){p.hit.add(rp);netPlayerDamage(rp,p.basic?'basic':p.skill,false);floater(rp.x,rp.y-70,'-'+p.dmg,p.basic?'#fff':'#ffe27a');sfx.hit();if(p.splash)explode(p,rp);if(!p.pierce){done=true;break}}
+    }
     if(done){if(p.splash&&p.life<=0&&!p.hit.size)explode(p,null);netProjectileEnd(p);PROJ.splice(i,1)}
   }
   for(let i=RPROJ.length-1;i>=0;i--){const p=RPROJ[i];p.x+=p.vx*dt;p.y+=p.vy*dt;p.life-=dt;if(p.life<=0)RPROJ.splice(i,1)}
   for(let i=ZONES.length-1;i>=0;i--){
     const z=ZONES[i];z.t+=dt;z.acc+=dt;
-    if(z.acc>=z.tick){z.acc-=z.tick;for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-z.x,m.y-z.y)<z.r+8)skillHit(m,Math.round(skBase()*z.mult),30,'#9dff8a','thorns')}}
+    if(z.acc>=z.tick){z.acc-=z.tick;for(const m of MOBS){if(m.dead)continue;if(Math.hypot(m.x-z.x,m.y-z.y)<z.r+8)skillHit(m,Math.round(skBase()*z.mult),30,'#9dff8a','thorns')}
+      if(pvpOn())for(const rp of remotesInMap()){if(Math.hypot(rp.x-z.x,rp.y-z.y)<z.r+8){netPlayerDamage(rp,'thorns');floater(rp.x,rp.y-70,'-'+Math.round(skBase()*z.mult),'#9dff8a')}}}
     if(z.t>z.life)ZONES.splice(i,1);
   }
 }
@@ -2578,6 +2597,10 @@ function netConnect(){
     else if(m.type==='projectile'&&m.map===W_.name&&m.ownerId!==NET_ID){const p=m.projectile;if(p&&!RPROJ.some(x=>x.id===p.id))RPROJ.push(Object.assign({remote:true},p))}
     else if(m.type==='projectile_end'&&m.map===W_.name&&m.ownerId!==NET_ID){const i=RPROJ.findIndex(x=>x.id===m.id);if(i>=0)RPROJ.splice(i,1);if(m.boom)EFX.push({kind:'boom',x:m.x,y:m.y+22,t:0,life:.35,r:70,col:'255,140,40'})}
     else if(m.type==='chat'){chatAdd(m.from,m.text);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.from+': '+m.text)}
+    else if(m.type==='player_hit'&&m.map===W_.name){
+      if(m.targetId===NET_ID){const atkP=REMOTE.get(m.attackerId);hurtPlayer(m.dmg,atkP?{x:atkP.x,y:atkP.y}:null)}
+      else{const tp=REMOTE.get(m.targetId);if(tp)floater(tp.x,tp.y-70,'-'+m.dmg,'#ff6a5a')}
+    }
   };
   NET.onclose=()=>{NET_ID=null;NET_AUTH=null;NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};
   NET.onerror=()=>NET.close();
@@ -2588,6 +2611,9 @@ function netUpdate(dt){
   netMobT-=dt;if(netMobT<=0&&NET_AUTH===NET_ID&&W_){netMobT=.2;NET.send(JSON.stringify({type:'mob_snapshot',map:W_.name,mobs:MOBS.filter(m=>!m.dead&&m.netId).map(m=>({id:m.netId,x:m.x,y:m.y,state:m.state}))}))}
 }
 function netMobDamage(m,damage,skill,splash){if(NET&&NET.readyState===1&&m.netId){NET.send(JSON.stringify({type:'mob_damage',map:W_.name,id:m.netId,skill:skill||'basic',atk:P.atk,splash:!!splash}));return true}return false}
+function pvpOn(){return !!(W_&&W_.name!=='vila')}
+function netPlayerDamage(rp,skill,splash){if(!pvpOn()||!NET||NET.readyState!==1||!rp||!rp.id)return;NET.send(JSON.stringify({type:'player_damage',map:W_.name,targetId:rp.id,skill:skill||'basic',atk:P.atk,splash:!!splash}))}
+function remotesInMap(){const l=[];for(const p of REMOTE.values())if(p.map===W_.name)l.push(p);return l}
 function netProjectile(p){if(!NET||NET.readyState!==1||!W_)return;p.nid=NET_ID+':p'+(++netProjectileSeq);NET.send(JSON.stringify({type:'projectile',map:W_.name,id:p.nid,kind:p.kind,x:p.x,y:p.y,vx:p.vx,vy:p.vy,life:p.life,r:p.r,pierce:p.pierce}))}
 function netProjectileEnd(p){if(NET&&NET.readyState===1&&p.nid)NET.send(JSON.stringify({type:'projectile_end',map:W_.name,id:p.nid,x:p.x,y:p.y,boom:!!p.splash}))}
 function netLockMobs(){if(!NET_ID)return;for(const m of MOBS){if(m.netHp!=null)m.hp=m.netHp;if(m.netDead)m.dead=true;if(NET_AUTH!==NET_ID&&!m.dead&&Number.isFinite(m.netX)){m.x=m.netX;m.y=m.netY;if(m.netState)m.state=m.netState}}}

@@ -88,6 +88,28 @@ function baseDmgOf(cls, lvl) { const c = CLASS_DMG[cls] || CLASS_DMG.guerreiro; 
 function buffMulOf(p) { return 1 + ((p.buffUntil && Date.now() < p.buffUntil) ? (p.buffAtk || 0) : 0); }
 function skBaseOf(p, atk) { return (baseDmgOf(p.cls, p.lvl) + clampAtk(atk) + 2) * buffMulOf(p); }
 
+// Compartilhado por mob_damage e player_damage: nunca confia no numero que o
+// cliente manda, so em qual skill foi usada (basic com formula+cooldown por
+// classe, ou o valor "pendente" computado no cast_skill). Retorna null se a
+// skill nao pode causar dano agora (sem cast valido, cooldown, ou spam).
+function resolveAttackDamage(p, msg, now) {
+  const skill = cleanText(msg.skill, 16) || 'basic';
+  let dmg = 0;
+  if (skill === 'basic') {
+    p.recentBasic = (p.recentBasic || []).filter(t => now - t < (BASIC_CD_MS[p.cls] || 420));
+    if (p.recentBasic.length >= 6) return null;
+    p.recentBasic.push(now);
+    dmg = Math.round((baseDmgOf(p.cls, p.lvl) + clampAtk(msg.atk)) * buffMulOf(p)) + Math.floor(Math.random() * 4);
+  } else if (DAMAGE_SKILLS.has(skill)) {
+    const pend = p.pendingSkill && p.pendingSkill[skill];
+    if (!pend || now > pend.expiresAt) return null;
+    dmg = msg.splash ? Math.round(pend.dmg * .6) : pend.dmg;
+  } else return null;
+  const lvl = Math.max(1, Math.min(99, Number(p.lvl) || 1)), maxHit = Math.min(6500, 50 + lvl * 60);
+  dmg = Math.max(0, Math.min(maxHit, dmg));
+  return dmg || null;
+}
+
 function cleanText(value, max) {
   return String(value || '').replace(/[<>\u0000-\u001f]/g, '').trim().slice(0, max);
 }
@@ -546,7 +568,7 @@ function broadcastMap(map, payload) {
 
 function mapState(id) {
   let state=maps.get(id);
-  if(!state){state={id,mobs:new Map(),authorityId:null,hitGuard:new Map()};maps.set(id,state)}
+  if(!state){state={id,mobs:new Map(),authorityId:null,hitGuard:new Map(),pvpGuard:new Map()};maps.set(id,state)}
   return state;
 }
 
@@ -643,28 +665,31 @@ wss.on('connection', ws => {
       // batendo no mesmo alvo rapido demais.
       const now=Date.now(),guard=state.hitGuard.get(mobId);
       if(guard&&guard.playerId===p.id&&now-guard.at<80)return;
-      // o dano nunca vem do que o cliente manda -- o servidor recalcula a
-      // partir da skill/rank informada (basic ataca com formula+cooldown
-      // por classe; skills usam o valor computado no cast_skill acima).
-      const skill=cleanText(msg.skill,16)||'basic';
-      let dmg=0;
-      if(skill==='basic'){
-        p.recentBasic=(p.recentBasic||[]).filter(t=>now-t<(BASIC_CD_MS[p.cls]||420));
-        if(p.recentBasic.length>=6)return;
-        p.recentBasic.push(now);
-        dmg=Math.round((baseDmgOf(p.cls,p.lvl)+clampAtk(msg.atk))*buffMulOf(p))+Math.floor(Math.random()*4);
-      } else if(DAMAGE_SKILLS.has(skill)){
-        const pend=p.pendingSkill&&p.pendingSkill[skill];
-        if(!pend||now>pend.expiresAt)return;
-        dmg=msg.splash?Math.round(pend.dmg*.6):pend.dmg;
-      } else return;
-      const lvl=Math.max(1,Math.min(99,Number(p.lvl)||1)),maxHit=Math.min(6500,50+lvl*60);
-      dmg=Math.max(0,Math.min(maxHit,dmg));
+      const dmg=resolveAttackDamage(p,msg,now);
       if(!dmg)return;
       state.hitGuard.set(mobId,{playerId:p.id,at:now});
       mob.hp=Math.max(0,mob.hp-dmg);
       if(mob.hp<=0){mob.dead=true;mob.respawnAt=Date.now()+(mob.boss?60000:30000)}
       broadcastMap(map,{type:'mob_state',map,mob,killerId:mob.dead?p.id:null});
+    } else if (msg.type === 'player_damage') {
+      // PvP: liberado fora da vila. O servidor nunca rastreia o HP do
+      // defensor -- reaproveita a mesma validacao de dano/cooldown do PvE
+      // (resolveAttackDamage) e manda o dano bruto pro alvo, que aplica a
+      // propria mitigacao (defesa/bloqueio/escudo) localmente, exatamente
+      // como ja faz contra ataques de monstro (hurtPlayer no cliente).
+      const map=cleanText(msg.map,24);if(map!==p.map||map==='vila')return;
+      const targetId=cleanText(msg.targetId,64);if(!targetId||targetId===p.id)return;
+      let target=null;for(const other of clients.values())if(other.id===targetId&&other.map===map){target=other;break}
+      if(!target)return;
+      if(p.userId&&target.userId){const pc=memberParty.get(p.userId),tc=memberParty.get(target.userId);if(pc&&pc===tc)return}
+      if(Math.hypot(target.x-p.x,target.y-p.y)>550)return;
+      const state=mapState(map);
+      const now=Date.now(),gk=p.id+'>'+targetId,lastHit=state.pvpGuard.get(gk);
+      if(lastHit&&now-lastHit<80)return;
+      const dmg=resolveAttackDamage(p,msg,now);
+      if(!dmg)return;
+      state.pvpGuard.set(gk,now);
+      broadcastMap(map,{type:'player_hit',map,targetId,attackerId:p.id,attackerName:p.name,dmg});
     } else if (msg.type === 'mob_snapshot') {
       const map=cleanText(msg.map,24),state=maps.get(map);if(!state||map!==p.map||state.authorityId!==p.id||!Array.isArray(msg.mobs))return;
       for(const u of msg.mobs.slice(0,120)){const mob=state.mobs.get(cleanText(u.id,48));if(!mob||mob.dead)continue;const x=Number(u.x),y=Number(u.y);if(Number.isFinite(x)&&Number.isFinite(y)&&x>=0&&x<=2880&&y>=0&&y<=2112){mob.x=x;mob.y=y;mob.state=cleanText(u.state,16)||'idle'}}
