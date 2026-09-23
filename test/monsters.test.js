@@ -89,6 +89,10 @@ test('morte: golpes repetidos derrubam o monstro a 0 de HP e o marcam morto (mob
   const mobs = await joinFloresta(conn);
   const deadMsg = await killMob(conn, mobs[5]);
   assert.ok(deadMsg, 'monstro nao morreu apos golpes repetidos suficientes pra zerar o hp real');
+  const before = conn.msgs.length;
+  await sleep(500);
+  const movedDead = conn.msgs.slice(before).find(m => m.type === 'mob_positions' && m.mobs.some(x => x.id === mobs[5].id));
+  assert.equal(movedDead, undefined, 'monstro morto continuou se movendo');
   conn.close();
 });
 
@@ -112,4 +116,8 @@ test('respawn: apos o tempo agendado, o monstro reaparece com hp cheio (espera r
   const revived = conn.msgs.slice(before).find(m => m.type === 'mob_state' && m.mob.id === mobs[7].id && m.mob.dead === false);
   assert.ok(revived, 'monstro nao voltou a vida apos o tempo de respawn agendado');
   assert.equal(revived.mob.hp, revived.mob.maxhp, 'monstro voltou sem hp cheio');
+  assert.equal(revived.mob.x, revived.mob.sx, 'respawn nao voltou ao spawn X original');
+  assert.equal(revived.mob.y, revived.mob.sy, 'respawn nao voltou ao spawn Y original');
+  assert.equal(revived.mob.tgt, null, 'respawn manteve alvo antigo');
+  assert.equal(revived.mob.state, 'idle', 'respawn nao voltou em idle');
 });
