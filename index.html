@@ -3500,6 +3500,7 @@ function summon(s){
 function updSkeleton(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0&&!s.temp)Object.assign(s,newSkeleton(s.sx,s.sy,s.lvl,s.boss,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;if(s.guard>0)s.guard-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepSkeleton)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1);
   const st=skStats(s);
   if((s.kx||s.ky)&&s.state!=='guard'){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(!blocked(nx,s.y,12,8))s.x=nx;if(!blocked(s.x,ny,12,8))s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
@@ -3811,6 +3812,7 @@ function howlNow(s){
 function updWolf(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0&&!s.temp)Object.assign(s,newWolf(s.sx,s.sy,s.lvl,s.boss,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;if(s.haste>0)s.haste-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepWolf)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;
   if(s.boss&&!s.enr&&s.hp<s.maxhp*.4){s.enr=true;toast('O Lobo Alfa está furioso!')}
   const sm=(s.root>0?0:1)*(s.slow>0?.5:1)*(s.haste>0?1.35:1)*(s.enr?1.2:1),st=wfStats(s);
@@ -4054,6 +4056,7 @@ function flyTo(s,tx,ty,spd,dt,sm){const ddx=tx-s.x,ddy=ty-s.y,dd=Math.hypot(ddx,
 function updBat(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0&&!s.temp)Object.assign(s,newBat(s.sx,s.sy,s.lvl,s.pack));return}
   s.anim+=dt;s.ph+=dt*4;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepBat)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1),st=btStats(s);
   if(s.kx||s.ky){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(nx>MIN_X&&nx<MAX_X)s.x=nx;if(ny>MIN_Y&&ny<MAX_Y)s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
   const dx=P.x-s.x,dy=P.y-s.y,d=Math.hypot(dx,dy)||1,home=Math.hypot(s.x-s.sx,s.y-s.sy);
@@ -4096,6 +4099,7 @@ function summonToxic(s){
 function updToxic(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0&&!s.temp)Object.assign(s,newToxic(s.sx,s.sy,s.lvl,s.boss,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepToxic)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1),st=txStats(s),dm=mobDims(s);
   if(s.kx||s.ky){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(!blocked(nx,s.y,12,8))s.x=nx;if(!blocked(s.x,ny,12,8))s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
   const dx=P.x-s.x,dy=P.y-s.y,d=Math.hypot(dx,dy)||1,home=Math.hypot(s.x-s.sx,s.y-s.sy);
@@ -4396,6 +4400,7 @@ function casterBlinkDest(s,cx,cy,rad,arena){
 function updCaster(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0&&!s.temp)Object.assign(s,newCaster(s.sx,s.sy,s.lvl,s.boss,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepCaster)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1),st=caStats(s);
   if(s.absT>0){s.absT-=dt;if(s.absT<=0)s.absorb=0}
   if(s.kx||s.ky){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(!blocked(nx,s.y,12,8))s.x=nx;if(!blocked(s.x,ny,12,8))s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
@@ -4672,6 +4677,7 @@ function addTornado(x,y,dmg){HAZ.push({x,y,r:44,t:0,life:7,warn:.6,acc:0,tor:dmg
 function updSky(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0&&!s.temp)Object.assign(s,newSky(s.k,s.sx,s.sy,s.lvl,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepSky)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1),st=skyStats(s),k=s.k;
   s.tGust-=dt;s.tBolt-=dt;s.tHeal-=dt;s.tRain-=dt;s.tTor-=dt;
   if((s.kx||s.ky)&&s.state!=='charge'){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(!blocked(nx,s.y,12,8))s.x=nx;if(!blocked(s.x,ny,12,8))s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
@@ -4989,6 +4995,7 @@ function newLorde(x,y){const st=vlStats({type:'lorde'});return{type:'lorde',boss
 function updSala(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0)Object.assign(s,newSala(s.sx,s.sy,s.lvl,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepSala)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;
   if(!s.enr&&s.hp<s.maxhp*.4)s.enr=true;
   const sm=(s.root>0?0:1)*(s.slow>0?.5:1)*(s.enr?1.3:1),st=vlStats(s);
@@ -5029,6 +5036,7 @@ function updSala(s,dt){
 function updElem(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0)Object.assign(s,newElem(s.sx,s.sy,s.lvl,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepElem)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1),st=vlStats(s);
   if(s.kx||s.ky){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(!blocked(nx,s.y,12,8))s.x=nx;if(!blocked(s.x,ny,12,8))s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
   const dx=P.x-s.x,dy=P.y-s.y,d=Math.hypot(dx,dy)||1,home=Math.hypot(s.x-s.sx,s.y-s.sy);
@@ -5067,6 +5075,7 @@ function updElem(s,dt){
 function updCalc(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0&&!s.temp)Object.assign(s,newCalc(s.sx,s.sy,s.lvl,s.boss,s.pack));return}
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;if(s.guard>0)s.guard-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepCalc)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1),st=vlStats(s);
   if((s.kx||s.ky)&&s.state!=='guard'){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(!blocked(nx,s.y,12,8))s.x=nx;if(!blocked(s.x,ny,12,8))s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
   const dx=P.x-s.x,dy=P.y-s.y,d=Math.hypot(dx,dy)||1,home=Math.hypot(s.x-s.sx,s.y-s.sy),toP=Math.atan2(dy,dx);
@@ -5114,6 +5123,7 @@ function updCalc(s,dt){
 function updLorde(s,dt){
   if(s.dead)return;
   s.anim+=dt;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepLorde)
   const st=vlStats(s);
   if(!s.enr&&s.hp<s.maxhp*.25)s.enr=true;
   if(!s.summoned&&s.hp<s.maxhp*.5&&s.state!=='idle'&&s.state!=='return'){
@@ -5165,6 +5175,7 @@ function updLorde(s,dt){
 function updCinza(s,dt){
   if(s.dead){s.respawn-=dt;if(s.respawn<=0&&!s.temp)Object.assign(s,newCinza(s.sx,s.sy,s.lvl,s.pack));return}
   s.anim+=dt;s.ph+=dt*4;if(s.flash>0)s.flash-=dt;if(s.cd>0)s.cd-=dt;if(s.bar>0)s.bar-=dt;if(s.ret>0)s.ret-=dt;
+  if(s.netId&&NET&&NET.readyState===1)return; // Fase 2: servidor ja simula (stepCinza)
   if(s.slow>0)s.slow-=dt;if(s.root>0)s.root-=dt;const sm=(s.root>0?0:1)*(s.slow>0?.5:1),st=vlStats({type:'sala',lvl:s.lvl});
   if(s.kx||s.ky){const nx=s.x+s.kx*dt,ny=s.y+s.ky*dt;if(nx>MIN_X&&nx<MAX_X)s.x=nx;if(ny>MIN_Y&&ny<MAX_Y)s.y=ny;s.kx*=.8;s.ky*=.8;if(Math.abs(s.kx)<6)s.kx=0;if(Math.abs(s.ky)<6)s.ky=0}
   const dx=P.x-s.x,dy=P.y-s.y,d=Math.hypot(dx,dy)||1,home=Math.hypot(s.x-s.sx,s.y-s.sy);

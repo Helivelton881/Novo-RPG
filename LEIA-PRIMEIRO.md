@@ -161,6 +161,27 @@ Testado com um teste de integração via WebSocket real: goblin trash entra em p
 
 **Limites explícitos, mesmos da unidade 1:** sem dado de colisão server-side (`dash` sempre completa a distância cheia, nunca é interrompido por parede). Raiz/lentidão não sincronizados. Campos só-visuais do cliente (`face`, `moving`, direção de sprite) não são replicados pelo servidor — a posição/estado chegam certos, mas o goblin pode não virar de frente pro alvo com a mesma precisão visual de antes; não afeta dano/perseguição, só polimento cosmético pra uma unidade futura.
 
+## Fase 2 (unidades 3–13) — os 11 tipos restantes, Fase 2 completa
+
+Todo tipo de monstro do jogo (13 no total) agora tem IA autoritativa no servidor: posição, agressão, alvo, telegraph de ataque e dano primário nunca mais dependem do que o cliente relata. `MOB_AI_STEP` (o dispatcher de `tickMobAI`) cobre `slime, goblin, skeleton, wolf, bat, cinza, toxic, caster, sky, sala, elem, calc, lorde` — o mesmo conjunto de 13 que `updMob()` despacha no cliente.
+
+**Escopo desta rodada, deliberado e documentado:** cada `stepX` porta posição/estado/agressão/**ataque primário** (o achado central da auditoria: fechar a exposição real a dano de monstro, que antes nunca chegava ao servidor). Ficam de fora, mesmo padrão já aceito pra raiz/lentidão desde a Fase 1/PvP — nenhum desses é simulado localmente quando `NET` está conectado, o cliente só deixa de existir, não vira uma versão falsa:
+- **Efeitos de status como dano contínuo** (sangramento do lobo, veneno do tóxico, queimadura de sala/elem/calc/cinza/lorde) — o hit primário ainda acerta, só o DoT que se seguiria não é aplicado.
+- **Cura de aliado** (xamã do céu) e **empurrão de nocaute** (rajadas, investida do guardião).
+- **Teleporte/blink** (conjurador) e **barreira/absorção** (chefe conjurador).
+- **Revivência de sequitos de chefe** (uivo do lobo, "o capitão chama os mortos", "o rei lodoso se divide", "invoca acólitos", "invoca salamandras") — mesma limitação já documentada desde a Fase 1 unidade 5: os sequitos nascem `dead:true` no manifesto e nunca são efetivamente reanimados sem simular o estado de IA do chefe que os invoca (a peça que continua fora de alcance).
+- **Tornado persistente** (chefe do céu) e **poças/áreas que causam dano contínuo por tempo** (`HAZ`, veneno de tóxico/campo de sala) — só o hit direto do ataque que gera a área é aplicado, a área em si não persiste dano no servidor.
+- **Ataque à distância**: em vez de simular o projétil de verdade, o servidor manda o `mob_hit` depois de um atraso calculado (`distância/velocidade`) pra preservar a janela de esquiva por tempo — sem replicar a trajetória visual do projétil pros outros jogadores verem.
+- **Chefe conjurador (Feiticeiro Sombrio) especificamente**: portado com moveset reduzido ao ataque básico à distância — sem chuva de área, barreira, blink ou invocação. Ainda causa dano de verdade (fecha o "modo deus"), mas não é o moveset completo do chefe original. É a maior simplificação desta rodada, feita conscientemente por escala.
+
+**Detalhe de fidelidade preservado:** o morcego-de-cinzas (`cinza`) usa a fórmula de dano da **salamandra** × 0.7 (não a própria, que nem existe) — o mesmo comportamento peculiar já documentado desde a Fase 1 unidade 5 (o cliente original também "empresta" a fórmula de `sala` pro `cinza`).
+
+Testado com um teste de integração via WebSocket real cobrindo os 6 mapas restantes (cripta, serra, pantano, torre, ilhas, vulcão): perseguição + dano exato pra pelo menos 1 trash de cada mapa (2 subtipos quando o mapa mistura, ex. morcego+tóxico no pântano, esqueleto+conjurador na torre), mais os chefes lobo-alfa (95), feiticeiro-sombrio (130, moveset reduzido) e Senhor das Chamas (170 no golpe direto / 153 na "chuva"), todos com a fórmula exata batendo. E ao vivo no navegador: os 11 `updX()` confirmados suprimindo movimento/dano local sem exceção quando `NET.readyState===1`, animação continua.
+
+**Descoberta durante o teste, não um bug:** morcego (e os subtipos do céu com ataque à distância/investida) têm um alcance **mínimo** de engajamento (`d>50`) no próprio design original — eles mergulham de uma certa distância, não atacam colados. Um teste que persegue a posição exata do monstro nunca dispara o ataque por design, não por falha do servidor; corrigido no teste (mantém ~120px de distância), não no comportamento.
+
+Isso encerra o que esta sessão considera **Fase 2 completável sem uma extensão de arquitetura maior**. O que resta é genuinamente fora de alcance com a base atual: colisão de terreno no servidor (portar `blocked()`/dados de mapa) e simulação de IA de chefe completa (revivência de sequitos, barreiras, invocações) — cada um comparável em tamanho a esta fase inteira.
+
 ## Amigos e Grupo
 
 Reais, não só decorativos: `/api/friends` (listar/adicionar/remover, por usuário da conta) e `/api/party` (`POST` cria, `/join` entra com código, `/leave` sai). Status "Online" é verdadeiro — o servidor rastreia quais contas têm um WebSocket conectado agora (`accountSockets`, populado pelo `userId` que o cliente manda no `join`). A tela Social faz polling a cada 5s enquanto aberta. Grupo é efêmero (fica só em memória no servidor, como a autoridade de monstros — não sobrevive a um restart); Amigos persiste na tabela `friends` do Supabase.

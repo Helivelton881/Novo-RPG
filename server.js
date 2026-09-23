@@ -30,22 +30,22 @@ function mobStats(type, lvl, boss, k) {
   switch (type) {
     case 'slime': { const t = { 1: { hp: 28, xp: 12, dmg: 6 }, 2: { hp: 44, xp: 20, dmg: 9 }, 3: { hp: 62, xp: 30, dmg: 12 } }[lvl]; return t || null; }
     case 'goblin': return boss ? { hp: 480, xp: 320, dmg: 30 } : { hp: 70 + (lvl - 5) * 14, xp: 40 + (lvl - 5) * 9, dmg: 14 + (lvl - 5) * 2 };
-    case 'skeleton': return boss ? { hp: 1800, xp: 800 } : { hp: 260 + (lvl - 10) * 36, xp: 100 + (lvl - 10) * 14 };
-    case 'wolf': return boss ? { hp: 3400, xp: 1200 } : { hp: 420 + (lvl - 15) * 55, xp: 130 + (lvl - 15) * 16 };
-    case 'bat': return lvl >= 30 ? { hp: 1700 + (lvl - 30) * 180, xp: 300 + (lvl - 30) * 30 } : { hp: 340 + (lvl - 20) * 50, xp: 160 + (lvl - 20) * 20 };
-    case 'toxic': return boss ? { hp: 5200, xp: 2000 } : { hp: 520 + (lvl - 20) * 70, xp: 170 + (lvl - 20) * 22 };
-    case 'caster': return boss ? { hp: 9000, xp: 3500 } : { hp: 1400 + (lvl - 25) * 160, xp: 240 + (lvl - 25) * 30 };
+    case 'skeleton': return boss ? { hp: 1800, xp: 800, dmg: 52 } : { hp: 260 + (lvl - 10) * 36, xp: 100 + (lvl - 10) * 14, dmg: 28 + (lvl - 10) * 3 };
+    case 'wolf': return boss ? { hp: 3400, xp: 1200, dmg: 95 } : { hp: 420 + (lvl - 15) * 55, xp: 130 + (lvl - 15) * 16, dmg: 52 + (lvl - 15) * 5 };
+    case 'bat': return lvl >= 30 ? { hp: 1700 + (lvl - 30) * 180, xp: 300 + (lvl - 30) * 30, dmg: 110 + (lvl - 30) * 10 } : { hp: 340 + (lvl - 20) * 50, xp: 160 + (lvl - 20) * 20, dmg: 56 + (lvl - 20) * 5 };
+    case 'toxic': return boss ? { hp: 5200, xp: 2000, dmg: 120 } : { hp: 520 + (lvl - 20) * 70, xp: 170 + (lvl - 20) * 22, dmg: 50 + (lvl - 20) * 5 };
+    case 'caster': return boss ? { hp: 9000, xp: 3500, dmg: 130 } : { hp: 1400 + (lvl - 25) * 160, xp: 240 + (lvl - 25) * 30, dmg: 92 + (lvl - 25) * 8 };
     case 'sky': {
-      if (k === 'b') return { hp: 14000, xp: 6000 };
+      if (k === 'b') return { hp: 14000, xp: 6000, dmg: 150 };
       const d = lvl - 30;
-      if (k === 'h') return { hp: 1900 + d * 220, xp: 300 + d * 36 };
-      if (k === 's') return { hp: 2100 + d * 240, xp: 320 + d * 38 };
-      return { hp: 2900 + d * 300, xp: 360 + d * 40 }; // 'g' (guardiao)
+      if (k === 'h') return { hp: 1900 + d * 220, xp: 300 + d * 36, dmg: 100 + d * 10 };
+      if (k === 's') return { hp: 2100 + d * 240, xp: 320 + d * 38, dmg: 90 + d * 10 };
+      return { hp: 2900 + d * 300, xp: 360 + d * 40, dmg: 135 + d * 12 }; // 'g' (guardiao)
     }
-    case 'lorde': return { hp: 26000, xp: 9000 };
-    case 'sala': { const d = lvl - 35; return { hp: 2600 + d * 280, xp: 400 + d * 44 }; }
-    case 'elem': { const d = lvl - 35; return { hp: 4200 + d * 380, xp: 440 + d * 48 }; }
-    case 'calc': case 'cinza': { const d = lvl - 35; return { hp: 3200 + d * 320, xp: 420 + d * 46 }; } // cinza usa a formula de calc de proposito -- e o mesmo "bug" que o cliente ja tem (newCinza so escala o hp de spawn com base em sala*.6, mas o xp em killVulcao recalcula com vlStats(s) que cai no default = calc)
+    case 'lorde': return { hp: 26000, xp: 9000, dmg: 170 };
+    case 'sala': { const d = lvl - 35; return { hp: 2600 + d * 280, xp: 400 + d * 44, dmg: 130 + d * 11 }; }
+    case 'elem': { const d = lvl - 35; return { hp: 4200 + d * 380, xp: 440 + d * 48, dmg: 150 + d * 13 }; }
+    case 'calc': case 'cinza': { const d = lvl - 35; return { hp: 3200 + d * 320, xp: 420 + d * 46, dmg: 110 + d * 10 }; } // cinza usa a formula de calc de proposito -- e o mesmo "bug" que o cliente ja tem (newCinza so escala o hp de spawn com base em sala*.6, mas o xp em killVulcao recalcula com vlStats(s) que cai no default = calc). O DANO DE ATAQUE de cinza e diferente: usa a formula de SALA*.7 (ver stepCinza), nao esse campo dmg do default.
     default: return null;
   }
 }
@@ -1286,7 +1286,547 @@ function stepGoblin(mob, dt, present) {
   }
   return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
 }
-const MOB_AI_STEP = { slime: stepSlime, goblin: stepGoblin };
+// Helper compartilhado: manda o dano bruto pro alvo (o cliente aplica
+// mitigacao via hurtPlayer(), igual PvP). delayedHit imita o tempo de voo
+// de um projetil (enemyShot no cliente) sem replicar visualmente o projetil
+// em si -- so preserva a janela de esquiva por tempo, nao a trajetoria.
+function hitTarget(target, mob, dmg) { if (target) send(target[0], { type: 'mob_hit', map: mob.map, mobId: mob.id, dmg: Math.round(dmg) }); }
+function delayedHit(target, mob, dmg, delayMs) { if (target) setTimeout(() => send(target[0], { type: 'mob_hit', map: mob.map, mobId: mob.id, dmg: Math.round(dmg) }), delayMs); }
+
+// ===== Fase 2, unidades 3-12: os 10 tipos restantes =====
+// Todas seguem o mesmo padrao de stepGoblin (mob.tgt trava o alvo ao entrar
+// em chase/wind). Escopo desta rodada, documentado em LEIA-PRIMEIRO.md:
+// porta posicao/estado/agressao/ataque PRIMARIO de cada tipo (o que fecha a
+// exposicao real a dano, o achado central da auditoria da Fase 2). Fica
+// deliberadamente de fora -- mesmo padrao ja aceito pra raiz/lentidao desde
+// a Fase 1/PvP: efeitos de status (sangramento/veneno/queimadura como dano
+// continuo), cura de aliado, teleporte/blink, empurrao de nocaute, revivencia
+// de sequitos de chefe (mesma limitacao ja documentada), poca/tornado
+// persistente (HAZ), e o "uivo" de matilha do lobo. Nenhum desses e
+// simulado localmente quando NET esta conectado (client-side so anima).
+
+function stepSkeleton(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  const st = mobStats('skeleton', mob.lvl, mob.boss); if (!st) return null;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity, toP = Math.atan2(dy, dx);
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < (mob.boss ? 230 : 160) && home < 480) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
+      mob.wt = (mob.wt || 0) - dt;
+      if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 70; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; }
+      step(mob.tx ?? mob.sx, mob.ty ?? mob.sy, 20);
+      break;
+    case 'chase':
+      if (!tp || d > 340 || home > 520) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      if (d < 66 && mob.cd <= 0) { mob.la = toP; mob.cmb = (mob.boss || mob.lvl >= 13) ? 2 : 1; mob.state = 'wind'; mob.t = mob.boss ? .6 : .65; break; }
+      if (d >= 56) step(tp.x, tp.y, mob.boss ? 56 : 62);
+      break;
+    case 'wind':
+      mob.t -= dt;
+      if (mob.t <= 0) {
+        if (target && d < 84) { let da = Math.abs(toP - mob.la); if (da > Math.PI) da = 2 * Math.PI - da; if (da < .95) hitTarget(target, mob, st.dmg); }
+        mob.cmb--;
+        if (mob.cmb > 0) { mob.state = 'wind'; mob.t = .42; mob.la = toP; }
+        else { mob.state = 'recover'; mob.t = .75; mob.cd = 1.1; }
+      }
+      break;
+    case 'guard':
+      mob.t -= dt; if (!tp || mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'recover':
+      mob.t -= dt; if (mob.t <= 0) mob.state = Math.random() < .55 ? 'guard' : 'chase'; if (mob.state === 'guard') mob.t = mob.boss ? 1.1 : 1.4;
+      break;
+    case 'return':
+      step(mob.sx, mob.sy, 90); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 45);
+      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (tp && mob.ret <= 0 && d < 110) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+function stepWolf(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  if (mob.boss && !mob.enr && mob.hp < mob.maxhp * .4) mob.enr = true;
+  const st = mobStats('wolf', mob.lvl, mob.boss); if (!st) return null;
+  const sm = mob.enr ? 1.2 : 1;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt * sm; mob.y += ddy / dd * spd * dt * sm; };
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < (mob.boss ? 260 : 190) && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
+      mob.wt = (mob.wt || 0) - dt;
+      if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 80; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; }
+      step(mob.tx ?? mob.sx, mob.ty ?? mob.sy, 30);
+      break;
+    case 'chase':
+      if (!tp || d > 400 || home > 580) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      if (mob.cd <= 0 && d < 185) { mob.lx = dx / d; mob.ly = dy / d; mob.hit = false; mob.cmb = mob.enr ? 2 : 1; mob.state = 'wind'; mob.t = mob.boss ? .45 : .55; break; }
+      step(tp.x, tp.y, mob.cd > 0 && d < 210 ? 118 : 108);
+      break;
+    case 'wind':
+      mob.t -= dt; if (mob.t <= 0) { mob.state = 'pounce'; mob.t = .28; }
+      break;
+    case 'pounce': {
+      mob.t -= dt; const sp = mob.boss ? 600 : 540; mob.x += mob.lx * sp * dt; mob.y += mob.ly * sp * dt;
+      if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 38) { mob.hit = true; hitTarget(target, mob, st.dmg); }
+      if (mob.t <= 0) {
+        mob.cmb--;
+        if (mob.cmb > 0 && tp) { mob.state = 'wind'; mob.t = .35; mob.lx = dx / d; mob.ly = dy / d; mob.hit = false; }
+        else { mob.state = 'recover'; mob.t = mob.boss ? .7 : 1; mob.cd = mob.boss ? .9 : 1.5 + Math.random() * .8; }
+      }
+      break;
+    }
+    case 'recover':
+      mob.t -= dt; if (mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'return':
+      step(mob.sx, mob.sy, 110); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 50);
+      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (tp && mob.ret <= 0 && d < 120) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+// stepBat/stepCinza compartilham o padrao "voador" (flyTo direto, sem
+// esquiva senoidal -- simplificacao visual documentada). dmgFn(st,lvl)
+// calcula o dano de contato (cinza usa a formula de sala*.7, nao a propria).
+function stepFlyer(mob, dt, present, type, statsFor, dmgOf, leech) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt);
+  mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  const st = statsFor(mob); if (!st) return null;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const fly = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 3) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < 200 && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
+      mob.wt = (mob.wt || 0) - dt;
+      if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 60; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; }
+      fly(mob.tx ?? mob.sx, mob.ty ?? mob.sy, 36);
+      break;
+    case 'chase':
+      if (!tp || d > 430 || home > 640) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      fly(tp.x, tp.y, d > 170 ? 150 : 115);
+      if (mob.cd <= 0 && d < 240 && d > 50) { mob.lx = dx / d; mob.ly = dy / d; mob.hit = false; mob.state = 'wind'; mob.t = .45; }
+      break;
+    case 'wind':
+      mob.t -= dt; if (mob.t <= 0) { mob.state = 'swoop'; mob.t = .3; }
+      break;
+    case 'swoop': {
+      mob.t -= dt; mob.x += mob.lx * 440 * dt; mob.y += mob.ly * 440 * dt;
+      if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 38) {
+        mob.hit = true; const dmg = dmgOf(st, mob.lvl); hitTarget(target, mob, dmg);
+        if (leech) mob.hp = Math.min(mob.maxhp, mob.hp + Math.round(dmg * .5));
+      }
+      if (mob.t <= 0) { mob.state = 'recover'; mob.t = 1.1; mob.cd = 1.4 + Math.random() * .8; }
+      break;
+    }
+    case 'recover':
+      mob.t -= dt; if (mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'return':
+      fly(mob.sx, mob.sy, 120); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 50);
+      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (tp && mob.ret <= 0 && d < 130) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+function stepBat(mob, dt, present) { return stepFlyer(mob, dt, present, 'bat', m => mobStats('bat', m.lvl, false), st => st.dmg, true); }
+function stepCinza(mob, dt, present) { return stepFlyer(mob, dt, present, 'cinza', m => mobStats('sala', m.lvl, false), (st, lvl) => st.dmg * .7, false); }
+
+function stepToxic(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  const st = mobStats('toxic', mob.lvl, mob.boss); if (!st) return null;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 6) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  if (!mob.boss) {
+    if (tp && d < 230 && home < 420) step(tp.x, tp.y, 52);
+    else {
+      mob.wt = (mob.wt || 0) - dt;
+      if (home > 150) step(mob.sx, mob.sy, 40);
+      else { if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 90; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; } step(mob.tx ?? mob.sx, mob.ty ?? mob.sy, 28); }
+    }
+    if (target && d < 24 && mob.cd <= 0) { mob.cd = 1.3; hitTarget(target, mob, st.dmg); }
+    return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: tp && d < 230 ? 'chase' : 'idle' };
+  }
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < 280 && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+    case 'chase':
+      if (!tp || d > 440 || home > 600) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      if (mob.cd <= 0 && d < 270) { mob.tx = tp.x; mob.ty = tp.y; mob.state = 'wind'; mob.t = .95; break; }
+      step(tp.x, tp.y, 46);
+      break;
+    case 'wind':
+      mob.t -= dt; if (mob.t <= 0) { mob.state = 'leap'; mob.t = .5; mob.lx = ((mob.tx ?? mob.x) - mob.x) / .5; mob.ly = ((mob.ty ?? mob.y) - mob.y) / .5; }
+      break;
+    case 'leap':
+      mob.t -= dt; mob.x += mob.lx * dt; mob.y += mob.ly * dt;
+      if (mob.t <= 0) {
+        if (target && Math.hypot(target[1].x - mob.x, (target[1].y - mob.y) * 1.3) < 105) hitTarget(target, mob, st.dmg);
+        mob.state = 'recover'; mob.t = 1.2; mob.cd = 2;
+      }
+      break;
+    case 'recover':
+      mob.t -= dt; if (mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'return':
+      step(mob.sx, mob.sy, 80); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 80);
+      if (home < 16) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (tp && mob.ret <= 0 && d < 130) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+// Caster (regular e chefe "Feiticeiro Sombrio"): so o ataque a distancia
+// basico (wind->bolt com atraso simulando tempo de voo) pros dois. O chefe
+// fica sem barreira/absorcao, chuva de area, blink e invocacao de acolitos
+// nesta rodada -- boss caster ainda ataca de verdade (fecha o "modo deus"),
+// mas com um moveset reduzido ao golpe basico, nao o completo.
+function stepCaster(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  const st = mobStats('caster', mob.lvl, mob.boss); if (!st) return null;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const aggroR = mob.boss ? 320 : 260, giveD = mob.boss ? 520 : 470, giveH = mob.boss ? 640 : 650, atkR = mob.boss ? 430 : 320, spd = mob.boss ? 80 : 72;
+  const step = (tx, ty, sp) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * sp * dt; mob.y += ddy / dd * sp * dt; };
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < aggroR && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
+      mob.wt = (mob.wt || 0) - dt;
+      if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 70; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; }
+      step(mob.tx ?? mob.sx, mob.ty ?? mob.sy, 22);
+      break;
+    case 'chase':
+      if (!tp || d > giveD || home > giveH) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      if (mob.cd <= 0 && d < atkR && d > 60) { mob.la = Math.atan2(dy, dx); mob.state = 'wind'; mob.t = mob.boss ? .6 : .5; break; }
+      if (d < 150) step(mob.x - dx / d * 100, mob.y - dy / d * 100, spd); else if (d > 250) step(tp.x, tp.y, spd);
+      break;
+    case 'wind':
+      mob.t -= dt;
+      if (mob.t <= 0) {
+        const dist = target ? Math.hypot(target[1].x - mob.x, target[1].y - mob.y) : 400;
+        delayedHit(target, mob, st.dmg, Math.min(1500, dist / 300 * 1000));
+        mob.state = 'recover'; mob.t = .5; mob.cd = mob.boss ? .8 : 1.5 + Math.random() * .7;
+      }
+      break;
+    case 'recover':
+      mob.t -= dt; if (mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'return':
+      step(mob.sx, mob.sy, mob.boss ? 110 : 90); mob.hp = Math.min(mob.maxhp, mob.hp + dt * (mob.boss ? 90 : 60));
+      if (home < (mob.boss ? 16 : 14)) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (tp && mob.ret <= 0 && d < (mob.boss ? 140 : 130)) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+// Sky: 4 subtipos (k). h=cacador (ranged), s=xama (gust em area, cura de
+// aliado fora de escopo), g=guardiao (investida), b=chefe "Senhora das
+// Tempestades" (gust + "chuva" simplificada num unico ponto -- tornado
+// persistente fora de escopo).
+function stepSky(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  const st = mobStats('sky', mob.lvl, mob.boss, mob.k); if (!st) return null;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity, toP = Math.atan2(dy, dx);
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  if (mob.state === 'idle' || !mob.state) {
+    if (tp && mob.ret <= 0 && d < (mob.boss ? 340 : 280) && home < 560) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+    else {
+      mob.wt = (mob.wt || 0) - dt;
+      if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 70; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; }
+      step(mob.tx ?? mob.sx, mob.ty ?? mob.sy, 22);
+    }
+    return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state || 'idle' };
+  }
+  if (mob.state === 'return') {
+    step(mob.sx, mob.sy, 100); mob.hp = Math.min(mob.maxhp, mob.hp + dt * (mob.boss ? 120 : 70));
+    if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+    if (tp && mob.ret <= 0 && d < 130) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+    return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+  }
+  if (!tp || d > 540 || home > 700) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state }; }
+  const away = spd => step(mob.x - dx / d * 100, mob.y - dy / d * 100, spd), toward = spd => step(tp.x, tp.y, spd);
+  if (mob.k === 'h') {
+    switch (mob.state) {
+      case 'chase':
+        if (mob.cd <= 0 && d < 390 && d > 70) { mob.la = toP; mob.state = 'wind'; mob.t = .5; break; }
+        if (d < 170) away(90); else if (d > 310) toward(80);
+        break;
+      case 'wind':
+        mob.t -= dt; if (mob.t <= 0) { delayedHit(target, mob, st.dmg, Math.min(1400, d / 430 * 1000)); mob.state = 'recover'; mob.t = .5; mob.cd = 1.7 + Math.random() * .6; }
+        break;
+      case 'recover': default: mob.t -= dt; if (mob.t <= 0) mob.state = 'chase'; break;
+    }
+  } else if (mob.k === 's') {
+    switch (mob.state) {
+      case 'chase':
+        if (mob.tGust === undefined) mob.tGust = 0; mob.tGust -= dt;
+        if (mob.tGust <= 0 && d < 210) { mob.la = toP; mob.state = 'gust'; mob.t = .7; mob.tGust = 6; break; }
+        if (d < 170) away(75); else if (d > 270) toward(75);
+        break;
+      case 'gust':
+        mob.t -= dt;
+        if (mob.t <= 0) { let da = Math.abs(toP - mob.la); if (da > Math.PI) da = 2 * Math.PI - da; if (d < 210 && da < .65) hitTarget(target, mob, st.dmg * .6); mob.state = 'recover'; mob.t = .6; }
+        break;
+      case 'recover': default: mob.t -= dt; if (mob.t <= 0) mob.state = 'chase'; break;
+    }
+  } else if (mob.k === 'g') {
+    switch (mob.state) {
+      case 'chase':
+        if (mob.cd <= 0 && d < 230 && d > 50) { mob.lx = dx / d; mob.ly = dy / d; mob.hit = false; mob.state = 'wind'; mob.t = .75; break; }
+        if (d > 60) toward(72);
+        break;
+      case 'wind':
+        mob.t -= dt; if (mob.t <= 0) { mob.state = 'charge'; mob.t = .42; }
+        break;
+      case 'charge':
+        mob.t -= dt; mob.x += mob.lx * 520 * dt; mob.y += mob.ly * 520 * dt;
+        if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 42) { mob.hit = true; hitTarget(target, mob, st.dmg); }
+        if (mob.t <= 0) { mob.state = 'recover'; mob.t = 1; mob.cd = 2.2; }
+        break;
+      case 'recover': default: mob.t -= dt; if (mob.t <= 0) mob.state = 'chase'; break;
+    }
+  } else {
+    switch (mob.state) {
+      case 'chase':
+        if (mob.tRain === undefined) mob.tRain = 0; if (mob.tGust === undefined) mob.tGust = 3;
+        mob.tRain -= dt; mob.tGust -= dt;
+        if (mob.tRain <= 0) { mob.state = 'rain'; mob.t = 1.1; mob.tRain = 10; delayedHit(target, mob, st.dmg * .9, 950); break; }
+        if (mob.tGust <= 0 && d < 240) { mob.la = toP; mob.state = 'gust'; mob.t = .8; mob.tGust = 9; break; }
+        if (d < 200) away(80); else if (d > 300) toward(80);
+        break;
+      case 'gust':
+        mob.t -= dt;
+        if (mob.t <= 0) { let da = Math.abs(toP - mob.la); if (da > Math.PI) da = 2 * Math.PI - da; if (d < 260 && da < .75) hitTarget(target, mob, st.dmg * .7); mob.state = 'recover'; mob.t = .6; }
+        break;
+      case 'rain': case 'recover': default: mob.t -= dt; if (mob.t <= 0) mob.state = 'chase'; break;
+    }
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+function stepSala(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  if (!mob.enr && mob.hp < mob.maxhp * .4) mob.enr = true;
+  const st = mobStats('sala', mob.lvl, false); if (!st) return null;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity, toP = Math.atan2(dy, dx);
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < 190 && home < 480) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
+      mob.wt = (mob.wt || 0) - dt;
+      if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 70; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; }
+      step(mob.tx ?? mob.sx, mob.ty ?? mob.sy, 26);
+      break;
+    case 'chase':
+      if (!tp || d > 420 || home > 560) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      if (mob.cd <= 0 && d < 62) { mob.hit = false; mob.state = 'wind'; mob.t = .4; break; }
+      if (mob.cd <= 0 && d < 220 && d > 110 && Math.random() < .4) { mob.la = toP; mob.state = 'breath'; mob.t = .75; mob.cd = 3; break; }
+      step(tp.x, tp.y, mob.enr ? 150 : 98);
+      break;
+    case 'wind':
+      mob.t -= dt;
+      if (mob.t <= 0) { if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 74) { mob.hit = true; hitTarget(target, mob, st.dmg); } mob.state = 'recover'; mob.t = .5; mob.cd = 1.1 + Math.random() * .6; }
+      break;
+    case 'breath':
+      mob.t -= dt;
+      if (mob.t <= 0) {
+        if (target && d < 190) { let da = Math.abs(toP - mob.la); if (da > Math.PI) da = 2 * Math.PI - da; if (da < .5) hitTarget(target, mob, st.dmg * .7); }
+        mob.state = 'recover'; mob.t = .5; mob.cd = 1.4;
+      }
+      break;
+    case 'recover':
+      mob.t -= dt; if (mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'return':
+      step(mob.sx, mob.sy, 110); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 50);
+      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; mob.enr = false; }
+      if (tp && mob.ret <= 0 && d < 120) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+function stepElem(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  const st = mobStats('elem', mob.lvl, false); if (!st) return null;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < 170 && home < 440) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+    case 'chase':
+      if (!tp || d > 380 || home > 520) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      if (mob.cd <= 0 && d < 66) { mob.state = 'wind'; mob.t = .9; break; }
+      step(tp.x, tp.y, 44);
+      break;
+    case 'wind':
+      mob.t -= dt; if (mob.t <= 0) { mob.state = 'slam'; mob.t = .2; }
+      break;
+    case 'slam':
+      mob.t -= dt;
+      if (mob.t <= 0) {
+        if (target && Math.hypot(target[1].x - mob.x, (target[1].y - mob.y) * 1.2) < 66) hitTarget(target, mob, st.dmg);
+        mob.state = 'recover'; mob.t = 1.3; mob.cd = 2.2;
+      }
+      break;
+    case 'recover':
+      mob.t -= dt; if (mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'return':
+      step(mob.sx, mob.sy, 70); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 70);
+      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (tp && mob.ret <= 0 && d < 120) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+function stepCalc(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  const st = mobStats('calc', mob.lvl, false); if (!st) return null;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity, toP = Math.atan2(dy, dx);
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < 170 && home < 480) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; break; }
+      mob.wt = (mob.wt || 0) - dt;
+      if (mob.wt <= 0) { mob.wt = 2 + Math.random() * 3; const a = Math.random() * 6.28, r = Math.random() * 70; mob.tx = mob.sx + Math.cos(a) * r; mob.ty = mob.sy + Math.sin(a) * r; }
+      step(mob.tx ?? mob.sx, mob.ty ?? mob.sy, 20);
+      break;
+    case 'chase':
+      if (!tp || d > 340 || home > 520) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      if (d < 66 && mob.cd <= 0) { mob.la = toP; mob.cmb = 1; mob.state = 'wind'; mob.t = .65; break; }
+      if (d >= 56) step(tp.x, tp.y, 62);
+      break;
+    case 'wind':
+      mob.t -= dt;
+      if (mob.t <= 0) {
+        if (target && d < 84) { let da = Math.abs(toP - mob.la); if (da > Math.PI) da = 2 * Math.PI - da; if (da < .95) hitTarget(target, mob, st.dmg); }
+        mob.cmb--;
+        if (mob.cmb > 0) { mob.state = 'wind'; mob.t = .42; mob.la = toP; }
+        else { mob.state = 'recover'; mob.t = .75; mob.cd = 1.1; }
+      }
+      break;
+    case 'guard':
+      mob.t -= dt; if (!tp || mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'recover':
+      mob.t -= dt; if (mob.t <= 0) { mob.state = Math.random() < .55 ? 'guard' : 'chase'; if (mob.state === 'guard') mob.t = 1.4; }
+      break;
+    case 'return':
+      step(mob.sx, mob.sy, 90); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 45);
+      if (home < 14) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (tp && mob.ret <= 0 && d < 110) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+// Lorde (Senhor das Chamas, chefe final): nunca reaparece (respawnAt fica
+// 0, mesma regra do cliente -- s.dead nunca reverte). Invocacao de
+// salamandras fora de escopo (revivencia de sequito).
+function stepLorde(mob, dt, present) {
+  if (!Number.isFinite(mob.sx)) return null;
+  mob.cd = Math.max(0, (mob.cd || 0) - dt); mob.ret = Math.max(0, (mob.ret || 0) - dt);
+  const st = mobStats('lorde', mob.lvl, true); if (!st) return null;
+  if (!mob.enr && mob.hp < mob.maxhp * .25) mob.enr = true;
+  mob.tMet = (mob.tMet === undefined ? 0 : mob.tMet) - dt;
+  mob.tSlam = (mob.tSlam === undefined ? 3 : mob.tSlam) - dt;
+  let target = mob.tgt ? present.find(pair => pair[1].id === mob.tgt) : null;
+  if (!target) { const near = nearestPlayer(mob, present); target = near ? [near.ws, near.p] : null; }
+  const tp = target ? target[1] : null;
+  const dx = tp ? tp.x - mob.x : 0, dy = tp ? tp.y - mob.y : 0, d = tp ? (Math.hypot(dx, dy) || 1) : Infinity;
+  const home = Math.hypot(mob.x - mob.sx, mob.y - mob.sy);
+  const step = (tx, ty, spd) => { const ddx = tx - mob.x, ddy = ty - mob.y, dd = Math.hypot(ddx, ddy); if (dd < 4) return; mob.x += ddx / dd * spd * dt; mob.y += ddy / dd * spd * dt; };
+  switch (mob.state) {
+    case 'idle': default:
+      if (tp && mob.ret <= 0 && d < 300 && home < 520) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+    case 'chase':
+      if (!tp || d > 520 || home > 640) { mob.state = 'return'; mob.ret = 3; mob.tgt = null; break; }
+      if (mob.tMet <= 0) { mob.state = 'meteor'; mob.t = 1.2; mob.tMet = mob.enr ? 6 : 9; delayedHit(target, mob, st.dmg * .9, 950); break; }
+      if (mob.tSlam <= 0 && d < 230) { mob.state = 'wind'; mob.t = .65; mob.la = Math.atan2(dy, dx); mob.tSlam = mob.enr ? 6 : 9; break; }
+      if (mob.cd <= 0 && d < 90) { mob.hit = false; mob.la = Math.atan2(dy, dx); mob.state = 'wind2'; mob.t = .55; break; }
+      step(tp.x, tp.y, mob.enr ? 128 : 96);
+      break;
+    case 'wind':
+      mob.t -= dt;
+      if (mob.t <= 0) { if (target && d < 250) hitTarget(target, mob, st.dmg); mob.state = 'recover'; mob.t = 1; mob.cd = 1.6; }
+      break;
+    case 'wind2':
+      mob.t -= dt;
+      if (mob.t <= 0) { if (target && !mob.hit && d < 96) { mob.hit = true; hitTarget(target, mob, st.dmg); } mob.state = 'recover'; mob.t = .6; mob.cd = 1.2; }
+      break;
+    case 'meteor': case 'recover':
+      mob.t -= dt; if (mob.t <= 0) mob.state = 'chase';
+      break;
+    case 'return':
+      step(mob.sx, mob.sy, 120); mob.hp = Math.min(mob.maxhp, mob.hp + dt * 130);
+      if (home < 16) { mob.state = 'idle'; mob.hp = mob.maxhp; }
+      if (tp && mob.ret <= 0 && d < 150) { mob.state = 'chase'; mob.ret = 0; mob.tgt = tp.id; }
+      break;
+  }
+  return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
+}
+
+const MOB_AI_STEP = {
+  slime: stepSlime, goblin: stepGoblin, skeleton: stepSkeleton, wolf: stepWolf,
+  bat: stepBat, cinza: stepCinza, toxic: stepToxic, caster: stepCaster,
+  sky: stepSky, sala: stepSala, elem: stepElem, calc: stepCalc, lorde: stepLorde,
+};
 function tickMobAI() {
   const dt = .15;
   for (const state of maps.values()) {
