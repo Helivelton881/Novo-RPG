@@ -16,7 +16,7 @@ test('GET /api/events/status retorna somente agenda publica e serverNow',async()
 test('event_state chega imediatamente no join/reconnect',async()=>{
   const conn=await wsConnect(srv);conn.ws.send(JSON.stringify({type:'join',name:'Visitante',cls:'guerreiro',lvl:1}));
   const state=await waitFor(conn.msgs,x=>x.type==='event_state');
-  assert.equal(state.timezone,'America/Sao_Paulo');assert.equal(state.schedule.find(x=>x.type==='world_boss').playable,true);assert.equal(state.schedule.find(x=>x.type==='team_vs_team').playable,false);assert.equal(state.schedule.length,6);conn.close();
+  assert.equal(state.timezone,'America/Sao_Paulo');assert.equal(state.schedule.find(x=>x.type==='world_boss').playable,true);assert.equal(state.schedule.find(x=>x.type==='team_vs_team').playable,true);assert.equal(state.schedule.length,6);conn.close();
 });
 
 test('event_register anonimo e rejeitado claramente e nao cria inscricao',async()=>{
