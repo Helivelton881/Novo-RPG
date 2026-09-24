@@ -1043,3 +1043,50 @@ Uma migration nova: `20260924214726_add_guild_tables_and_functions.sql` — adit
 
 - Busca de personagem pra convite é por nome (`ilike`), e nomes de personagem só são únicos **por conta** (`unique(user_id, name)`), não globalmente — por isso a busca sempre retorna uma lista (até 10 resultados) pro convidador escolher o personagem certo, nunca assume unicidade global de nome.
 - Sem Guild Bank, Guild Skills, Guild Wars, Castelos/Siege ou temporadas nesta fase — implementação explicitamente fora de escopo (ver spec da Fase 5.8-5.11).
+
+# FASE 5.9 — BESTIÁRIO
+
+## Catálogo canônico, sem duplicar stats
+
+`game-data/bestiary.js` lista os **14 tipos reais** do jogo (`slime`, `goblin`, `skeleton`, `wolf`, `bat`, `toxic`, `caster`, `sky`, `sala`, `elem`, `calc`, `cinza`, `lorde`, `ancient_titan`) — os mesmos `type` usados em `mobStats()`/`MOB_AI_STEP`/`DUNGEON_CFG` (server.js) e o World Boss (`WORLD_BOSS_MAP_RE`), auditados um por um antes de escrever o catálogo. Cada entrada é só metadado descritivo: nome de exibição, região, faixa de nível, se é chefe, e quais categorias de drop são possíveis (`basic`/`rare`/`epic`/`legendary`). **HP, dano e XP continuam vindo exclusivamente de `mobStats()`** — o Bestiário nunca duplica esses números, só referencia o mesmo `type`.
+
+## Progresso persistido: `character_bestiary`
+
+Tabela nova (`character_id, monster_id, discovered_at, kills, first_kill_at, last_kill_at`, chave primária composta), mesmo modelo de segurança do resto do projeto (RLS habilitado, zero policies, acesso só via `server.js` com a service-role key). Crédito de abate é uma função RPC atômica, `bestiary_record_kill(character_id, monster_id)`: `INSERT ... ON CONFLICT (character_id, monster_id) DO UPDATE SET kills = kills + 1, last_kill_at = now()` — atômico no próprio Postgres, nunca perde incremento mesmo sob concorrência real (verificado com 5 chamadas disparadas em paralelo contra o mesmo par personagem/monstro: `kills` fechou em exatamente 5). `first_kill_at`/`discovered_at` são gravados só no primeiro `INSERT`; abates seguintes só avançam `kills`/`last_kill_at`.
+
+## Autoridade: só o servidor credita
+
+`creditBestiaryKill(charId, monsterId)` é chamada exclusivamente nos pontos onde o servidor **já** confirma um abate real (nunca num ponto novo criado só pro Bestiário):
+
+- **Mob de campo**: dentro do `mob_damage` handler, no mesmo `if(mob.hp<=0)` que já credita XP/loot/quest via `creditKillReward` — usa o `mob.type` real que o servidor simulou, nunca o que o cliente reivindica.
+- **Masmorra** (trash e chefe): mesmo ponto onde `creditDungeonReward` já é chamado — `mob.type` também já existe ali (roster gerado por `DUNGEON_CFG`), então dungeon conta pro Bestiário exatamente como campo aberto.
+- **World Boss**: dentro de `grantWorldBossRewards`, protegido pelo mesmo `instance.rewardGranted` (setado de forma síncrona antes de qualquer `await`, então só executa uma vez por instância) — cada participante elegível da instância vencedora credita `ancient_titan`.
+- **Team vs Team**: não integra o Bestiário — TvT é PvP (jogador contra jogador), não existe "monstro" pra descobrir ali.
+
+`monster_id` recebido é sempre validado contra o catálogo (`BESTIARY.isValidMonsterId`) antes de chamar a função RPC — um `type` desconhecido nunca chega a criar uma linha lixo na tabela.
+
+## API
+
+- `GET /api/bestiary/catalog` — público, sem autenticação, sem dado de nenhum personagem (só o catálogo estático). Usado pra listar o total possível sem expor progresso de ninguém.
+- `GET /api/bestiary/:charId` — autenticado, exige que `charId` pertença à conta da sessão (mesmo padrão de `ownCharacter` usado em Guildas). Retorna o catálogo mesclado com o progresso real: criatura não descoberta vira só `{id, discovered:false}` (sem nome/região/descrição — "???" no cliente), criatura descoberta inclui nome/região/nível/drops possíveis/abates/datas. Nunca aceita `kills`/`discovered`/`monster_id` do cliente como verdade — é sempre leitura, nunca escrita, dessa rota.
+
+## Progresso e percentual
+
+`discovered` (contagem) e `total` (`BESTIARY_TOTAL = 14`, constante única) vêm na resposta; o percentual é calculado no cliente (`Math.round(100*discovered/total)`) — nunca armazenado, sempre derivado.
+
+## Painel de Bestiário (cliente)
+
+Novo botão "Bestiário" no menu principal. Cabeçalho mostra `X / 14 descobertos (Y%)`. Lista: criatura não descoberta aparece como "???" / "Criatura não descoberta" (sem vazar nome/região antes da primeira descoberta real); criatura descoberta mostra nome, ícone de coroa se for chefe, região, faixa de nível, categorias de drop possíveis (sem percentual exato de drop — só quais raridades são possíveis, como pedido) e total de abates. Atualiza ao abrir o painel e de novo automaticamente quando chega uma recompensa de abate (`kill_reward`) ou do World Boss (`world_boss_reward`) enquanto o painel está aberto.
+
+## Testes
+
+`test/bestiary.test.js`: 7 testes sempre rodam (catálogo com exatamente 14 entradas batendo 1:1 com os `type` reais do servidor, sem id duplicado, `isValidMonsterId` aceita real/rejeita inventado, endpoint público `/api/bestiary/catalog` sem autenticação e sem vazar progresso, nenhum monstro comum promete Legendário) + 8 testes de integração real via HTTP + RPC (`{skip:!hasSupabase()}`): autorização (sem token rejeitado, personagem de outra conta rejeitado com 404 — nunca vaza progresso alheio), progresso inicial 0/14, primeiro abate descobre a criatura com `first_kill_at === last_kill_at === discovered_at`, segundo abate incrementa `kills` sem mudar `first_kill_at` mas avançando `last_kill_at`, 5 créditos disparados em paralelo no mesmo par nunca perdem incremento (fecha em exatamente 5), integração com World Boss (`ancient_titan`), percentual correto com múltiplas criaturas descobertas. Os testes de integração chamam a **mesma função RPC** que `server.js` chama em produção (`adminRpc`, mesmo espírito de `adminPatchCharacter` já usado desde a Fase 3) — o ponto de chamada real dentro de `mob_damage`/masmorra/World Boss é coberto pela regressão de `combat.test.js`/`monsters.test.js`/`world-boss.test.js`, que continuam 100% verdes sem nenhuma mudança de comportamento de combate.
+
+## Migração de banco
+
+Uma migration nova: `20260924220401_add_bestiary_table_and_function.sql` — aditiva, sem `drop`, sem apagar dado existente. Cria `character_bestiary` e a função `bestiary_record_kill`.
+
+## Limitações conhecidas
+
+- Bestiário não mostra chance de drop precisa por design (só quais raridades são possíveis) — se essa granularidade for pedida numa fase futura, precisa vir de `GEAR_DROP_RATES`/`rollGearDrop` (fonte real), nunca de um número novo inventado no Bestiário.
+- Sem Ranking de Bestiário nesta fase (isso é Fase 5.10).
