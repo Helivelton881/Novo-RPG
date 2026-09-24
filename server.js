@@ -223,38 +223,34 @@ function pickTier(l) {
   if (l >= 10) return r < .25 ? 2 : (r < .8 ? 3 : 4);
   return r < .5 ? 2 : (r < .95 ? 3 : 4);
 }
-// Espelha dropLoot(3+rand*3,6,.14,.08) + 35% dropItem(pickTier(lvl)) do
-// ramo `s.dun` de killMob() no cliente -- mob comum de masmorra nunca
-// concede XP (preservado, ver creditDungeonReward). `cls` decide o tipo
-// de item sorteado (mesma logica de CLASS_ITEM_TYPES ja usada em
-// rollChestItem).
-function rollDungeonTrashLoot(lvl, cls) {
+// Espelha dropLoot(3+rand*3,6,.14,.08) do ramo `s.dun` de killMob() no
+// cliente -- mob comum de masmorra nunca concede XP (preservado, ver
+// creditDungeonReward). Fase 5.3: o equipamento Basic garantido a 35%
+// (compatibilidade temporaria da Fase 5.2, ver git history) foi REMOVIDO --
+// agora usa a MESMA politica de raridade de mob comum de campo
+// (rollGearDrop: Epic 0.25%, Rare 2.5%, nunca Basic/Legendary aqui), pra
+// campo e masmorra nao terem duas politicas diferentes sem motivo.
+function rollDungeonTrashLoot(lvl, cls, rng) {
   let gold = 0; const coins = 3 + Math.floor(Math.random() * 3);
   for (let i = 0; i < coins; i++) gold += 1 + Math.floor(Math.random() * 6);
   const pv = Math.random() < .14 ? 1 : 0, gem = Math.random() < .08 ? 1 : 0;
   const items = [];
-  if (Math.random() < .35) {
-    const types = CLASS_ITEM_TYPES[cls] || ['armor'];
-    const type = types[Math.floor(Math.random() * types.length)];
-    const item = createGear(type, GEAR_DATA.LEGACY_TIER_LEVEL[pickTier(lvl)] || 12, 'basic');
-    if (item) items.push(item);
-  }
+  const drop = rollGearDrop({ mobLevel: lvl, boss: false, cls, rng });
+  if (drop) items.push(drop.item);
   return { gold, gem, pv, items };
 }
-// Espelha dropLoot(22,9,1,6) + 3x dropItem(tier4,...) do ramo de chefe --
-// chefe de masmorra sempre da 6 gemas e 3 itens (tier4 legado = lv12,
-// mesma faixa que o cliente sempre usou aqui, independente do nivel real
-// da zona -- comportamento preservado, nao corrigido, ver
-// LEIA-PRIMEIRO.md "Fase 5.2" pro porque).
-function rollDungeonBossLoot(cls) {
+// Espelha dropLoot(22,9,1,6) do ramo de chefe -- chefe de masmorra sempre
+// da 6 gemas e 1 pocao de vida (preservado). Fase 5.3: os 3 equipamentos
+// Basic garantidos (compatibilidade temporaria da Fase 5.2) foram
+// REMOVIDOS -- agora 1 unico roll de Legendary a 5% (GEAR_DROP_RATES.boss),
+// mesma politica de boss de campo. `bossLvl` decide a faixa do item
+// (gearLevelForMob) -- antes era sempre fixo em lv12 independente da zona,
+// agora seque a progressao real de cada masmorra.
+function rollDungeonBossLoot(cls, bossLvl, rng) {
   let gold = 0; for (let i = 0; i < 22; i++) gold += 1 + Math.floor(Math.random() * 9);
   const items = [];
-  const types = CLASS_ITEM_TYPES[cls] || ['armor'];
-  for (let i = 0; i < 3; i++) {
-    const type = types[Math.floor(Math.random() * types.length)];
-    const item = createGear(type, 12, 'basic');
-    if (item) items.push(item);
-  }
+  const drop = rollGearDrop({ mobLevel: bossLvl, boss: true, cls, rng });
+  if (drop) items.push(drop.item);
   return { gold, gem: 6, pv: 1, items };
 }
 
@@ -316,6 +312,63 @@ const CLASS_ITEM_TYPES = {
   mago:      ['staffm','armor','helmet','cape','jewel','boots'],
   arqueiro:  ['bow','armor','helmet','cape','jewel','boots'],
 };
+// ===== Fase 5.3: drops de equipamento por raridade =====
+// Grupos que participam do drop Rare/Epic/Legendary -- por design, so os 4
+// definidos aqui (arma da classe + armadura + capa + botas). Escudo/
+// capacete/joia continuam existindo normalmente (loja, bau de campo,
+// CLASS_ITEM_TYPES acima) mas NAO entram nesta tabela nesta fase -- decisao
+// de design explicita, nao uma omissao.
+const DROP_TYPES_BY_CLASS = {
+  guerreiro: ['sword', 'armor', 'cape', 'boots'],
+  arqueiro:  ['bow', 'armor', 'cape', 'boots'],
+  mago:      ['staffm', 'armor', 'cape', 'boots'],
+  druida:    ['staffd', 'armor', 'cape', 'boots'],
+};
+// Fonte unica das chances de drop -- nunca espalhar 0.025/0.0025/0.05 em
+// mais de um lugar. Mutuamente exclusivos por design (rollGearDrop testa
+// Epic primeiro, so testa Rare se Epic falhar -- nunca os dois no mesmo
+// abate) e no maximo 1 equipamento especial por morte confirmada.
+const GEAR_DROP_RATES = {
+  common: { epic: 0.0025, rare: 0.025 }, // mob comum: NUNCA legendary, NUNCA basic como drop
+  boss:   { legendary: 0.05 },           // boss (campo ou masmorra): SO legendary ou nada
+};
+// Maior faixa de GEAR_DATA.GEAR_LEVELS que nao ultrapassa o nivel real do
+// mob/boss -- fonte central, nunca duplicar esta matematica em outro lugar
+// (chamada tanto pra drop de mob comum quanto pra Legendary de boss).
+// GEAR_LEVELS ja vem ordenado crescente (1,4,8,...,40) de game-data/gear-data.js.
+function gearLevelForMob(lvl) {
+  const levels = GEAR_DATA.GEAR_LEVELS;
+  let best = levels[0];
+  for (const l of levels) { if (l <= lvl) best = l; else break; }
+  return best;
+}
+// Funcao central de drop -- server-side, nunca confia em nada vindo do
+// cliente (rarity/type/lv sempre decididos aqui). `rng` e injetavel pra
+// teste deterministico (default Math.random em producao); nunca usar um
+// rng/seed vindo do cliente. Retorna null (nada dropou) ou
+// {rarity,type,lv,item}. Chamada tanto por mob de campo quanto de masmorra
+// (mesma politica nos dois, ver LEIA-PRIMEIRO.md "Fase 5.3").
+function rollGearDrop({ mobLevel, boss, cls, rng }) {
+  const roll = typeof rng === 'function' ? rng : Math.random;
+  let rarity;
+  if (boss) {
+    if (roll() < GEAR_DROP_RATES.boss.legendary) rarity = 'legendary';
+    else return null;
+  } else {
+    // ordem: testa Epic primeiro; so testa Rare se Epic falhar -- nunca os
+    // dois no mesmo kill (mutuamente exclusivos por construcao, cada teste
+    // consome seu proprio roll()).
+    if (roll() < GEAR_DROP_RATES.common.epic) rarity = 'epic';
+    else if (roll() < GEAR_DROP_RATES.common.rare) rarity = 'rare';
+    else return null;
+  }
+  const types = DROP_TYPES_BY_CLASS[cls] || DROP_TYPES_BY_CLASS.guerreiro;
+  const type = types[Math.min(types.length - 1, Math.floor(roll() * types.length))];
+  const lv = gearLevelForMob(mobLevel);
+  const item = createGear(type, lv, rarity);
+  if (!item) return null;
+  return { rarity, type, lv, item };
+}
 
 // Precos de compra/venda de equipamento agora vem de GEAR_DATA (fonte unica,
 // compartilhada com o cliente) -- ver priceFor()/sellPriceFor().
@@ -910,16 +963,26 @@ async function handleShop(req, res, pathname) {
         const idx = uid ? save.bag.findIndex(it => it.uid === uid) : Math.round(Number(input.bagIndex));
         if (!Number.isInteger(idx) || idx < 0 || idx >= save.bag.length) error = 'Item não encontrado';
         else {
-          const it = save.bag[idx], price = GEAR_DATA.sellPriceFor(it.lv);
+          // Fase 5.3: preco de venda considera raridade (sellPriceForItem =
+          // sellPriceFor(lv) * multiplicador por rarity) -- nunca so pelo
+          // nivel sozinho, senao Raro/Epico/Lendario venderiam pelo mesmo
+          // preco que um Basic do mesmo nivel.
+          const it = save.bag[idx], price = GEAR_DATA.sellPriceForItem(it);
           save.bag.splice(idx, 1); save.gold += price;
           const list = shopSoldByChar.get(charId) || [];
           list.unshift({it, price: Math.ceil(price * 1.5)}); list.length = Math.min(list.length, 10);
           shopSoldByChar.set(charId, list);
         }
       } else if (action === 'sell_common') {
+        // Fase 5.3: "comum" pra venda em massa agora significa rarity ===
+        // 'basic' (de QUALQUER nivel), nunca mais lv===1 -- a checagem antiga
+        // por nivel venderia por engano um Raro/Epico/Lendario Nv1 (existe
+        // desde que virou possivel dropar raridade alta em nivel baixo,
+        // Fase 5.3) como se fosse lixo comum. Ponto critico, ver
+        // LEIA-PRIMEIRO.md "Fase 5.3".
         let total = 0; const kept = []; const list = shopSoldByChar.get(charId) || [];
         for (const it of save.bag) {
-          if (it.lv === 1) { const price = GEAR_DATA.sellPriceFor(1); total += price; list.unshift({it, price: Math.ceil(price * 1.5)}); }
+          if (it.rarity === 'basic') { const price = GEAR_DATA.sellPriceForItem(it); total += price; list.unshift({it, price: Math.ceil(price * 1.5)}); }
           else kept.push(it);
         }
         save.bag = kept; save.gold += total; list.length = Math.min(list.length, 10);
@@ -1074,13 +1137,32 @@ async function handleChest(req, res, pathname) {
   }
 }
 
+// Fase 5.3: aplica uma lista de itens dropados (0..N, hoje sempre 0 ou 1 na
+// pratica) contra o save real via grantItem, sem nunca perder um item raro/
+// epico/lendario silenciosamente -- se a mochila estiver cheia e nao puder
+// auto-equipar, grantItem devolve null e o item e descartado (nunca
+// persistido, nunca duplicado, nunca sobrescreve outro slot); aqui isso vira
+// `lost` explicito pro cliente poder avisar o jogador (ver kill_reward/
+// dungeon_reward abaixo). `granted` guarda o ULTIMO item concedido com
+// sucesso (hoje so importa pra toast -- nunca mais de 1 item especial por
+// abate, ver rollGearDrop/GEAR_DROP_RATES).
+function applyGearDrops(save, lvl, items) {
+  let granted = null, lost = null;
+  for (const item of items) {
+    const result = grantItem(save, lvl, item);
+    if (result) granted = result; else lost = item;
+  }
+  return { granted, lost };
+}
 // Credita XP + contador de abate real (mob.hp<=0 confirmado em mob_damage)
 // direto no personagem no Supabase -- mesma leitura-altera-grava usada em
 // handleQuest/handleChest, so que disparada de dentro do WS em vez de uma
 // rota HTTP. So roda se a conexao tem charId (personagem) e userId (dono),
 // senao nao ha onde persistir (offline ou sem conta) e o calculo local de
 // sempre no cliente e o unico que existe, como antes desta fase.
-async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, questInfo) {
+// `drop` (Fase 5.3, opcional): resultado de rollGearDrop ({rarity,type,lv,item})
+// pra mob de CAMPO -- null se nao dropou nada.
+async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, questInfo, drop) {
   if (!p.charId || !p.userId) return;
   try {
     await withCharLock(p.charId, async () => {
@@ -1102,8 +1184,15 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
       }
       if (bossChestField && !save[bossChestField]) { save.key = Math.min(999, (save.key || 0) + 1); pushed.key = save.key; }
       if (questInfo) Object.assign(pushed, advanceQuestOnKill(save, questInfo.type, questInfo.boss, questInfo.lvl));
+      const { granted, lost } = drop ? applyGearDrops(save, lvl, [drop.item]) : { granted: null, lost: null };
       await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
-      send(ws, {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)});
+      const msg = {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)};
+      // bag/eq so vao junto quando um item de fato mudou o save (a maioria
+      // dos abates nao dropa nada -- nao vale mandar o inventario inteiro
+      // toda hora por isso).
+      if (granted) { msg.drop = {rarity: granted.rarity, n: granted.n}; msg.bag = save.bag; msg.eq = save.eq; }
+      if (lost) msg.dropLost = {rarity: lost.rarity, n: lost.n};
+      send(ws, msg);
     });
   } catch (err) {
     console.error('kill_reward_error', err.message, err.status || '', err.detail || '');
@@ -1116,7 +1205,10 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
 // comportamento real de killMob(s.dun) no cliente hoje: só ouro/gema/
 // poção/itens, nunca gainXp -- não é uma omissão desta fase, é assim que o
 // jogo já funciona). Manda bag/eq inteiros de volta (não só um delta) pro
-// cliente poder aplicar igual a applyShopResult.
+// cliente poder aplicar igual a applyShopResult. Fase 5.3: `items` agora
+// vem de rollGearDrop (rare/epic no trash, legendary no chefe) em vez do
+// Basic garantido antigo -- 0 ou 1 item na pratica, ver
+// rollDungeonTrashLoot/rollDungeonBossLoot.
 async function creditDungeonReward(ws, p, { gold = 0, gem = 0, pv = 0, ap = 0, scr = 0, items = [] } = {}) {
   if (!p.charId || !p.userId) return;
   try {
@@ -1130,9 +1222,12 @@ async function creditDungeonReward(ws, p, { gold = 0, gem = 0, pv = 0, ap = 0, s
       save.pv = Math.min(999, save.pv + pv);
       save.ap = Math.min(999, save.ap + ap);
       save.scr = Math.min(999, save.scr + scr);
-      for (const item of items) grantItem(save, lvl, item);
+      const { granted, lost } = applyGearDrops(save, lvl, items);
       await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{save}, prefer:'return=minimal'});
-      send(ws, {type:'dungeon_reward', gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr, bag: save.bag, eq: save.eq});
+      const msg = {type:'dungeon_reward', gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr, bag: save.bag, eq: save.eq};
+      if (granted) msg.drop = {rarity: granted.rarity, n: granted.n};
+      if (lost) msg.dropLost = {rarity: lost.rarity, n: lost.n};
+      send(ws, msg);
     });
   } catch (err) {
     console.error('dungeon_reward_error', err.message, err.status || '', err.detail || '');
@@ -1592,7 +1687,7 @@ wss.on('connection', ws => {
           // segunda trava explicita, mais facil de auditar/testar).
           if(mob.boss&&!state.bossDefeated){
             state.bossDefeated=true;
-            creditDungeonReward(ws,p,rollDungeonBossLoot(p.cls));
+            creditDungeonReward(ws,p,rollDungeonBossLoot(p.cls,mob.lvl));
           }else if(!mob.boss){
             creditDungeonReward(ws,p,rollDungeonTrashLoot(mob.lvl,p.cls));
           }
@@ -1603,7 +1698,12 @@ wss.on('connection', ws => {
             const loot=mob.temp?null:rollMobLoot(mob.type,mob.boss,mob.lvl);
             const bossChestField=mob.boss?BOSS_CHEST_FIELD[mob.type]:null;
             const questInfo=mob.temp?null:{type:mob.type,boss:mob.boss,lvl:mob.lvl};
-            creditKillReward(ws,p,xpGain,killCounterFields(mob.type,mob.lvl,mob.boss),loot,bossChestField,questInfo);
+            // Fase 5.3: mob de CAMPO tambem participa da politica de raridade
+            // (mesma rollGearDrop de masmorra) -- so segue nunca dropando
+            // pra sequitos temporarios (mob.temp), igual o loot economico ja
+            // fazia (loot fica null acima pelo mesmo motivo).
+            const drop=mob.temp?null:rollGearDrop({mobLevel:mob.lvl,boss:!!mob.boss,cls:p.cls});
+            creditKillReward(ws,p,xpGain,killCounterFields(mob.type,mob.lvl,mob.boss),loot,bossChestField,questInfo,drop);
           }
         }
       }
@@ -2408,4 +2508,6 @@ module.exports = {
   startingSave, ECONOMY_LOCK_FIELDS, createDungeonInstance, dungeonCleanupTick,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
+  // Fase 5.3 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
+  grantItem, gearLevelForMob, rollGearDrop, applyGearDrops, GEAR_DROP_RATES, DROP_TYPES_BY_CLASS,
 };
