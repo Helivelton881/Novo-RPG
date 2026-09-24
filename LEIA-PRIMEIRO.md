@@ -1090,3 +1090,55 @@ Uma migration nova: `20260924220401_add_bestiary_table_and_function.sql` — adi
 
 - Bestiário não mostra chance de drop precisa por design (só quais raridades são possíveis) — se essa granularidade for pedida numa fase futura, precisa vir de `GEAR_DROP_RATES`/`rollGearDrop` (fonte real), nunca de um número novo inventado no Bestiário.
 - Sem Ranking de Bestiário nesta fase (isso é Fase 5.10).
+
+# FASE 5.10 — RANKINGS
+
+## Estatísticas agregadas próprias, nunca `characters.save` inteiro
+
+Nova tabela `character_rank_stats` (`character_id` PK, `level`, `xp`, `pvp_kills`, `pvp_deaths`, `tvt_wins`, `tvt_losses`, `tvt_draws`, `tvt_kills`, `tvt_deaths`, `world_boss_kills`, `world_boss_participations`, `bestiary_discovered`) — índices dedicados por tipo de ranking (`(level desc, xp desc)`, `(tvt_wins desc, tvt_kills desc, tvt_losses asc)`, etc). Nenhuma abertura de ranking faz `select save from characters` — sempre lê só a linha pequena e indexada de `character_rank_stats`. Mesmo modelo de segurança do resto do projeto: RLS habilitado, zero policies.
+
+## Guilda: calculada ao vivo, sem tabela redundante
+
+Em vez de manter `guild_rank_stats` sincronizado a cada mutação de guilda (mais um lugar pra divergir), o ranking de guilda usa uma **view** (`guild_rank_view`, `security_invoker=true`) que agrega `guild_members` + `character_rank_stats` por guilda (`member_count`, `total_level`, `tvt_wins`, `world_boss_kills`) em tempo de consulta — sempre consistente, sem gatilho de escrita adicional. A ordenação usa soma de níveis e depois número de membros; **nunca chamada de "melhor guilda" no código ou na UI**, é só uma ordenação estatística objetiva, como pedido.
+
+## Quando o servidor atualiza (nunca o cliente)
+
+- **Nível/XP**: `syncRankLevelXp(charId, lvl, xp)` roda toda vez que o servidor já teria persistido esse nível/XP de qualquer forma — no PUT genérico de personagem (`handleCharacters`, cobre autosave a cada ~30s e qualquer sincronização manual), em `creditKillReward` (abate de campo/masmorra), em `grantWorldBossRewards` e em `grantTvtRewards` (por participante recompensado). `rank_stats_set_level_xp` grava o **valor absoluto mais recente**, não um incremento — sempre reflete o real.
+- **TvT termina**: dentro de `grantTvtRewards`, por participante elegível: `tvt_wins`/`tvt_losses`/`tvt_draws` (conforme `TVT.outcomeForTeam`) e `tvt_kills`/`tvt_deaths` (contagem real da partida) via `rank_stats_bump` — atômico, incremento real no Postgres.
+- **World Boss termina**: dentro de `grantWorldBossRewards`, por participante elegível da instância vencedora: `world_boss_kills` e `world_boss_participations` (+1 cada) — como toda recompensa de World Boss hoje só é concedida em vitória (`instance.defeated`), os dois números coincidem nesta fase; a coluna de participação existe pronta pra quando/​se existir recompensa parcial por participação sem abate.
+- **Bestiário descobre**: `syncRankBestiaryDiscovered` roda depois de todo crédito bem-sucedido em `creditBestiaryKill`, recalculando `bestiary_discovered` a partir da contagem real de `character_bestiary` (nunca incrementado às cegas).
+- **Guilda muda**: não precisa de gatilho — o ranking de guilda é sempre calculado ao vivo (ver acima), então qualquer entrada/saída/dissolução já reflete no próximo cálculo, sem sincronização extra.
+
+## PvP de campo aberto: limitação honesta, não uma lacuna escondida
+
+`pvp_kills`/`pvp_deaths` existem na tabela e a aba "PvP" existe na UI, mas **ficam sempre em 0 nesta fase**: o PvP fora do TvT nunca teve confirmação de abate server-side (desde a Fase 1 — o alvo aplica a própria mitigação localmente e o servidor só valida cooldown/alcance, ver `player_hit`/`resolveAttackDamage` fora da arena de TvT). Adicionar um "eu morri" auto-reportado pelo cliente como fonte de um ranking público seria abrir uma estatística falsificável — inaceitável dado "não sacrifique segurança econômica pra terminar mais rápido". A tabela e a aba ficam prontas pra quando o PvP de campo aberto ganhar confirmação server-side (fora do escopo desta fase); até lá, nunca um número inventado.
+
+## Backfill
+
+Rodado dentro da própria migration: `insert into character_rank_stats (character_id, level, xp) select id, lvl, (save->>'xp')::int from characters` — preenche nível/XP reais dos personagens que já existiam antes desta fase (o único dado historicamente inferível de `characters`). Campos sem histórico anterior (PvP, TvT, World Boss, Bestiário) começam no `default 0` da própria coluna — nunca um número inventado para preencher lacuna.
+
+## API pública, paginada, com cache
+
+`GET /api/rankings?type=<level|pvp|tvt|world_boss|bestiary|guild>&page=N` — sem autenticação (é uma classificação pública). `type` inválido → 400. Paginação obrigatória, 20 por página (`RANK_PAGE_SIZE`). Cache server-side em memória por `tipo:página`, TTL de 45s (`RANK_CACHE_MS`, dentro da janela de 30–60s pedida) — não recalcula a cada hit, só expira e deixa o próximo pedido recomputar. Resposta nunca inclui `character_id` de identidade real, `userId`, token ou o `save` inteiro — só `name`/`cls`/`level`/`guildTag`/métricas públicas (confirmado por teste que varre o JSON da resposta procurando essas strings).
+
+## Ordenação e desempate (puro, testável)
+
+`game-data/rankings.js` (`RANK_COMPARATORS`/`sortForType`): Nível → `level DESC, xp DESC, nome`; PvP → `kills DESC, deaths ASC, nome`; TvT → `wins DESC, kills DESC, losses ASC, nome`; World Boss → `kills DESC, participations DESC, nome`; Bestiário → `discovered DESC, nome`; Guilda → `total_level DESC, member_count DESC, nome`. Nome sempre como desempate final e estável (nunca ordem "como o banco devolveu"). K/D (`kdRatio`) é sempre **calculado na resposta**, nunca armazenado como coluna — evita o valor ficar desatualizado ou divergir de `kills`/`deaths`.
+
+## Painel de Ranking (cliente)
+
+Novo botão "Ranking" no menu principal, com abas Nível/PvP/TvT/World Boss/Bestiário/Guildas. Cada linha mostra posição, nome, classe, tag de guilda (quando existir) e a métrica principal da aba. Paginação com botões Anterior/Próxima, desabilitados nos limites. Renderização verificada nas duas formas (individual e guilda) via console do navegador antes do commit.
+
+## Testes
+
+`test/rankings.test.js`: 13 testes de lógica pura sempre rodam (config, tipos válidos, `kdRatio` sem divisão por zero, `paginate` com página além do limite, os 6 comparadores de ordenação/desempate, cache TTL hit/miss) + 6 testes de integração real (`{skip:!hasSupabase()}`): tipo inválido rejeitado (400), resposta pública nunca vaza `userId`/`save`/token, personagem de nível alto aparece na página certa, estatísticas de TvT refletidas com K/D calculado, paginação sem sobreposição entre páginas, e `rank_stats_bump` rejeitando um nome de campo inventado (protege contra SQL dinâmico — a função só tem os branches explícitos, nunca interpola nome de coluna).
+
+## Migrações de banco
+
+Duas migrations novas: `20260924221254_add_rank_stats_table_and_functions.sql` (tabela + backfill + 3 funções RPC: `rank_stats_set_level_xp`, `rank_stats_bump`, `rank_stats_sync_bestiary_discovered`) e `20260924221951_add_guild_rank_view.sql` (view agregada de guilda). Ambas aditivas, sem `drop`, sem apagar dado existente.
+
+## Limitações conhecidas
+
+- PvP de campo aberto sempre mostra 0 kills/deaths (ver seção acima) — limitação arquitetural pré-existente, não desta fase.
+- Cache de 45s significa que uma mudança de posição pode levar até 45s pra aparecer pra outro jogador olhando o ranking — aceito explicitamente pelo pedido de não recalcular a cada hit.
+- Sem sistema de temporada/season nesta fase — ranking é sempre "desde sempre" (cumulativo).
