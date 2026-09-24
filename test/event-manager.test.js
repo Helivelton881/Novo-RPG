@@ -54,8 +54,8 @@ test('TvT nao implementado nao aceita inscricao nem anuncia',()=>{
   assert.equal(messages.length,0);assert.equal(JSON.stringify({gold:10,map:'vila'}),before);
 });
 
-test('World Boss oficial esta jogavel e TvT continua indisponivel',()=>{
-  assert.equal(E.EVENT_CONFIG.types.world_boss.playable,true);assert.equal(E.EVENT_CONFIG.types.team_vs_team.playable,false);
+test('World Boss e Team vs Team (Fase 5.7) estao ambos jogaveis',()=>{
+  assert.equal(E.EVENT_CONFIG.types.world_boss.playable,true);assert.equal(E.EVENT_CONFIG.types.team_vs_team.playable,true);
   const now=at('2026-09-24T19:50:00-03:00'),m=new E.EventManager({now:()=>now}).registerEventHandler('world_boss',{});
   assert.equal(m.snapshot().current.type,'world_boss');assert.equal(m.snapshot().current.status,'registration');
 });

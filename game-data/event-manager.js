@@ -10,7 +10,11 @@ const EVENT_CONFIG = Object.freeze({
   scheduleSlots: 6,
   types: Object.freeze({
     world_boss: Object.freeze({label:'World Boss', registrationMode:'party4', playable:true}),
-    team_vs_team: Object.freeze({label:'Team vs Team', registrationMode:'individual', playable:false}),
+    // Fase 5.7: Team vs Team joga-vel. registrationMode:'individual' ja
+    // existia desde a Fase 5.5 (preparado pra isso) -- inscricao nunca usa
+    // Party pra decidir time (matchmaking e independente, ver
+    // game-data/tvt.js balanceTvtTeams).
+    team_vs_team: Object.freeze({label:'Team vs Team', registrationMode:'individual', playable:true}),
   }),
 });
 

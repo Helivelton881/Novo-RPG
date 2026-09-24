@@ -117,6 +117,11 @@ button{font:inherit;color:inherit}
 .mbtn:active{background:linear-gradient(#45463f,#2a2b27)}
 #wbHud{position:absolute;display:none;z-index:6;left:50%;top:10px;transform:translateX(-50%);width:min(92vw,520px);padding:8px 10px;border:2px solid #9d7938;border-radius:9px;background:rgba(22,12,8,.9);color:#f7e8c3;font:600 13px system-ui;box-shadow:0 4px 18px #0008}
 #wbHud.on{display:block}#wbHud h3{margin:0 0 5px;text-align:center;color:#ffd45a;font-size:16px}#wbHud .bh{height:13px;background:#270b0b;border:2px solid #100;border-radius:6px;overflow:hidden}#wbHud .bh i{display:block;height:100%;background:linear-gradient(#df5148,#871f25);transition:width .15s}#wbHud .bt{display:flex;justify-content:space-between;margin-top:4px}#wbParty{display:grid;grid-template-columns:1fr 1fr;gap:2px 10px;margin-top:5px;font-size:11px}#wbParty .dead{color:#ef7770}#wbParty .off{color:#999}
+#tvtHud{position:absolute;display:none;z-index:6;left:50%;top:10px;transform:translateX(-50%);width:min(94vw,560px);padding:8px 10px;border:2px solid #9d7938;border-radius:9px;background:rgba(22,12,8,.9);color:#f7e8c3;font:600 13px system-ui;box-shadow:0 4px 18px #0008}
+#tvtHud.on{display:block}#tvtHud .tvtScore{display:flex;align-items:center;justify-content:center;gap:10px;font-size:22px;margin-bottom:3px}#tvtHud .tvtScore b.red{color:#ff6a5a}#tvtHud .tvtScore b.blue{color:#5aa8ff}#tvtHud .tvtScore i{opacity:.6;font-style:normal}
+#tvtHud .bt{display:flex;justify-content:space-between;margin-top:2px;font-size:11px;opacity:.9}
+#tvtTeams{display:grid;grid-template-columns:1fr 1fr;gap:0 10px;margin-top:5px;font-size:11px}
+.tvtCol b{display:block;margin-bottom:2px}.tvtCol.red b{color:#ff6a5a}.tvtCol.blue b{color:#5aa8ff}.tvtCol span{display:block}.tvtCol .dead{color:#ef7770}.tvtCol .off{color:#999}
 /* ---- habilidades no HUD ---- */
 
 /* ---- janelas flutuantes (estilo RPG) ---- */
@@ -486,6 +491,7 @@ button{font:inherit;color:inherit}
     <div id="toast" role="status"></div>
     <div id="net" class="fr offline" aria-live="polite">Offline</div>
     <div id="wbHud" aria-live="polite"><h3>TITÃ ANCESTRAL</h3><div class="bh"><i id="wbHp"></i></div><div class="bt"><span id="wbHpT"></span><span id="wbTime"></span></div><div id="wbParty"></div></div>
+    <div id="tvtHud" aria-live="polite"><div class="tvtScore"><b class="red">RUBRA</b><span id="tvtScoreRed">0</span><i>×</i><span id="tvtScoreBlue">0</span><b class="blue">AZUL</b></div><div class="bt"><span id="tvtLimit"></span><span id="tvtTime"></span></div><div class="bt"><span id="tvtMyKD"></span></div><div id="tvtTeams"></div></div>
     <div id="dlg" class="fr"></div>
     <div id="inv" class="rw" role="dialog" aria-label="Bolsa"></div>
     <div id="tgtf" class="fr" aria-live="polite"><canvas id="tIcon" width="44" height="44"></canvas><div class="tinfo"><div class="tn"><b id="tName"></b><span id="tLv"></span></div><div class="thp"><i id="tHp"></i><span id="tHpT"></span></div><small id="tSt"></small></div><button id="tX" type="button" aria-label="Limpar alvo">✕</button></div>
@@ -1840,7 +1846,11 @@ function castSkill(id){
   if(SKILL_FX[id](s,r)===false)return;
   P.mp-=s.cost;P.scd[id]=s.cd;hud();
 }
-function netCastSkill(id,r){if(NET&&NET.readyState===1)NET.send(JSON.stringify({type:'cast_skill',map:W_?W_.name:'vila',id,sk:r,atk:P.atk}))}
+// Fase 5.7: dentro do TvT, heal manda targetId -- esta fase so expõe
+// auto-cura na interface (mesma UX que o resto do jogo ja usa pra heal),
+// entao sempre o proprio charId; mirar aliado fica pra melhoria futura de
+// UI (o SERVIDOR ja suporta aliado real via TVT.resolveTvtIntent, testado).
+function netCastSkill(id,r){if(NET&&NET.readyState===1)NET.send(JSON.stringify({type:'cast_skill',map:W_?W_.name:'vila',id,sk:r,atk:P.atk,targetId:(IN_TVT&&id==='heal'&&CUR_CHAR)?CUR_CHAR.id:undefined}))}
 function skillUpdate(dt){
   if(P.bleed){const b=P.bleed;b.t-=dt;b.k=(b.k||0)+dt;if(b.k>=1){b.k-=1;if(!P.dead){P.hp=Math.max(1,P.hp-b.dmg);P.calm=0;floater(P.x,P.y-70,'Sangrando -'+b.dmg,'#d63a3a')}}if(b.t<=0||P.dead)P.bleed=null}
   if(P.burn){const b=P.burn;b.t-=dt;b.k=(b.k||0)+dt;if(b.k>=.5){b.k-=.5;if(!P.dead){P.hp=Math.max(1,P.hp-b.dmg);P.calm=0;floater(P.x,P.y-70,'Queimando -'+b.dmg,'#ff8a3c')}}if(b.t<=0||P.dead)P.burn=null}
@@ -2242,6 +2252,9 @@ function scrEvents(){
   const e=EVENT_STATE.current,rows=(EVENT_STATE.schedule||[]).map(x=>`<div class="sr"><span>${eventHour(x.startAt)} — ${esc(x.label)}</span><b>${esc(eventStatusLabel(x))}</b></div>`).join('');
   const registered=!!(EVENT_STATE.registration&&e&&EVENT_STATE.registration.eventId===e.id&&EVENT_STATE.registration.registered),action=registered?'eventunregister':'eventregister',party=EVENT_STATE.party;
   let actionLabel='INSCREVER-SE',partyInfo='';if(e&&e.type==='world_boss'){actionLabel=registered?'CANCELAR INSCRIÇÃO':'INSCREVER PARTY';partyInfo=registered?'<p class="gold">PARTY INSCRITA · 4/4 jogadores</p>':!party?'<p>Entre em um grupo com 4 jogadores.</p>':!party.isLeader?'<p>Apenas o líder pode inscrever o grupo.</p>':party.size!==4?`<p>Grupo incompleto: ${party.size}/4.</p>`:'<p>Party pronta: 4/4 jogadores.</p>'}
+  // Fase 5.7: TvT e inscricao INDIVIDUAL (nunca via Party) -- contador
+  // publico e so o total (nunca userId/charId de quem esta inscrito).
+  else if(e&&e.type==='team_vs_team'){actionLabel=registered?'CANCELAR INSCRIÇÃO':'INSCREVER-SE';partyInfo=`<p class="gold">${e.registrationCount||0} / 8 jogadores</p>`}
   const canRegister=e&&e.playable&&(e.type!=='world_boss'||registered||(party&&party.isLeader&&party.size===4)),main=e?`<div class="card"><small>Próximo Evento</small><h3>${esc(e.label)}</h3><p><b>${eventHour(e.startAt)}</b> · ${esc(eventStatusLabel(e))}</p>${partyInfo}<div class="gold" style="font-size:28px;margin:10px 0">${eventCountdown(e.startAt)}</div>${e.playable?`<button class="rbtn" type="button" data-a="${action}"${canRegister?'':' disabled'}>${actionLabel}</button>`:'<button class="rbtn" type="button" disabled>EM BREVE</button>'}</div>`:'<div class="card">Agenda indisponível.</div>';
   return{head:'<h3>Eventos</h3>',body:main+'<div class="rlabel">Próximos horários</div><div class="card">'+rows+'</div><small class="mut">Agenda e countdown sincronizados pelo servidor. Horário oficial: America/Sao_Paulo.</small>',foot:'Horário de Brasília'};
 }
@@ -2825,6 +2838,7 @@ const REMOTE=new Map();
 const RPROJ=[];
 let NET=null,NET_ID=null,NET_MAP='',netSendT=0,netRetry=0;
 let EVENT_STATE=null,EVENT_CLOCK_OFFSET=0,WB_STATE=null;
+let IN_TVT=false,TVT_STATE=null,TVT_TEAM=null;
 function requestEventState(){if(NET&&NET.readyState===1)NET.send(JSON.stringify({type:'event_status'}))}
 function buildWorldBossArena(m){
   const w=newWorld(m.mapId);w.netMap=m.mapId;w.start={x:m.spawn.x,y:m.spawn.y};worlds[m.mapId]=w;setWorld(w);kind.fill(3);paintGround('cripta');w.ground=ground;
@@ -2834,6 +2848,46 @@ function buildWorldBossArena(m){
 function applyWorldBossState(m){WB_STATE=m;EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();const boss=netMobById('ancient_titan');if(boss&&m.boss){boss.hp=Number(m.boss.hp)||0;boss.maxhp=Number(m.boss.maxHp)||1;boss.dead=boss.hp<=0;boss.state=m.boss.state||boss.state;boss.atk=m.boss.attack||boss.atk;boss.x=Number(m.boss.x)||boss.x;boss.y=Number(m.boss.y)||boss.y}const me=(m.party||[]).find(p=>CUR_CHAR&&p.charId===CUR_CHAR.id);if(me){P.maxhp=me.maxHp;P.hp=me.hp;P.dead=!!me.dead;P.deadT=0}const pct=m.boss?Math.max(0,100*m.boss.hp/m.boss.maxHp):0;$('#wbHp').style.width=pct+'%';$('#wbHpT').textContent=m.boss?Math.ceil(m.boss.hp)+' / '+Math.ceil(m.boss.maxHp):'';$('#wbTime').textContent='Tempo '+eventCountdown(m.expiresAt);$('#wbParty').innerHTML=(m.party||[]).map(p=>`<span class="${!p.online?'off':p.dead?'dead':''}">${esc(p.name)}: ${p.online?(p.dead?'morto':Math.ceil(p.hp)+'/'+Math.ceil(p.maxHp)):'desconectado'}</span>`).join('')}
 function enterWorldBoss(m){closeScr();closeMenu();traveling=true;$('#fade').style.opacity=1;buildWorldBossArena(m);P.x=m.spawn.x;P.y=m.spawn.y;P.dir=3;P.inv=1.2;P.dead=false;clearTarget();NET_MAP='';$('#wbHud').classList.add('on');applyWorldBossState(m);locName='Arena do Titã';setTimeout(()=>{$('#fade').style.opacity=0;traveling=false},350)}
 function exitWorldBoss(m){WB_STATE=null;$('#wbHud').classList.remove('on');const w=worlds[m.map]||worlds.vila;setWorld(w);P.x=Number(m.x)||START.x;P.y=Number(m.y)||START.y;P.dead=false;recalc();P.hp=P.maxhp;NET_MAP='';clearTarget();toast(m.reason==='defeated'?'Titã Ancestral derrotado!':'O World Boss terminou.');hud()}
+/* ================= Team vs Team (Fase 5.7) ================= */
+// Arena propria, simetrica e aberta -- mesmo padrao de construcao da Arena
+// do Titã (newWorld+netMap+addBlock de limite), so com dois spawns opostos
+// (Rubra a oeste, Azul a leste) em vez de um unico ponto central. Sem
+// asset novo: mesmo tema de chao ja usado no World Boss.
+function buildTvtArena(mapId){
+  const w=newWorld(mapId);w.netMap=mapId;w.start={x:350,y:700};worlds[mapId]=w;setWorld(w);kind.fill(3);paintGround('cripta');w.ground=ground;
+  const x0=140,y0=380,x1=2060,y1=1020;addBlock(0,0,WPX,y0);addBlock(0,y1,WPX,HPX-y1);addBlock(0,y0,x0,y1-y0);addBlock(x1,y0,WPX-x1,y1-y0);
+  w.mini=buildMini('cripta');
+}
+function tvtTeamLabel(t){return t==='red'?'Equipe Rubra':t==='blue'?'Equipe Azul':''}
+function applyTvtState(m){
+  TVT_STATE=m;EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();
+  const me=(m.players||[]).find(x=>CUR_CHAR&&x.charId===CUR_CHAR.id);
+  if(me){P.maxhp=me.maxHp;P.hp=me.hp;P.dead=!!me.dead;P.deadT=0;TVT_TEAM=me.team}
+  $('#tvtScoreRed').textContent=m.score?m.score.red:0;$('#tvtScoreBlue').textContent=m.score?m.score.blue:0;
+  $('#tvtLimit').textContent='Primeiro a '+(m.scoreLimit||0)+' eliminações';
+  $('#tvtTime').textContent=eventCountdown(m.expiresAt);
+  $('#tvtMyKD').textContent=me?('Abates '+me.kills+' · Mortes '+me.deaths):'';
+  $('#tvtTeams').innerHTML=['red','blue'].map(team=>{
+    const list=(m.players||[]).filter(p=>p.team===team);
+    return `<div class="tvtCol ${team}"><b>${tvtTeamLabel(team)}</b>`+list.map(p=>`<span class="${!p.online?'off':p.dead?'dead':''}">${esc(p.name)} (${p.cls}) ${p.online?(p.dead?'morto':Math.ceil(p.hp)+'/'+Math.ceil(p.maxHp)):'offline'}</span>`).join('')+'</div>';
+  }).join('');
+}
+function enterTvt(m){
+  closeScr();closeMenu();traveling=true;$('#fade').style.opacity=1;
+  buildTvtArena(m.mapId);IN_TVT=true;TVT_TEAM=m.team;
+  // spawn sempre vem do servidor (m.spawn) -- cliente nunca escolhe posicao de entrada.
+  P.x=(m.spawn&&m.spawn.x)||350;P.y=(m.spawn&&m.spawn.y)||700;P.dir=m.team==='red'?1:3;P.inv=1.2;P.dead=false;clearTarget();NET_MAP='';
+  $('#tvtHud').classList.add('on');locName='Arena TvT';
+  if(!m.reconnect)toast('Você entrou no '+tvtTeamLabel(m.team)+'!');
+  setTimeout(()=>{$('#fade').style.opacity=0;traveling=false},350);
+}
+function exitTvt(m){
+  IN_TVT=false;TVT_STATE=null;TVT_TEAM=null;$('#tvtHud').classList.remove('on');
+  const w=worlds[m.map]||worlds.vila;setWorld(w);P.x=Number(m.x)||START.x;P.y=Number(m.y)||START.y;P.dead=false;recalc();P.hp=P.maxhp;NET_MAP='';clearTarget();
+  const outcome=m.outcome;
+  toast(outcome==='win'?'VITÓRIA! Placar final '+m.score.red+' x '+m.score.blue:outcome==='loss'?'DERROTA. Placar final '+m.score.red+' x '+m.score.blue:'EMPATE. Placar final '+m.score.red+' x '+m.score.blue);
+  hud();
+}
 let netProjectileSeq=0;
 const MOB_NET_VISUAL_FIELDS=['t','t0','la','lx','ly','tx','ty','atk','k','heavy','bx','by','enr','face','moving','cmb','guard','al'];
 function netLabel(text,on){const e=$('#net');if(!e)return;e.textContent=text;e.classList.toggle('online',!!on);e.classList.toggle('offline',!on)}
@@ -2879,6 +2933,20 @@ function netConnect(){
     else if(m.type==='world_boss_cancelled')toast(m.message)
     else if(m.type==='world_boss_reward'){P.gold=m.gold;P.gem=m.gem;P.xp=m.xp;P.lvl=m.lvl;P.bag=m.bag||P.bag;for(const k of EQ_KEYS)P.eq[k]=(m.eq&&m.eq[k])||null;recalc();hud();if(m.legendary)toast('Lendário do grupo: '+m.legendary.n+' +0');else toast('Recompensa do World Boss recebida')}
     else if(m.type==='world_boss_hit'){const b=netMobById('ancient_titan');if(b){b.hp=m.bossHp;b.maxhp=m.bossMaxHp;floater(b.x,b.y-100,'-'+m.damage,'#ffd45a')}}
+    else if(m.type==='tvt_enter')enterTvt(m)
+    else if(m.type==='tvt_state'&&W_&&m.mapId===netMapId())applyTvtState(m)
+    else if(m.type==='tvt_respawn'){P.dead=false;P.x=m.x;P.y=m.y;P.hp=P.maxhp;P.inv=1.5;toast('Você retornou à Arena')}
+    else if(m.type==='tvt_exit')exitTvt(m)
+    else if(m.type==='tvt_cancelled')toast(m.message)
+    else if(m.type==='tvt_reserve')toast(m.message)
+    else if(m.type==='tvt_reward'){P.gold=m.gold;P.gem=m.gem;P.xp=m.xp;P.lvl=m.lvl;recalc();hud();toast('Recompensa do Team vs Team recebida')}
+    else if(m.type==='tvt_hit'){
+      const isMe=m.targetId===(CUR_CHAR&&CUR_CHAR.id);
+      if(isMe)floater(P.x,P.y-70,'-'+m.damage,'#ff6a5a');
+      else{const rp=[...REMOTE.values()].find(x=>x.charId===m.targetId);if(rp)floater(rp.x,rp.y-70,'-'+m.damage,'#fff')}
+      if(m.killed&&isMe)toast('Você foi eliminado!');
+    }
+    else if(m.type==='tvt_heal'){if(m.targetId===(CUR_CHAR&&CUR_CHAR.id)){P.hp=m.hp;floater(P.x,P.y-70,'+'+m.amount,'#7dff9a')}}
     else if(m.type==='player_join'||m.type==='state'){const p=m.player;if(p&&p.id!==NET_ID){const old=REMOTE.get(p.id);REMOTE.set(p.id,Object.assign(old||{},p));netLabel((REMOTE.size+1)+' online',true)}}
     else if(m.type==='player_leave'){REMOTE.delete(m.id);netLabel((REMOTE.size+1)+' online',true)}
     else if(m.type==='map_state'&&m.map===netMapId()){for(const u of m.mobs||[])netApplyMob(u,null)}
@@ -2936,8 +3004,14 @@ function netUpdate(dt){
   netSendT-=dt;if(netSendT<=0){netSendT=.09;NET.send(JSON.stringify({type:'state',map:netMapId(),x:P.x,y:P.y,dir:P.dir,moving:P.moving,lvl:P.lvl,atkT:Math.max(0,P.atkT||0),atkAng:P.atkAng||0}));if(W_&&NET_MAP!==netMapId())netJoinMap()}
 }
 function netMobDamage(m,damage,skill,splash){if(NET&&NET.readyState===1&&m.netId){NET.send(JSON.stringify({type:'mob_damage',map:netMapId(),id:m.netId,skill:skill||'basic',atk:P.atk,splash:!!splash}));return true}return false}
-function pvpOn(){return !!(W_&&W_.name!=='vila'&&!W_.netMap)}
-function netPlayerDamage(rp,skill,splash){if(!pvpOn()||!NET||NET.readyState!==1||!rp||!rp.id)return;NET.send(JSON.stringify({type:'player_damage',map:netMapId(),targetId:rp.id,skill:skill||'basic',atk:P.atk,splash:!!splash}))}
+// Fase 5.7: dentro do TvT, PvP passa a valer mesmo sendo um mapa
+// instanciado (W_.netMap setado) -- por isso o ||IN_TVT aqui. Fora do TvT,
+// nada muda (dungeon/World Boss continuam sem PvP, exatamente como antes).
+function pvpOn(){return !!(W_&&W_.name!=='vila'&&!W_.netMap)||IN_TVT}
+// Dentro do TvT o alvo e identificado pelo CHARID real (publicPlayer agora
+// inclui isso, ver server.js) -- fora do TvT continua sendo o id efemero
+// da conexao (rp.id), como sempre foi (PvP normal nao precisa de charId).
+function netPlayerDamage(rp,skill,splash){if(!pvpOn()||!NET||NET.readyState!==1||!rp||!rp.id)return;const targetId=IN_TVT?(rp.charId||rp.id):rp.id;NET.send(JSON.stringify({type:'player_damage',map:netMapId(),targetId,skill:skill||'basic',atk:P.atk,splash:!!splash}))}
 function remotesInMap(){const l=[];for(const p of REMOTE.values())if(p.map===netMapId())l.push(p);return l}
 function netProjectile(p){if(!NET||NET.readyState!==1||!W_)return;p.nid=NET_ID+':p'+(++netProjectileSeq);NET.send(JSON.stringify({type:'projectile',map:netMapId(),id:p.nid,kind:p.kind,x:p.x,y:p.y,vx:p.vx,vy:p.vy,life:p.life,r:p.r,pierce:p.pierce}))}
 function netProjectileEnd(p){if(NET&&NET.readyState===1&&p.nid)NET.send(JSON.stringify({type:'projectile_end',map:netMapId(),id:p.nid,x:p.x,y:p.y,boom:!!p.splash}))}
