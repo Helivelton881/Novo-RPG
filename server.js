@@ -379,6 +379,80 @@ const SKILL_RESET_PRICE = 30;
 const SHOP_BAG_MAX = 12;
 function typeSlot(type) { return (type === 'sword' || type === 'bow' || type === 'staffd' || type === 'staffm') ? 'sword' : type; }
 
+// ===== Fase 5.4: enchant (+0..+10) server-authoritative =====
+// RNG de producao: crypto.randomInt (nao Math.random) -- essa operacao pode
+// DESTRUIR equipamento valioso, entao usa a mesma familia de RNG seguro ja
+// usada pro seed de masmorra (Fase 5.2). 1e6 buckets da granularidade de
+// sobra pra uma tabela de chance com no maximo 2 casas decimais (0.10..0.70).
+function secureRandom() { return crypto.randomInt(0, 1000000) / 1000000; }
+// Pura/testavel: `rng` e injetavel (testes controlam o resultado exato sem
+// depender de milhares de rolls reais); producao sempre chama sem 2o
+// argumento (usa secureRandom). +1/+2/+3 (target<=3) sempre sucesso --
+// "safe enchant", nunca quebra, mesmo que rng por acaso retornasse 1
+// (Math.random/crypto.randomInt nunca retornam exatamente 1, mas a checagem
+// explicita deixa a garantia clara em vez de depender so do range do RNG).
+// Convencao de fronteira: roll < chance = sucesso (roll==chance = falha).
+function rollEnchantSuccess(target, rng) {
+  if (target <= 3) return true;
+  const chance = GEAR_DATA.enchantChance(target);
+  if (chance == null) return false;
+  const roll = typeof rng === 'function' ? rng() : secureRandom();
+  return roll < chance;
+}
+// Reconstroi um item com um NOVO enchant, preservando uid/type/lv/rarity/n
+// exatamente (nunca gera uid novo, nunca muda rarity/lv/req alem do que
+// statsFor recalcula a partir do req real de type+lv -- que enchant nunca
+// altera). Unica fonte de recalculo de stats pos-enchant -- nunca constrói
+// o item stat a stat na mao.
+function applyEnchant(item, newEnchant) {
+  const stats = GEAR_DATA.statsFor(item.type, item.lv, item.rarity, newEnchant);
+  return {
+    ...item, enchant: newEnchant,
+    atk: stats.atk || 0, def: stats.def || 0, hp: stats.hp || 0, blk: stats.blk || 0, spd: stats.spd || 0, req: stats.req || 0,
+  };
+}
+// Nucleo puro/testavel de UMA tentativa de enchant -- localiza o uid (bag ou
+// eq), valida tudo, cobra o ouro, rola o sucesso e MUTA `save` diretamente
+// (mesmo objeto, sem clonar -- espelha o resto de handleShop). `rng`
+// injetavel (testes); producao chama sem 4o argumento (usa secureRandom via
+// rollEnchantSuccess). Retorna {error} OU {result} (nunca os dois) -- quem
+// chama (handleShop/testes) decide o que fazer com cada um. Extraido pra
+// ser testavel sem HTTP/Supabase/withCharLock, do mesmo jeito que
+// rollGearDrop/applyGearDrops foram extraidos na Fase 5.3.
+function attemptEnchant(save, uid, expectedEnchant, rng) {
+  const bagIdx = save.bag.findIndex(it => it.uid === uid);
+  let where = null, slot = null;
+  if (bagIdx >= 0) where = 'bag';
+  else { for (const s of EQ_SLOTS) { if (save.eq[s] && save.eq[s].uid === uid) { where = 'eq'; slot = s; break; } } }
+  const item = where === 'bag' ? save.bag[bagIdx] : (where === 'eq' ? save.eq[slot] : null);
+  if (!item) return { error: 'Item não encontrado' };
+  if (!GEAR_DATA.ENCHANTABLE_TYPES.has(item.type)) return { error: 'Este equipamento não pode ser encantado' };
+  if (item.enchant >= GEAR_DATA.ENCHANT_MAX) return { error: 'MAX_ENCHANT' };
+  // expectedEnchant precisa bater EXATAMENTE com o real persistido --
+  // protege contra duplo clique/request duplicada: a primeira requisição
+  // que executar muda item.enchant de verdade, e qualquer segunda tentativa
+  // (com o expectedEnchant "antigo") é rejeitada aqui, sem cobrar nada.
+  if (!Number.isInteger(expectedEnchant) || expectedEnchant !== item.enchant) return { error: 'STALE_ENCHANT_STATE' };
+  const target = item.enchant + 1;
+  const cost = GEAR_DATA.enchantCost(item.type, item.lv, target);
+  if (!cost) return { error: 'Item inválido' };
+  if (save.gold < cost) return { error: 'Moedas insuficientes' };
+  // custo sempre cobrado (sucesso ou falha) -- so pedido INVALIDO (qualquer
+  // `error` acima) nunca chega a debitar.
+  save.gold -= cost;
+  const success = rollEnchantSuccess(target, rng);
+  if (success) {
+    const recalced = applyEnchant(item, target);
+    if (where === 'bag') save.bag[bagIdx] = recalced; else save.eq[slot] = recalced;
+    return { result: { success: true, destroyed: false, cost, previousEnchant: item.enchant, newEnchant: target, uid, item: recalced } };
+  }
+  // falha em +4 ou acima destroi o item -- sem downgrade, sem "proteção",
+  // sem copia substituta. O uid simplesmente deixa de existir no
+  // inventario (nunca acontece pra +1/+2/+3, rollEnchantSuccess garante).
+  if (where === 'bag') save.bag.splice(bagIdx, 1); else save.eq[slot] = null;
+  return { result: { success: false, destroyed: true, cost, previousEnchant: item.enchant, newEnchant: item.enchant, uid, item: null } };
+}
+
 // Espelha as recompensas de missao dos dialogos (NPC_SCRIPT em index.html,
 // callbacks end() dos estagios que dao premio) pra conceder ouro/gema/XP no
 // servidor em vez de aceitar o que o cliente ja gravou no P.gold/P.gem/P.xp.
@@ -592,9 +666,17 @@ function sanitizeItem(raw) {
     if (!legacyLv) return null;
     lv = legacyLv; rarity = 'basic';
   }
-  const stats = GEAR_DATA.statsFor(raw.type, lv, rarity);
+  // Fase 5.4: enchant so existe de verdade pros 4 grupos elegiveis
+  // (ENCHANTABLE_TYPES) -- pra qualquer outro tipo (escudo/capacete/joia)
+  // fica travado em 0 aqui mesmo, defensivamente (mesmo que um payload
+  // adulterado tente mandar enchant>0 pra um tipo nao elegivel, nunca
+  // persiste). statsFor recebe o enchant real pra recalcular atk/def/hp
+  // corretamente TODA VEZ que o item passa por aqui (compra, leitura de
+  // save, equipar/desequipar, PUT) -- sem isso, um item encantado
+  // "esqueceria" o bonus assim que o save fosse relido.
+  const enchant = GEAR_DATA.ENCHANTABLE_TYPES.has(raw.type) ? Math.max(0, Math.min(GEAR_DATA.ENCHANT_MAX, Math.round(Number(raw.enchant) || 0))) : 0;
+  const stats = GEAR_DATA.statsFor(raw.type, lv, rarity, enchant);
   if (!stats) return null;
-  const enchant = Math.max(0, Math.min(10, Math.round(Number(raw.enchant) || 0)));
   const uid = typeof raw.uid === 'string' && UID_RE.test(raw.uid) ? raw.uid : crypto.randomUUID();
   return {
     uid, type: raw.type, lv, rarity, enchant,
@@ -938,6 +1020,7 @@ async function handleShop(req, res, pathname) {
       const save = sanitizeSave(row.save, lvl);
       const action = String(input.action || '');
       let error = null;
+      let enchantResult = null; // Fase 5.4: preenchido so pela acao enchant_item, ver abaixo
 
       if (action === 'buy_gear') {
         const type = String(input.type || ''), gearLv = Math.round(Number(input.lv));
@@ -980,9 +1063,14 @@ async function handleShop(req, res, pathname) {
         // desde que virou possivel dropar raridade alta em nivel baixo,
         // Fase 5.3) como se fosse lixo comum. Ponto critico, ver
         // LEIA-PRIMEIRO.md "Fase 5.3".
+        // Fase 5.4: alem de rarity==='basic', agora TAMBEM exige enchant===0
+        // -- um Basic +8 e resultado de gasto real de ouro/risco no Ferreiro,
+        // nunca pode ser varrido junto com lixo comum sem confirmação
+        // explícita do jogador (mesma logica de "nao destruir item sem
+        // querer" do resto desta fase). CRÍTICO, ver LEIA-PRIMEIRO.md "Fase 5.4".
         let total = 0; const kept = []; const list = shopSoldByChar.get(charId) || [];
         for (const it of save.bag) {
-          if (it.rarity === 'basic') { const price = GEAR_DATA.sellPriceForItem(it); total += price; list.unshift({it, price: Math.ceil(price * 1.5)}); }
+          if (it.rarity === 'basic' && it.enchant === 0) { const price = GEAR_DATA.sellPriceForItem(it); total += price; list.unshift({it, price: Math.ceil(price * 1.5)}); }
           else kept.push(it);
         }
         save.bag = kept; save.gold += total; list.length = Math.min(list.length, 10);
@@ -1045,6 +1133,19 @@ async function handleShop(req, res, pathname) {
         if (!['pv', 'pa', 'ap', 'scr'].includes(key)) error = 'Item inválido';
         else if ((save[key] || 0) < 1) error = 'Você não tem esse item';
         else save[key] -= 1;
+      } else if (action === 'enchant_item') {
+        // Fase 5.4: tentativa de enchant server-authoritative. Cliente so
+        // pede "quero tentar encantar este uid, no estado que EU vejo como
+        // enchant X" -- attemptEnchant decide tudo (existe? é meu? é
+        // enchantavel? já é +10? chance? custo? sucesso ou quebra? stats
+        // finais?). Tudo dentro do mesmo withCharLock que já serializa
+        // handleShop -- sem isso, dois cliques rápidos no mesmo item
+        // poderiam encadear +0->+1 seguido de +1->+2 sem intenção do
+        // jogador (fechado pelo expectedEnchant dentro de attemptEnchant).
+        const uid = cleanText(input.uid, 40);
+        const expectedEnchant = Math.round(Number(input.expectedEnchant));
+        const outcome = attemptEnchant(save, uid, expectedEnchant);
+        if (outcome.error) error = outcome.error; else enchantResult = outcome.result;
       } else {
         error = 'Ação inválida';
       }
@@ -1052,7 +1153,7 @@ async function handleShop(req, res, pathname) {
       if (error) return {status:400, body:{error}};
       const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
       if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
-      return {status:200, body:{character: rows[0], shopSold: shopSoldByChar.get(charId) || []}};
+      return {status:200, body:{character: rows[0], shopSold: shopSoldByChar.get(charId) || [], enchant: enchantResult}};
     });
     json(res, result.status, result.body); return true;
   } catch (err) {
@@ -2510,4 +2611,6 @@ module.exports = {
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.3 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   grantItem, gearLevelForMob, rollGearDrop, applyGearDrops, GEAR_DROP_RATES, DROP_TYPES_BY_CLASS,
+  // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
+  rollEnchantSuccess, applyEnchant, attemptEnchant,
 };
