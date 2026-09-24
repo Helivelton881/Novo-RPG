@@ -748,6 +748,44 @@ Máximo teórico calculado nesta fase: arma Legendary Nv40 +10 → `round(42 × 
 
 **Nenhuma migration nova foi necessária ou criada.** `enchant` já vivia no objeto do item dentro de `characters.save` (jsonb) desde a Fase 5.1 — esta fase só passou a usá-lo de verdade. As 5 migrations históricas em `supabase/migrations/` não foram tocadas.
 
+# FASE 5.5 — EVENT MANAGER
+
+## Objetivo e fronteira
+
+A infraestrutura de eventos agora é server-authoritative e vive em memória, sem criar World Boss ou Team vs Team jogáveis. O `EventManager` não importa nem altera mapas, monstros, PvP, Party, recompensas ou `characters.save`. Ele gerencia somente agenda, lifecycle, inscrições, anúncios e sincronização pública. Não foi criada migration nem tabela de eventos.
+
+## Fonte única e timezone
+
+`game-data/event-manager.js` concentra `EVENT_CONFIG`: timezone oficial `America/Sao_Paulo`, intervalo de 2 horas, antecedência de inscrição de 15 minutos, anúncios em 15/5/1 minutos e metadados dos tipos. `world_boss` tem `registrationMode: party4`; `team_vs_team`, `registrationMode: individual`. Ambos permanecem `playable: false` até as Fases 5.6 e 5.7.
+
+A matemática usa `Intl.DateTimeFormat` com timezone IANA, nunca o relógio local do host Render. Os slots são 00/04/08/12/16/20 para World Boss e 02/06/10/14/18/22 para Team vs Team. `nextEventAfter` e `scheduleAfter` atravessam meia-noite sem produzir 24:00. A ocorrência tem ID determinístico `<tipo>:<timestamp-do-slot>`.
+
+## Lifecycle, restart e cleanup
+
+Estados públicos: `upcoming`, `registration`, `active`, `ended`, `cancelled` e `unavailable`. A fase é sempre derivada de timestamps absolutos (`startAt - now`), não de contador acumulado. Assim, uma nova instância criada durante a janela reconstrói o mesmo ID e estado. Sem handler jogável, um slot iniciado fica `unavailable`; o servidor nunca inventa evento ativo.
+
+`EventManager.registerEventHandler(type, handler)` é o ponto de extensão para gameplay futuro. Um handler pode declarar duração e callbacks `onStart`/`onEnd`, sem reescrever scheduler. `cancel(eventId)` limpa inscrições e registra a transição. Estado de inscrições/anúncios/transições com mais de quatro horas é removido por `cleanup`, evitando Maps sem limite.
+
+Inscrições ficam em `Map<eventId, Map<charId, registration>>`. Só usam `p.userId`/`p.charId` autenticados pelo join WebSocket; campos de identidade enviados pelo cliente são ignorados. Registro repetido é idempotente. Restart pode limpar inscrições em memória, limitação aceita enquanto a janela é curta e não há evento jogável.
+
+## Anúncios e feature gating
+
+Para handlers futuros habilitados, o tick de 1 segundo suporta anúncios globais em 15, 5 e 1 minuto, com um `Set` por ocorrência para disparar cada marco exatamente uma vez. O timer usa `.unref()` e não escreve log a cada segundo. Logs concisos existem apenas para `event_registration_open`, `event_start`, `event_end` e `event_cancelled`.
+
+World Boss e TvT atuais não têm handler e continuam `playable:false`: não anunciam início, não aceitam inscrição, não teleportam, não criam mapa/monstro/time e não concedem ouro, gema, XP ou item.
+
+## HTTP, WebSocket e cliente
+
+`GET /api/events/status` devolve apenas `serverNow`, timezone, evento atual/próximo e seis slots públicos, sem participantes. Após todo `join`, inclusive F5/reconnect, o servidor envia `event_state`. O protocolo também suporta `event_status`, `event_register`, `event_unregister`, `event_registration` e `event_announcement`.
+
+O cliente mantém uma única estrutura `EVENT_STATE` e calcula `EVENT_CLOCK_OFFSET = serverNow - Date.now()`. O countdown usa o `startAt` absoluto recebido; o cliente não calcula tipo nem agenda. O botão **EVENTOS** abre painel leve com próximo evento, horário de Brasília, countdown e seis slots. Enquanto `playable:false`, aparece **EM BREVE** e nenhum pedido de inscrição é enviado. Anúncios futuros usam toast e chat de sistema, sem modal bloqueante.
+
+## Testes e limitações
+
+`test/event-manager.test.js` cobre os 12 slots, alternância, meia-noite, ID estável, bordas 19:44:59/19:45/19:59:59/20:00, restart simulado, deduplicação 15/5/1 com centenas de ticks, feature gating, autenticação/idempotência/unregister fora e dentro da janela, cleanup e privacidade do snapshot. `test/event-ws.test.js` cobre status HTTP, `event_state` no join e rejeição de inscrição anônima; cenários autenticados permanecem condicionados ao ambiente Supabase de teste.
+
+Limitações intencionais: inscrições somem em restart; não há histórico; não há persistência; não há handler jogável; não há teleporte nem recompensa. A Fase 5.6 registrará o handler de World Boss e aplicará a regra de party exatamente 4. A Fase 5.7 registrará o handler de Team vs Team e implementará equipes, mapa, placar, respawn e resultado.
+
 ## Próxima fase
 
-Fase 5.5 — Event Manager (eventos automáticos de 2 em 2 horas, preparação para World Boss e Team vs Team). Fica pra quando for solicitada.
+Fase 5.6 — World Boss, conectado ao EventManager da Fase 5.5 sem reescrever agenda, countdown, anúncios ou inscrições.
