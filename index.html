@@ -148,6 +148,13 @@ button{font:inherit;color:inherit}
 .rw .rbody.fit .rgrid{flex:1 1 auto;min-height:104px}
 .rw .rgrid.sm{max-height:132px}
 .rw .rs{--rc:#c9a552;position:relative;width:min(100%,58px);aspect-ratio:1/1;height:auto;padding:0;display:grid;place-items:center;border-radius:9px;border:2px solid #120c07;background:radial-gradient(circle at 50% 38%,#3a2c1f,#160f09 78%);box-shadow:inset 0 0 0 2px #d2b06a,inset 0 0 0 4px #5b4220,inset 0 0 0 5px #120c07,0 2px 0 rgba(0,0,0,.5);cursor:pointer;font:inherit;color:inherit}
+/* Fase 5.4: brilho de enchant por faixa -- so filter (composita por cima do
+   box-shadow existente, sem redefini-lo), sem sprite/asset novo, sem canvas
+   extra -- nao pesa FPS. */
+.rw .rs.ench-mid{filter:drop-shadow(0 0 4px rgba(255,220,120,.85))}
+.rw .rs.ench-high{filter:drop-shadow(0 0 7px rgba(255,180,60,.95))}
+.rw .rs.ench-max{filter:drop-shadow(0 0 10px rgba(255,225,90,1)) drop-shadow(0 0 18px rgba(255,140,0,.6))}
+.rw .rs .ench{position:absolute;right:2px;bottom:2px;font:700 10px/1 system-ui,sans-serif;color:#ffe27a;background:#1a1410cc;padding:2px 3px;border-radius:4px;pointer-events:none;text-shadow:0 1px 0 #000}
 .rw .rs[style*="--rc"]{background:radial-gradient(circle at 50% 38%,color-mix(in srgb,var(--rc) 38%,#22180f),#160f09 80%);box-shadow:inset 0 0 0 2px var(--rc),inset 0 0 0 4px #5b4220,inset 0 0 0 5px #120c07,0 2px 0 rgba(0,0,0,.5)}
 .rw .rs img{width:62%;height:62%;object-fit:contain;image-rendering:pixelated}
 .rw .rs .n{position:absolute;right:5px;bottom:2px;font-size:15px;font-weight:700;color:#fff;text-shadow:1px 0 #000,-1px 0 #000,0 1px #000,0 -1px #000}
@@ -481,6 +488,7 @@ button{font:inherit;color:inherit}
     <div id="barpick" class="fr" role="dialog" aria-label="Editar espaço da barra"></div>
     <div id="scr" class="rw" role="dialog" aria-label="Janela do menu"></div>
     <div id="shop" class="rw" role="dialog" aria-label="Loja do mercador"></div>
+    <div id="blacksmith" class="rw" role="dialog" aria-label="Ferreiro"></div>
     <div id="menu" role="menu" aria-label="Menu principal"><button class="mbtn" type="button" role="menuitem" data-m="char"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg><span>Personagem</span></button><button class="mbtn" type="button" role="menuitem" data-m="inv"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6a3 3 0 0 1 6 0"/><rect x="5" y="6" width="14" height="15" rx="4"/><rect x="9" y="13" width="6" height="5" rx="1.5"/><path d="M9 10h6"/></svg><span>Inventário</span></button><button class="mbtn" type="button" role="menuitem" data-m="equip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6z"/></svg><span>Equipamentos</span></button><button class="mbtn" type="button" role="menuitem" data-m="skills"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4l1.8 5.2L18 11l-5.2 1.8L11 18l-1.8-5.2L4 11l5.2-1.8z"/><path d="M19 3v4M17 5h4"/><circle cx="5" cy="19" r="1.2"/></svg><span>Habilidades</span></button><button class="mbtn" type="button" role="menuitem" data-m="quests"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h9a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H9"/><path d="M8 4a2 2 0 0 0-2 2v10a3 3 0 0 0 3 3"/><path d="M10 9h6M10 13h6"/><path d="M9 19a2 2 0 0 1-3-1"/></svg><span>Missões</span></button><button class="mbtn" type="button" role="menuitem" data-m="map"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg><span>Mapa</span></button><button class="mbtn" type="button" role="menuitem" data-m="social"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 14.5c2 .8 3.5 2.8 3.5 5.5"/></svg><span>Social</span></button><button class="mbtn" type="button" role="menuitem" data-m="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="6.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg><span>Configurações</span></button></div>
     <button id="menuBtn" type="button" aria-label="Abrir menu" aria-expanded="false"><span></span><span></span><span></span></button>
   </div>
@@ -924,9 +932,15 @@ function buildVila(){
     {id:'aldea',nome:'Aldeã',x:8.7*T,y:12.85*T},
     {id:'mercador',nome:'Mercador',x:22.4*T,y:12.9*T},
     {id:'guarda',nome:'Guarda Real',x:26.9*T,y:25.5*T},
-    {id:'sacerdotisa',nome:'Sacerdotisa',x:11.3*T,y:24.6*T}
+    {id:'sacerdotisa',nome:'Sacerdotisa',x:11.3*T,y:24.6*T},
+    // Fase 5.4: sem sprite proprio ainda (sem assets novos nesta fase) --
+    // reaproveita o visual do 'guarda' (spriteKey), so a janela/dialogo e
+    // diferente. Posicionado perto do mercador (mesma area de comercio da
+    // vila), afastado o suficiente pra nao sobrepor o bloqueio da casa
+    // vizinha nem o proprio mercador.
+    {id:'ferreiro',nome:'Ferreiro',x:25*T,y:12.9*T,spriteKey:'guarda'}
   ];
-  npcDefs.forEach(n=>{n.img=IMG[n.id];n.w=SPR[n.id].w;n.h=SPR[n.id].h;NPCS.push(n);addBlock(n.x-11,n.y-9,22,9);clearZones.push([n.x,n.y,70])});
+  npcDefs.forEach(n=>{const sk=n.spriteKey||n.id;n.img=IMG[sk];n.w=SPR[sk].w;n.h=SPR[sk].h;NPCS.push(n);addBlock(n.x-11,n.y-9,22,9);clearZones.push([n.x,n.y,70])});
   clearZones.push([PORTAL.x,PORTAL.y,110],[START.x,START.y,80],[28.5*T,23*T,120]);
 
   // árvores
@@ -1095,6 +1109,11 @@ const RARITY_COLOR={basic:'#e8e0cc',rare:'#5aa8ff',epic:'#c47bff',legendary:'#ff
 // Substitui RAR[it.tier] em toda exibicao -- funciona tanto pro item novo
 // (it.rarity) quanto pro legado (it.tier, comportamento original preservado).
 function rarityOf(it){return it.rarity?{n:GEAR_DATA.RARITY[it.rarity].label,c:RARITY_COLOR[it.rarity]}:RAR[it.tier]}
+// Fase 5.4: classe de brilho CSS por faixa de enchant (+4..+6 discreto,
+// +7..+9 mais forte, +10 especial) -- so pra quem realmente tem enchant>0;
+// nunca muda a COR (raridade continua controlando isso, ver RARITY_COLOR).
+function enchClass(it){if(!it||!it.enchant)return '';return it.enchant>=10?'ench-max':it.enchant>=7?'ench-high':it.enchant>=4?'ench-mid':''}
+function enchBadge(it){return it&&it.enchant?`<b class="ench">+${it.enchant}</b>`:''}
 // Fase 5.3: texto de feedback quando kill_reward/dungeon_reward trazem um
 // `drop` (item Raro/Epico/Lendario concedido pelo servidor). Formato pedido:
 // "Item Raro obtido: X" / "Item Épico obtido: X" / "ITEM LENDÁRIO: X".
@@ -1226,7 +1245,7 @@ function hud(){
   const k=questHtml();if(k!==questKey){questKey=k;$('#quest').innerHTML=k}
 }
 let toastTimer=0;
-function toast(msg){const t=$('#toast');t.classList.toggle('low',invOpen||menuOpen||!!scrOpen||shopOpen);t.textContent=msg;t.classList.add('on');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('on'),2200)}
+function toast(msg){const t=$('#toast');t.classList.toggle('low',invOpen||menuOpen||!!scrOpen||shopOpen||bsOpen);t.textContent=msg;t.classList.add('on');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('on'),2200)}
 
 /* ================= som ================= */
 let AC=null;
@@ -1287,6 +1306,7 @@ function openDialog(npc){
   if(dlg||P.dead)return;
   stopAuto();
   if(npc.id==='mercador'){openShop();return}
+  if(npc.id==='ferreiro'){openBlacksmith();return}
   const s=NPC_SCRIPT[npc.id]();dlg={npc,lines:s.lines,i:0,choices:s.choices||null,end:s.end||null};
   sfx.talk();renderDlg();
 }
@@ -1515,9 +1535,9 @@ const ICO={
 };
 function nearMerchant(){const n=NPCS.find(n=>n.id==='mercador');return !!n&&Math.hypot(n.x-P.x,n.y-P.y)<110}
 function toggleInv(){if(!started||P.dead||traveling)return;invOpen?closeInv():openInv()}
-function openInv(){closeScr();closeShop();invOpen=true;invSel=null;discArm=0;$('#inv').innerHTML='';$('#inv').classList.add('on');$('#talk').classList.remove('on');renderInv()}
+function openInv(){closeScr();closeShop();closeBlacksmith();invOpen=true;invSel=null;discArm=0;$('#inv').innerHTML='';$('#inv').classList.add('on');$('#talk').classList.remove('on');renderInv()}
 function closeInv(){invOpen=false;const el=$('#inv');el.classList.remove('on');resetWinPos(el)}
-function refreshWins(){if(invOpen)renderInv();if(scrOpen)renderScr();if(shopOpen)renderShop()}
+function refreshWins(){if(invOpen)renderInv();if(scrOpen)renderScr();if(shopOpen)renderShop();if(bsOpen)renderBlacksmith()}
 function afterEquip(){
   const prev=P.maxhp;recalc();if(P.maxhp>prev)P.hp+=P.maxhp-prev;P.hp=Math.min(P.hp,P.maxhp);
   refreshEquipIcons();saveGame();hud();refreshWins();
@@ -1556,7 +1576,10 @@ function itemStatsHtml(it,equipped,noValue){
   const cur=P.eq[GEAR[it.type].slot],cmp=!equipped;
   const row=(lab,v,c,pct)=>{if(!v&&!(cmp&&c))return '';const d=cmp?(v-(c||0)):0;const dd=d?` <span class="${d>0?'up':'dn'}">(${d>0?'+':''}${pct?Math.round(d*100)+'%':d})</span>`:'';return `<div class="st">${pct?Math.round(v*100)+'% '+lab:'+'+v+' '+lab}${dd}</div>`};
   const rar=rarityOf(it),lvTag=it.lv?(' · Nv '+it.lv):'';
-  return `<div class="nm" style="color:${rar.c}">${esc(it.n)}</div><div class="sub">${GEAR[it.type].label} · ${rar.n}${lvTag}${equipped?' · equipado':''}</div>`+row('de ataque',it.atk,cur?cur.atk:0)+row('de defesa',it.def,cur?cur.def:0)+row('de HP máx',it.hp,cur?cur.hp:0)+row('de bloqueio',it.blk||0,cur?(cur.blk||0):0,true)+row('de velocidade',it.spd||0,cur?(cur.spd||0):0,true)+(it.req?`<div class="${P.lvl<it.req?'dn':'sub'}">Requer nível ${it.req}</div>`:'')+(noValue?'':`<div class="sub">Vale ${sellPriceOf(it)} moedas</div>`);
+  // Fase 5.4: "+N " antes do nome so na EXIBIÇÃO -- o campo canônico `n`
+  // persistido nunca muda por enchant (ver applyEnchant em server.js).
+  const nmTxt=(it.enchant?('+'+it.enchant+' '):'')+esc(it.n);
+  return `<div class="nm" style="color:${rar.c}">${nmTxt}</div><div class="sub">${GEAR[it.type].label} · ${rar.n}${lvTag}${equipped?' · equipado':''}</div>`+row('de ataque',it.atk,cur?cur.atk:0)+row('de defesa',it.def,cur?cur.def:0)+row('de HP máx',it.hp,cur?cur.hp:0)+row('de bloqueio',it.blk||0,cur?(cur.blk||0):0,true)+row('de velocidade',it.spd||0,cur?(cur.spd||0):0,true)+(it.req?`<div class="${P.lvl<it.req?'dn':'sub'}">Requer nível ${it.req}</div>`:'')+(noValue?'':`<div class="sub">Vale ${sellPriceOf(it)} moedas</div>`);
 }
 function bagCells(){
   const out=[],f=bagFilter;
@@ -1567,7 +1590,7 @@ function bagCells(){
 function bagCellHtml(c){
   if(c.k==='stk'){const d=STK.find(x=>x[0]===c.key),sel=invSel&&invSel.k==='stk'&&invSel.key===c.key;return `<button class="rs${sel?' sel':''}" type="button" data-stk="${c.key}" aria-label="${d[1]}"><img alt="" src="${iconURL(d[2])}"><span class="n">${P[c.key]}</span></button>`}
   const it=P.bag[c.i],sel=invSel&&invSel.k==='bag'&&invSel.i===c.i;
-  return `<button class="rs${sel?' sel':''}" type="button" data-b="${c.i}" style="--rc:${rarityOf(it).c}" aria-label="${esc(it.n)}"><img alt="" src="${iconURL(it)}"></button>`;
+  return `<button class="rs${sel?' sel':''} ${enchClass(it)}" type="button" data-b="${c.i}" style="--rc:${rarityOf(it).c}" aria-label="${it.enchant?'+'+it.enchant+' ':''}${esc(it.n)}"><img alt="" src="${iconURL(it)}">${enchBadge(it)}</button>`;
 }
 function bagDetail(){
   const s=invSel,none='<div class="sub">Toque num item para ver os detalhes.</div>',merch=nearMerchant();
@@ -1923,12 +1946,12 @@ function openMenu(){if(!started||P.dead||traveling)return;menuOpen=true;$('#menu
 function closeMenu(){menuOpen=false;$('#menu').classList.remove('on');$('#menuBtn').setAttribute('aria-expanded','false')}
 function openScr(name,tab){
   if(!started||P.dead||traveling)return;
-  closeMenu();closeInv();closeShop();if(name==='char'&&tab)charTab=tab;if(name==='map'&&W_&&worlds[W_.name])mapView=W_.name;
+  closeMenu();closeInv();closeShop();closeBlacksmith();if(name==='char'&&tab)charTab=tab;if(name==='map'&&W_&&worlds[W_.name])mapView=W_.name;
   scrOpen=name;chSel=null;$('#talk').classList.remove('on');const se=$('#scr');se.innerHTML='';se.classList.add('on');renderScr();
   if(name==='social'){refreshSocial();clearInterval(socialPollTimer);socialPollTimer=setInterval(refreshSocial,5000)}
 }
 function closeScr(){scrOpen=null;const el=$('#scr');el.classList.remove('on');resetWinPos(el);clearInterval(socialPollTimer);socialPollTimer=0}
-function escKey(){if(shopOpen)closeShop();else if(invOpen)closeInv();else if(scrOpen)closeScr();else if(menuOpen)closeMenu();else openMenu()}
+function escKey(){if(shopOpen)closeShop();else if(bsOpen)closeBlacksmith();else if(invOpen)closeInv();else if(scrOpen)closeScr();else if(menuOpen)closeMenu();else openMenu()}
 $('#menuBtn').addEventListener('click',()=>{menuOpen?closeMenu():openMenu()});
 document.addEventListener('pointerdown',e=>{if(menuOpen&&!e.target.closest('#menu,#menuBtn'))closeMenu()},true);
 $('#menu').addEventListener('click',e=>{
@@ -1949,12 +1972,12 @@ function enableDrag(el){
     h.addEventListener('pointermove',mv);h.addEventListener('pointerup',up);h.addEventListener('pointercancel',up);
   });
 }
-enableDrag($('#inv'));enableDrag($('#scr'));enableDrag($('#shop'));
+enableDrag($('#inv'));enableDrag($('#scr'));enableDrag($('#shop'));enableDrag($('#blacksmith'));
 /* a câmera se desloca para o jogador aparecer na área livre ao lado da janela */
 let focX=.5,focY=.5;
 function updFocus(dt){
   let tx=.5,ty=.5;
-  const el=shopOpen?$('#shop'):invOpen?$('#inv'):scrOpen?$('#scr'):null;
+  const el=shopOpen?$('#shop'):bsOpen?$('#blacksmith'):invOpen?$('#inv'):scrOpen?$('#scr'):null;
   if(el){
     const r=el.getBoundingClientRect(),a=stage.getBoundingClientRect(),W=a.width,H=a.height,bm=innerWidth<=720?100:64;
     const cand=[[0,0,W,r.top-a.top],[0,r.bottom-a.top,W,H-bm],[0,0,r.left-a.left,H],[r.right-a.left,0,W,H]];
@@ -1971,12 +1994,13 @@ function statusHtml(extra){
 let winSigStr='',mapTick=0,winDetailFocus=false;
 function winSig(){
   const shownPlayMinutes=scrOpen==='char'&&charTab==='status'?Math.floor(P.pt/60):0;
-  return JSON.stringify([Object.keys(P.gunlock).join(),P.bar.join(),shopOpen,shopTab,shopCat,shopSel,shopSold.length,shopOpen?P.gold:0,invOpen,scrOpen,bagFilter,charTab,skSel,mapView,socTab,P.lvl,P.quest,P.kills,P.gk,P.ks,P.kw,P.kp,P.kt,P.ki,P.kv,P.gem,P.pv,P.pa,P.ap,P.key,P.scr,P.bag.map(i=>i.n).join(),Object.values(P.eq).map(i=>i&&i.n).join(),P.sl,P.gb,P.bs,P.dt,shownPlayMinutes,P.chestOpen,FRIENDS.length,P.chat.length,!!PARTY,P.sk,skillPoints(),nearMerchant(),W_&&W_.name,P.name]);
+  return JSON.stringify([Object.keys(P.gunlock).join(),P.bar.join(),shopOpen,shopTab,shopCat,shopSel,shopSold.length,shopOpen?P.gold:0,invOpen,scrOpen,bagFilter,charTab,skSel,mapView,socTab,P.lvl,P.quest,P.kills,P.gk,P.ks,P.kw,P.kp,P.kt,P.ki,P.kv,P.gem,P.pv,P.pa,P.ap,P.key,P.scr,P.bag.map(i=>i.n+i.enchant).join(),Object.values(P.eq).map(i=>i&&(i.n+i.enchant)).join(),P.sl,P.gb,P.bs,P.dt,shownPlayMinutes,P.chestOpen,FRIENDS.length,P.chat.length,!!PARTY,P.sk,skillPoints(),nearMerchant(),W_&&W_.name,P.name,bsOpen,bsSel,bsOpen?P.gold:0]);
 }
 function tickWin(){
   if(shopOpen){const mn=NPCS.find(n=>n.id==='mercador');if(!mn||Math.hypot(mn.x-P.x,mn.y-P.y)>200){closeShop();toast('Você se afastou do mercador')}}
+  if(bsOpen){const fn=NPCS.find(n=>n.id==='ferreiro');if(!fn||Math.hypot(fn.x-P.x,fn.y-P.y)>200){closeBlacksmith();toast('Você se afastou do ferreiro')}}
   if(scrOpen==='portal'&&PORTAL&&Math.hypot(P.x-PORTAL.x,P.y-PORTAL.y)>170)closeScr();
-  if(!invOpen&&!scrOpen&&!shopOpen)return;
+  if(!invOpen&&!scrOpen&&!shopOpen&&!bsOpen)return;
   const s=winSig();if(s!==winSigStr){winSigStr=s;refreshWins()}
   for(const e of document.querySelectorAll('.rw.on [data-bind]')){
     const k=e.dataset.bind;
@@ -2158,13 +2182,13 @@ function scrSettings(){
 const rankOf=()=>P.lvl<5?'Novato':P.lvl<10?'Aventureiro':'Veterano';
 function eqSlotHtml(slot){
   const it=P.eq[slot],sel=chSel&&chSel.k==='eq'&&chSel.slot===slot;
-  return `<button class="rs${sel?' sel':''}${it?'':' empty'}" type="button" data-eq="${slot}"${it?` style="--rc:${rarityOf(it).c}"`:''} aria-label="${GEAR[slot].label}">${it?`<img alt="" src="${iconURL(it)}">`:`<img class="ghost" alt="" src="${iconURL(slot==='sword'?GEAR[CLS.weapon].icons[1]:GEAR[slot].icon)}"><span class="lbl">${GEAR[slot].label}</span>`}</button>`;
+  return `<button class="rs${sel?' sel':''}${it?'':' empty'} ${enchClass(it)}" type="button" data-eq="${slot}"${it?` style="--rc:${rarityOf(it).c}"`:''} aria-label="${it&&it.enchant?'+'+it.enchant+' ':''}${GEAR[slot].label}">${it?`<img alt="" src="${iconURL(it)}">${enchBadge(it)}`:`<img class="ghost" alt="" src="${iconURL(slot==='sword'?GEAR[CLS.weapon].icons[1]:GEAR[slot].icon)}"><span class="lbl">${GEAR[slot].label}</span>`}</button>`;
 }
 function charEquip(){
   const base=Math.round(baseDmg()),merch=nearMerchant();
   const layout=['cape','helmet','jewel','sword','armor','shield',null,'boots',null];
   const slots=layout.map(s=>s==='shield'&&!CLS.shield?'<div class="rs locked" title="Só o Guerreiro usa escudo">🔒</div>':s?eqSlotHtml(s):'<i class="blank"></i>').join('');
-  const gear=P.bag.map((it,i)=>{const sel=chSel&&chSel.k==='bag'&&chSel.i===i;return `<button class="rs${sel?' sel':''}" type="button" data-b="${i}" style="--rc:${rarityOf(it).c}" aria-label="${esc(it.n)}"><img alt="" src="${iconURL(it)}"></button>`}).join('')+'<div class="rs empty"></div>'.repeat(Math.max(0,5-P.bag.length));
+  const gear=P.bag.map((it,i)=>{const sel=chSel&&chSel.k==='bag'&&chSel.i===i;return `<button class="rs${sel?' sel':''} ${enchClass(it)}" type="button" data-b="${i}" style="--rc:${rarityOf(it).c}" aria-label="${it.enchant?'+'+it.enchant+' ':''}${esc(it.n)}"><img alt="" src="${iconURL(it)}">${enchBadge(it)}</button>`}).join('')+'<div class="rs empty"></div>'.repeat(Math.max(0,5-P.bag.length));
   const it=selItem(chSel);
   const det=it?itemStatsHtml(it,chSel.k==='eq'):'<div class="sub">Toque num equipamento para ver e comparar.</div>';
   let acts;
@@ -2308,12 +2332,104 @@ function gearSummary(it){const p=[];if(it.atk)p.push('+'+it.atk+' ataque');if(it
 function openShop(){
   if(!started||P.dead||traveling)return;
   if(dlg)closeDlg();
-  closeInv();closeScr();closeMenu();
+  closeInv();closeScr();closeMenu();closeBlacksmith();
   shopOpen=true;shopTab='buy';shopCat=0;shopSel=null;shopQty=1;shopArm=0;
   shopMsg=['Boas-vindas! Dê uma olhada.','Tenho do bom e do melhor!','Tudo testado e aprovado!'][Math.floor(Math.random()*3)];
   $('#talk').classList.remove('on');const el=$('#shop');el.innerHTML='';el.classList.add('on');renderShop();sfx.talk();
 }
 function closeShop(){shopOpen=false;const el=$('#shop');el.classList.remove('on');resetWinPos(el)}
+
+/* ================= ferreiro / enchant (Fase 5.4) ================= */
+// Server-authoritative de ponta a ponta: este bloco so LISTA o que o
+// personagem tem e MOSTRA os numeros que GEAR_DATA (fonte compartilhada,
+// mesma tabela que server.js usa) calcula -- nunca decide chance, custo,
+// sucesso ou stats por conta propria. shopTransact('enchant_item',...)
+// reusa o MESMO endpoint/mutex/protecao de posse da loja (nenhum endpoint
+// paralelo). expectedEnchant (mandado em toda tentativa) + bsBusy (guarda
+// client-side contra clique duplo) + a checagem real no servidor evitam
+// que um duplo-clique encadeie duas tentativas sem intencao.
+let bsOpen=false,bsSel=null,bsArm=0,bsBusy=false,bsMsg='';
+function bsItems(){
+  const out=[];
+  for(const s of EQ_KEYS){const it=P.eq[s];if(it&&GEAR_DATA.ENCHANTABLE_TYPES.has(it.type))out.push({it,loc:'eq',ref:s})}
+  P.bag.forEach((it,i)=>{if(GEAR_DATA.ENCHANTABLE_TYPES.has(it.type))out.push({it,loc:'bag',ref:i})});
+  return out;
+}
+function bsFind(uid){return bsItems().find(x=>x.it.uid===uid)||null}
+function openBlacksmith(){
+  if(!started||P.dead||traveling)return;
+  if(dlg)closeDlg();
+  closeInv();closeScr();closeMenu();closeShop();
+  bsOpen=true;bsSel=null;bsArm=0;
+  bsMsg=['Traga seu equipamento, vamos deixá-lo mais forte.','Enchant é risco, mas a recompensa vale a pena.','Aço forjado no fogo... e um pouco de sorte.'][Math.floor(Math.random()*3)];
+  $('#talk').classList.remove('on');const el=$('#blacksmith');el.innerHTML='';el.classList.add('on');renderBlacksmith();sfx.talk();
+}
+function closeBlacksmith(){bsOpen=false;const el=$('#blacksmith');el.classList.remove('on');resetWinPos(el)}
+function bsRowHtml(entry){
+  const it=entry.it,sel=bsSel===it.uid,rar=rarityOf(it);
+  return `<button class="srow${sel?' sel':''}" type="button" data-bp="${it.uid}"><span class="rs ${enchClass(it)}" style="--rc:${rar.c}"><img alt="" src="${iconURL(it)}">${enchBadge(it)}</span><span class="sbody"><span class="stag" style="background:${TYPE_TAG[it.type][1]}">${TYPE_TAG[it.type][0]}</span><b class="nm" style="color:${rar.c}">${it.enchant?'+'+it.enchant+' ':''}${esc(it.n)}</b><small>${rar.n} · Nv ${it.lv}${entry.loc==='eq'?' · equipado':''}</small></span></button>`;
+}
+// Compara stat ATUAL (it) contra o stat se a tentativa DER CERTO (after) --
+// os dois numeros sempre vem de GEAR_DATA.statsFor, nunca calculados aqui.
+function bsStatLines(it,after){
+  const rows=[],cmp=(lab,a,b,pct)=>{if(!a&&!b)return;rows.push(`<div class="st">${lab}: ${pct?Math.round(a*100)+'%':a} → ${pct?Math.round(b*100)+'%':b}</div>`)};
+  cmp('ATK',it.atk,after.atk||0);cmp('DEF',it.def,after.def||0);cmp('HP',it.hp,after.hp||0);cmp('Bloqueio',it.blk||0,after.blk||0,true);
+  return rows.join('');
+}
+function bsDetail(){
+  const entry=bsSel?bsFind(bsSel):null;
+  if(!entry)return `<div class="sub">Toque num equipamento para ver a chance, o custo e o ganho de encantar.</div>`;
+  const it=entry.it,rar=rarityOf(it),atMax=it.enchant>=GEAR_DATA.ENCHANT_MAX;
+  let body=`<div class="dtop"><span class="rs ${enchClass(it)}" style="--rc:${rar.c}"><img alt="" src="${iconURL(it)}">${enchBadge(it)}</span><div class="dinfo"><small style="color:${rar.c}">${rar.n}</small><div class="nm" style="color:${rar.c}">${it.enchant?'+'+it.enchant+' ':''}${esc(it.n)}</div><div class="sub">Nv ${it.lv} · atual +${it.enchant}</div></div></div>`;
+  if(atMax)return body+`<div class="sub">Este equipamento já está no nível máximo de encantamento (+10).</div>`;
+  const target=it.enchant+1,chance=GEAR_DATA.enchantChance(target),cost=GEAR_DATA.enchantCost(it.type,it.lv,target);
+  const after=GEAR_DATA.statsFor(it.type,it.lv,it.rarity,target);
+  const risky=target>=4,armed=bsArm>Date.now(),canPay=P.gold>=cost;
+  body+=`<div class="sub">Próximo: +${target}</div><div class="st">Chance: ${Math.round(chance*100)}%</div><div class="st">Custo: ${cost} moedas</div>`+bsStatLines(it,after);
+  // Fase 5.4: aviso obrigatorio a partir de +4 -- nunca escondido.
+  if(risky)body+=`<div class="dn" style="margin-top:4px">⚠ FALHA DESTRÓI O EQUIPAMENTO.</div>`;
+  if(risky&&armed)body+=`<div class="sub">Tem certeza? ${Math.round(chance*100)}% de chance -- se falhar, ${esc(it.n)} +${it.enchant} será destruída.</div>`;
+  body+=`<div class="dctl"><button class="rbtn buybtn${risky&&armed?' warn':''}" type="button" data-ba="do"${canPay?'':' disabled'}>${!canPay?'':coinImg()}<span>${!canPay?'Moedas insuficientes':risky&&armed?'Confirmar':'Encantar'}${canPay?' ('+cost+')':''}</span></button></div>`;
+  return body;
+}
+function renderBlacksmith(){
+  const el=$('#blacksmith'),sl0=el.querySelector('.slist'),sc=sl0?sl0.scrollTop:0;
+  const items=bsItems();
+  if(bsSel&&!items.some(x=>x.it.uid===bsSel))bsSel=null;
+  const rows=items.map(bsRowHtml).join('')||`<div class="sub" style="padding:14px;text-align:center">Nenhum equipamento encantável (arma, armadura, capa ou bota) na mochila ou equipado.</div>`;
+  el.innerHTML=`<i class="orn"></i><div class="rh"><div class="mface"><img alt="" src="${SPR.guarda.img}"></div><div class="ttl"><h3>Ferreiro</h3><small class="say">${esc(bsMsg)}</small></div><div class="coin"><img alt="" src="${iconURL('moeda')}"><span data-bind="gold">${P.gold}</span></div><button class="rx" type="button" data-x aria-label="Fechar">✕</button></div>
+  <div class="rbody fit shopb"><div class="slist">${rows}</div><div class="sdet">${bsDetail()}</div></div>`;
+  const sl1=el.querySelector('.slist');if(sl1)sl1.scrollTop=sc;
+  winSigStr=winSig();
+}
+async function bsDo(){
+  if(bsBusy||!bsSel)return;
+  const entry=bsFind(bsSel);if(!entry)return;
+  const it=entry.it,target=it.enchant+1,risky=target>=4;
+  if(it.enchant>=GEAR_DATA.ENCHANT_MAX)return;
+  // +4 ou mais exige um segundo toque de confirmação (mesmo padrao de
+  // "toque de novo" ja usado em Vender itens comuns/Redistribuir
+  // habilidades) -- +1/+2/+3 executa direto no primeiro toque.
+  if(risky&&bsArm<Date.now()){bsArm=Date.now()+4000;renderBlacksmith();setTimeout(()=>{if(bsOpen)renderBlacksmith()},4100);return}
+  bsArm=0;bsBusy=true;
+  const name=it.n,prevEnchant=it.enchant;
+  try{
+    const res=await shopTransact('enchant_item',{uid:bsSel,expectedEnchant:prevEnchant});
+    if(!res.ok){
+      bsMsg=res.error==='STALE_ENCHANT_STATE'?'Esse equipamento mudou -- veja de novo antes de tentar.':res.error==='MAX_ENCHANT'?'Esse equipamento já está no máximo.':(res.error||'Não foi possível concluir.');
+      renderBlacksmith();return;
+    }
+    const r=res.enchant;
+    if(r&&r.success){sfx.level();toast('Enchant realizado! '+name+' agora está +'+r.newEnchant+'.');bsMsg='Excelente! Fica cada vez mais forte.';bsSel=r.uid}
+    else if(r){sfx.hit();toast('Enchant falhou. '+name+' +'+prevEnchant+' foi destruída.');bsMsg='Que pena... acontece até com os melhores aços.';bsSel=null}
+    renderBlacksmith();
+  }finally{bsBusy=false}
+}
+$('#blacksmith').addEventListener('click',async e=>{
+  if(e.target.closest('[data-x]')){closeBlacksmith();return}
+  const bp=e.target.closest('[data-bp]');if(bp){bsSel=bp.dataset.bp;bsArm=0;renderBlacksmith();return}
+  const a=e.target.closest('[data-ba]');if(a&&!a.disabled&&a.dataset.ba==='do')bsDo();
+});
 function shopSay(m){shopMsg=m;renderShop()}
 function shopList(){
   if(shopTab==='buy'){const c=SHOP_CATS[shopCat][1];return SHOP_CATALOG.filter(e=>!c||(c==='stk'?e.kind==='stk':(e.kind==='gear'&&c.includes(e.type)))).map(e=>({id:e.id,e}))}
@@ -2326,7 +2442,7 @@ function shopRowData(r){
     if(e.kind==='gear'){const it=mkGear(e.type,e.lv,'basic'),lock=e.minLvl>P.lvl;return{id:r.id,it,name:it.n,icon:iconURL(it),tag:TYPE_TAG[e.type],sub:CLS.name+' · Nv '+e.minLvl+' · '+gearSummary(it),price:e.price,rc:rarityOf(it).c,dim:lock,lock:lock?'Nv '+e.minLvl:''}}
     const d=stkInfo(e.key);return{id:r.id,name:d[1],icon:iconURL(d[2]),tag:STK_TAG[e.key],sub:d[3],price:e.price,rc:null,stk:e.key}
   }
-  if(r.it)return{id:r.id,it:r.it,name:r.it.n,icon:iconURL(r.it),tag:TYPE_TAG[r.it.type],sub:gearSummary(r.it),price:r.price,rc:rarityOf(r.it).c};
+  if(r.it)return{id:r.id,it:r.it,name:(r.it.enchant?'+'+r.it.enchant+' ':'')+r.it.n,icon:iconURL(r.it),tag:TYPE_TAG[r.it.type],sub:gearSummary(r.it),price:r.price,rc:rarityOf(r.it).c};
   const d=stkInfo(r.stk);return{id:r.id,name:d[1],icon:iconURL(d[2]),tag:STK_TAG[r.stk],sub:'Você tem '+r.count,price:r.price,rc:null,stk:r.stk,count:r.count};
 }
 const coinImg=()=>`<img alt="" src="${iconURL('moeda')}">`;
@@ -3112,7 +3228,7 @@ function drawNpc(n){
   ctx.drawImage(n.img,Math.round(n.x-n.w/2),Math.round(n.y-n.h));
   let news=false;
   if(n.id==='aldea')news=P.quest===0||P.quest===2;
-  if(n.id==='mercador'||n.id==='sacerdotisa')news=false;
+  if(n.id==='mercador'||n.id==='sacerdotisa'||n.id==='ferreiro')news=false;
   const near=Math.hypot(n.x-P.x,n.y-P.y)<62;
   if(news||near){
     const bx=Math.round(n.x+8),by=Math.round(n.y-n.h-8+Math.sin(time*3)*1.5);
@@ -3406,7 +3522,7 @@ async function shopTransact(action,params){
     const r=await authRequest('/api/characters/'+CUR_CHAR.id+'/shop',{method:'POST',token:authToken(),body:Object.assign({action},params)});
     applyShopResult(r.character);
     if(Array.isArray(r.shopSold))shopSold=r.shopSold;
-    return{ok:true};
+    return{ok:true,enchant:r.enchant||null};
   }catch(e){return{ok:false,error:e.message||'Não foi possível concluir'}}
 }
 /* ---- recompensa de missão server-autoritativa ---- */
@@ -5763,8 +5879,8 @@ function frame(t){
   if(!running)return;
   update(dt);updFocus(dt);draw();
   hudT+=dt;if(hudT>.1){hudT=0;hud();
-    const nn=nearestNpc(),tb=$('#talk');tb.classList.toggle('on',!!nn&&!dlg&&!P.dead&&!uiBusy()&&!shopOpen);
-    if(nn)tb.textContent=nn.chest?'Abrir baú':nn.id==='mercador'?'Abrir loja':'Falar com '+nn.nome.split(' ')[0];
+    const nn=nearestNpc(),tb=$('#talk');tb.classList.toggle('on',!!nn&&!dlg&&!P.dead&&!uiBusy()&&!shopOpen&&!bsOpen);
+    if(nn)tb.textContent=nn.chest?'Abrir baú':nn.id==='mercador'?'Abrir loja':nn.id==='ferreiro'?'Abrir ferraria':'Falar com '+nn.nome.split(' ')[0];
     drawMini()}
 }
 
