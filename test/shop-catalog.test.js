@@ -10,7 +10,11 @@ const fs = require('node:fs');
 const S = require('../server.js');
 const D = require('../game-data/gear-data.js');
 
-const client = fs.readFileSync(require.resolve('../index.html'), 'utf8');
+// \r\n vs \n: o working tree deste repo normaliza pra CRLF em checkout
+// (core.autocrlf), entao qualquer comparacao de string literal aqui precisa
+// ignorar isso -- ja quebrou uma vez so por trocar de branch, sem nenhum
+// conteudo mudar.
+const client = fs.readFileSync(require.resolve('../index.html'), 'utf8').replace(/\r\n/g, '\n');
 
 test('index.html carrega game-data/gear-data.js antes do script principal (mesma fonte do servidor, nao uma copia)', () => {
   const scriptIdx = client.indexOf('<script src="/game-data/gear-data.js">');
