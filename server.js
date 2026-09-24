@@ -1886,6 +1886,7 @@ const MARKET_ERROR_MESSAGES = {
   WRONG_CLAIM_KIND: 'Tipo de retirada inválido.',
   BAG_FULL: 'Mochila cheia. Abra espaço e tente retirar de novo.',
   GOLD_CAP_WOULD_OVERFLOW: 'Retirar esse valor ultrapassaria o limite de moedas. Gaste um pouco e tente de novo.',
+  OPERATION_ID_CONFLICT: 'Esta identificação de compra já foi usada em outra operação.',
 };
 function marketErrorMessage(code) { return MARKET_ERROR_MESSAGES[code] || 'Não foi possível concluir. Tente novamente.'; }
 const OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1960,7 +1961,7 @@ async function handleMarket(req, res, pathname) {
 
     if (sub === '/claims' && req.method === 'GET') {
       const rows = await supabase('market_claims', {query:`?select=id,kind,item_json,gold_amount,reason,created_at&character_id=eq.${encodeURIComponent(charId)}&claimed_at=is.null&order=created_at.asc`});
-      json(res,200,{claims: rows.map(r => ({id:r.id, kind:r.kind, item: r.kind==='item'?{name:r.item_json?.n,type:r.item_json?.type,rarity:r.item_json?.rarity,enchant:r.item_json?.enchant}:null, goldAmount:r.gold_amount, reason:r.reason, createdAt:r.created_at}))}); return true;
+      json(res,200,{claims: rows.map(r => ({id:r.id, kind:r.kind, item: r.kind==='item'?{name:r.item_json?.n,type:r.item_json?.type,level:r.item_json?.lv,rarity:r.item_json?.rarity,enchant:r.item_json?.enchant,atk:r.item_json?.atk||0,def:r.item_json?.def||0,hp:r.item_json?.hp||0,blk:r.item_json?.blk||0}:null, goldAmount:r.gold_amount, reason:r.reason, createdAt:r.created_at}))}); return true;
     }
 
     if (sub === '/list' && req.method === 'POST') {

@@ -269,3 +269,29 @@ test('personagem de outra conta nao acessa mercado de outro (404)', { skip: !has
   const r = await httpJson(srv, 'GET', `/api/market/${a.charId}/mine`, null, b.token);
   assert.equal(r.status, 404);
 });
+
+const unsafeIntegration = process.env.SUPABASE_TEST_SAFE !== '1';
+test('concorrencia real: A/B simultaneos comprando a mesma listing produzem exatamente um sucesso', { skip: unsafeIntegration }, async () => {
+  const item=fakeItem(),seller=await newChar(0,[item]),a=await newChar(1000,[]),b=await newChar(1000,[]);
+  const listed=await httpJson(srv,'POST',`/api/market/${seller.charId}/list`,{itemUid:item.uid,price:100},seller.token),listingId=listed.json.listing.id;
+  const results=await Promise.all([a,b].map(x=>httpJson(srv,'POST',`/api/market/${x.charId}/buy`,{listingId,operationId:crypto.randomUUID()},x.token)));
+  assert.deepEqual(results.map(x=>x.status).sort(),[200,400]);
+});
+
+test('concorrencia real: buy/cancel deixa um unico desfecho e nunca duplica item', { skip: unsafeIntegration }, async () => {
+  const item=fakeItem(),seller=await newChar(0,[item]),buyer=await newChar(1000,[]);
+  const listed=await httpJson(srv,'POST',`/api/market/${seller.charId}/list`,{itemUid:item.uid,price:100},seller.token),listingId=listed.json.listing.id;
+  const results=await Promise.all([
+    httpJson(srv,'POST',`/api/market/${buyer.charId}/buy`,{listingId,operationId:crypto.randomUUID()},buyer.token),
+    httpJson(srv,'POST',`/api/market/${seller.charId}/cancel`,{listingId},seller.token),
+  ]);
+  assert.equal(results.filter(x=>x.status===200).length,1);
+});
+
+test('operationId nao pode ser reutilizado por outro comprador ou listing', { skip: unsafeIntegration }, async () => {
+  const one=fakeItem(),two=fakeItem(),seller=await newChar(0,[one,two]),a=await newChar(1000,[]),b=await newChar(1000,[]),operationId=crypto.randomUUID();
+  const l1=await httpJson(srv,'POST',`/api/market/${seller.charId}/list`,{itemUid:one.uid,price:100},seller.token);
+  const l2=await httpJson(srv,'POST',`/api/market/${seller.charId}/list`,{itemUid:two.uid,price:100},seller.token);
+  assert.equal((await httpJson(srv,'POST',`/api/market/${a.charId}/buy`,{listingId:l1.json.listing.id,operationId},a.token)).status,200);
+  assert.equal((await httpJson(srv,'POST',`/api/market/${b.charId}/buy`,{listingId:l2.json.listing.id,operationId},b.token)).status,400);
+});
