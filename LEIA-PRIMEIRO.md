@@ -1135,10 +1135,48 @@ Novo botão "Ranking" no menu principal, com abas Nível/PvP/TvT/World Boss/Best
 
 ## Migrações de banco
 
-Duas migrations novas: `20260924221254_add_rank_stats_table_and_functions.sql` (tabela + backfill + 3 funções RPC: `rank_stats_set_level_xp`, `rank_stats_bump`, `rank_stats_sync_bestiary_discovered`) e `20260924221951_add_guild_rank_view.sql` (view agregada de guilda). Ambas aditivas, sem `drop`, sem apagar dado existente.
+Duas migrations novas: `20260924221254_add_rank_stats_table_and_functions.sql` (tabela + backfill + 3 funções RPC: `rank_stats_set_level_xp`, `rank_stats_bump`, `rank_stats_sync_bestiary_discovered`) e `20260924221408_add_guild_rank_view.sql` (view agregada de guilda). Ambas aditivas, sem `drop`, sem apagar dado existente.
 
 ## Limitações conhecidas
 
 - PvP de campo aberto sempre mostra 0 kills/deaths (ver seção acima) — limitação arquitetural pré-existente, não desta fase.
 - Cache de 45s significa que uma mudança de posição pode levar até 45s pra aparecer pra outro jogador olhando o ranking — aceito explicitamente pelo pedido de não recalcular a cada hit.
 - Sem sistema de temporada/season nesta fase — ranking é sempre "desde sempre" (cumulativo).
+
+# FASE 5.11 — MERCADO / LEILÃO
+
+## Arquitetura e autoridade
+
+O Mercado é um Auction House backend-first. O navegador envia somente intenção (`itemUid`, `price`, `listingId` e `operationId`); sessão e personagem são resolvidos por `server.js`, e toda mutação econômica ocorre em RPC transacional no Postgres. As tabelas `market_listings`, `market_transactions` e `market_claims` têm RLS habilitado e zero policies: não existe acesso direto do cliente Supabase.
+
+As 16 RPCs privilegiadas das Fases 5.8–5.11 tiveram `EXECUTE` revogado de `PUBLIC`, `anon` e `authenticated` pela migration `20260924232253_harden_server_only_rpc_permissions.sql`; somente `service_role` executa. Todas usam `SECURITY DEFINER` com `search_path = public, pg_temp` fixo. A mesma migration adiciona índices nas FKs novas apontadas pelo Performance Advisor e preserva os índices recém-criados, mesmo ainda sem uso de produção.
+
+## Escrow, UID e anúncio
+
+`market_list_item` bloqueia a linha real de `characters`, encontra o UID exclusivamente na mochila canônica e move o objeto JSON inteiro para escrow na mesma transação que cria o anúncio. O cliente nunca fornece rarity, enchant ou stats. Se a inserção falhar, a transação inteira é revertida e o item continua com o vendedor. Item equipado ou UID inexistente é rejeitado; o índice parcial `uq_market_listings_active_uid` impede duas listings ativas do mesmo item físico.
+
+O UID nunca é regenerado em venda, compra, cancelamento, expiração ou claim. Legendary e item +10 preservam exatamente o mesmo objeto canônico.
+
+## Compra, taxa e idempotência
+
+`market_buy` bloqueia a listing com `FOR UPDATE`, rejeita status não ativo, self-buy e saldo insuficiente, e trava comprador/vendedor em ordem determinística. A taxa oficial é 5% (`floor(price * 0.05)`): uma venda de 1.000 moedas gera taxa 50 e líquido 950. O cálculo válido é o SQL; o cliente só mostra a prévia.
+
+`operation_id` possui índice único. O wrapper de hardening usa advisory lock por operationId e exige que um retry corresponda ao mesmo comprador e à mesma listing: retry idêntico devolve a transação original; reutilização cruzada retorna `OPERATION_ID_CONFLICT`, sem débito ou transferência. Corridas buy/buy, buy/cancel e buy/expire convergem para um único estado porque operam sobre a mesma linha bloqueada.
+
+## Claims, cancelamento e expiração
+
+Se a mochila do comprador estiver cheia, o item vira claim persistente. Se o crédito do vendedor ultrapassaria o teto de 500.000 moedas, o valor líquido inteiro vira claim de ouro — nunca há truncamento silencioso. Claims são bloqueados com `FOR UPDATE`; retirada dupla produz um único efeito. Claim de item com bag cheia e claim de ouro com overflow permanecem pendentes.
+
+Cancelar só é permitido ao vendedor de listing ativa e sempre devolve o item por claim, independentemente do espaço da mochila. Listings vencem em 72 horas; o sweep de 60s chama `market_expire_listings`, que altera apenas linhas ainda ativas e cria exatamente um claim por item.
+
+## Busca, privacidade e interface
+
+Busca pública suporta nome, tipo, nível mínimo/máximo, rarity, enchant mínimo/máximo e preço mínimo/máximo; ordena por menor preço, maior preço, mais recente ou maior enchant, com páginas de 20. A resposta pública contém apenas dados de exibição do item e nome do vendedor. Histórico autenticado retorna só transações relacionadas ao personagem e nunca inclui `user_id`, email, token ou save.
+
+O menu principal possui **Mercado**, com cinco abas utilizáveis: **Comprar**, **Meus anúncios**, **Anunciar**, **Itens a retirar** e **Histórico**. Cards mostram nome, rarity, enchant, nível, stats, preço e vendedor. Compra e anúncio exigem confirmação; anúncio mostra taxa e líquido. Após mutações, o cliente recarrega o personagem real do backend para refletir bag e ouro sem confiar em cálculo local.
+
+## Concorrência, testes e limitações
+
+Cobertura pura/estrutural valida preço, taxa, filtros, grants server-only, locks, vínculo do operationId, índices e presença completa da UI. Os testes de integração cobrem ownership, UID forjado, item equipado, escrow, busca/paginação, cancelamento, compra, self-buy, saldo insuficiente, retry idempotente, bag cheia, claim, preservação de UID/rarity/enchant/Legendary +10, histórico e privacidade. Casos destrutivos de concorrência real só rodam com `SUPABASE_TEST_SAFE=1`; sem ambiente dedicado ficam explicitamente skipped e nunca usam a economia oficial.
+
+Limitações: o sweep de expiração depende do processo Render estar ativo (é idempotente e recupera vencidos no próximo ciclo); não há trading direto, mail, Cash Shop ou temporadas. As tabelas/RPCs persistem no Supabase, mas cache de Ranking e chats de Guilda continuam em memória conforme documentado nas fases próprias.
