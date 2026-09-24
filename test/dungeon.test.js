@@ -128,12 +128,17 @@ test('pickTier: sempre retorna um tier legado valido (1-5) mapeavel via GEAR_DAT
 
 test('rollDungeonTrashLoot/rollDungeonBossLoot: nunca incluem XP (masmorra nao concede XP, comportamento preservado)', () => {
   const trash = S.rollDungeonTrashLoot(20, 'guerreiro');
-  const boss = S.rollDungeonBossLoot('guerreiro');
+  const boss = S.rollDungeonBossLoot('guerreiro', 40);
   assert.equal('xp' in trash, false);
   assert.equal('xp' in boss, false);
   assert.ok(boss.gold > 0);
   assert.equal(boss.gem, 6);
-  assert.equal(boss.items.length, 3, 'chefe sempre da 3 itens');
+  // Fase 5.3: chefe de masmorra nao garante mais 3 itens Basic (era
+  // compatibilidade temporaria da Fase 5.2) -- agora no maximo 1 item, e so
+  // pode ser Legendary (rollGearDrop com boss:true). Cobertura
+  // probabilistica completa com rng controlado fica em loot-rarity.test.js.
+  assert.ok(boss.items.length <= 1, 'no maximo 1 item de chefe de masmorra');
+  for (const it of boss.items) assert.equal(it.rarity, 'legendary');
 });
 
 test('DUNGEON_GEN.dungeonLayout: determinístico (mesmo seed = mesmo layout, seeds diferentes tendem a diferir)', () => {
