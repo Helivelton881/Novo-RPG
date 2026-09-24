@@ -98,4 +98,23 @@ async function adminPatchCharacter(id, patch) {
   return rows[0];
 }
 
-module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter };
+// Chama uma funcao RPC do Postgres direto (mesmo mecanismo que server.js
+// usa pra guild_*/bestiary_record_kill/etc, so que com a service-role key
+// direto do teste). Usado pra simular um efeito server-side que ja tem
+// cobertura de integracao real em outro teste (ex.: um abate confirmado
+// via mob_damage) sem reconstruir o fluxo de combate inteiro so pra
+// preparar estado -- mesmo espirito de adminPatchCharacter.
+async function adminRpc(name, body) {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const r = await fetch(`${url}/rest/v1/rpc/${name}`, {
+    method: 'POST',
+    headers: { apikey: key, Authorization: `Bearer ${key}`, 'content-type': 'application/json', prefer: 'return=representation' },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error('adminRpc ' + name + ' falhou: ' + JSON.stringify(data));
+  return Array.isArray(data) ? data[0] : data;
+}
+
+module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter, adminRpc };
