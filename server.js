@@ -13,6 +13,7 @@ const WORLD_BOSS = require('./game-data/world-boss.js');
 const TVT = require('./game-data/tvt.js');
 const GUILD = require('./game-data/guild.js');
 const BESTIARY = require('./game-data/bestiary.js');
+const RANKINGS = require('./game-data/rankings.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -985,6 +986,7 @@ async function handleCharacters(req, res, pathname) {
         if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
         return {status:200, body:{character: rows[0]}};
       });
+      if (result.status === 200) syncRankLevelXp(id, result.body.character.lvl, result.body.character.save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
       json(res, result.status, result.body); return true;
     }
 
@@ -1299,6 +1301,7 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
       if (questInfo) Object.assign(pushed, advanceQuestOnKill(save, questInfo.type, questInfo.boss, questInfo.lvl));
       const { granted, lost } = drop ? applyGearDrops(save, lvl, [drop.item]) : { granted: null, lost: null };
       await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
+      syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
       const msg = {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)};
       // bag/eq so vao junto quando um item de fato mudou o save (a maioria
       // dos abates nao dropa nada -- nao vale mandar o inventario inteiro
@@ -1724,7 +1727,8 @@ function sweepExpiredGuildInvites() {
 async function creditBestiaryKill(charId, monsterId) {
   if (!charId || !BESTIARY.isValidMonsterId(monsterId)) return;
   const result = await rpc('bestiary_record_kill', {p_character_id:charId, p_monster_id:monsterId});
-  if (!result.ok) console.error('bestiary_credit_error', charId, monsterId, result.error);
+  if (!result.ok) { console.error('bestiary_credit_error', charId, monsterId, result.error); return; }
+  syncRankBestiaryDiscovered(charId).catch(err=>console.error('rank_stats_bestiary_error',err.message));
 }
 const BESTIARY_ID_RE = /^\/api\/bestiary\/([0-9a-fA-F-]{8,36})$/;
 async function handleBestiary(req, res, pathname) {
@@ -1754,6 +1758,101 @@ async function handleBestiary(req, res, pathname) {
     if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Bestiário ainda não configurado no servidor.':'Não foi possível concluir. Tente novamente.'});
     return true;
   }
+}
+
+// ===== Fase 5.10: Rankings =====
+// Estatisticas agregadas proprias (character_rank_stats), nunca uma
+// query completa em characters.save a cada abertura. Atualizadas pelo
+// SERVIDOR nos momentos reais (nivel/XP muda, TvT termina, World Boss
+// termina, Bestiario descobre) -- nunca pelo cliente. PvP de campo aberto
+// nao tem confirmacao server-side de abate (limitacao arquitetural ja
+// documentada desde a Fase 1 -- o alvo aplica a propria mitigacao
+// localmente); pvp_kills/pvp_deaths existem na tabela pra uso futuro mas
+// ficam sempre 0 nesta fase, nunca um numero inventado ou auto-reportado
+// pelo cliente.
+async function syncRankLevelXp(charId, lvl, xp) {
+  if (!charId) return;
+  const result = await rpc('rank_stats_set_level_xp', {p_character_id:charId, p_level:Math.round(Number(lvl)||1), p_xp:Math.round(Number(xp)||0)});
+  if (!result.ok) console.error('rank_stats_level_error', charId, result.error);
+}
+async function bumpRankStat(charId, field, delta) {
+  if (!charId) return;
+  const result = await rpc('rank_stats_bump', {p_character_id:charId, p_field:field, p_delta:delta==null?1:delta});
+  if (!result.ok) console.error('rank_stats_bump_error', charId, field, result.error);
+}
+async function syncRankBestiaryDiscovered(charId) {
+  if (!charId) return;
+  const result = await rpc('rank_stats_sync_bestiary_discovered', {p_character_id:charId});
+  if (!result.ok) console.error('rank_stats_bestiary_error', charId, result.error);
+}
+const rankCache = RANKINGS.createRankCache();
+async function fetchRankRows(type) {
+  if (type === 'guild') {
+    const rows = await supabase('guild_rank_view', {query:'?select=guild_id,name,tag,member_count,total_level,tvt_wins,world_boss_kills&limit=500'});
+    return rows.map(r => ({id:r.guild_id, name:r.name, tag:r.tag, memberCount:r.member_count, totalLevel:r.total_level, tvtWins:r.tvt_wins, worldBossKills:r.world_boss_kills}));
+  }
+  const rows = await supabase('character_rank_stats', {query:'?select=character_id,level,xp,pvp_kills,pvp_deaths,tvt_wins,tvt_losses,tvt_draws,tvt_kills,tvt_deaths,world_boss_kills,world_boss_participations,bestiary_discovered,characters(name,cls,lvl)&limit=500'});
+  return rows.map(r => {
+    const c = Array.isArray(r.characters) ? r.characters[0] : r.characters;
+    return {
+      id:r.character_id, name:c?c.name:'?', cls:c?c.cls:'guerreiro',
+      level:r.level, xp:r.xp, pvpKills:r.pvp_kills, pvpDeaths:r.pvp_deaths,
+      tvtWins:r.tvt_wins, tvtLosses:r.tvt_losses, tvtDraws:r.tvt_draws, tvtKills:r.tvt_kills, tvtDeaths:r.tvt_deaths,
+      worldBossKills:r.world_boss_kills, worldBossParticipations:r.world_boss_participations,
+      bestiaryDiscovered:r.bestiary_discovered,
+    };
+  });
+}
+async function rankingsPage(type, page) {
+  const cacheKey = type + ':' + page;
+  const cached = rankCache.get(cacheKey);
+  if (cached) return cached;
+  const rows = RANKINGS.sortForType(type, await fetchRankRows(type));
+  const withGuildTag = type === 'guild' ? rows : await attachGuildTags(rows);
+  const result = RANKINGS.paginate(withGuildTag, page, RANKINGS.RANK_PAGE_SIZE);
+  rankCache.set(cacheKey, result);
+  return result;
+}
+// Ranking de personagem mostra a tag da guilda quando existir (pedido
+// explicito da UI) -- uma unica query extra por pagina (nunca N+1 por
+// linha), so pros ids que realmente aparecem na pagina certa.
+async function attachGuildTags(rows) {
+  if (!rows.length) return rows;
+  const ids = rows.map(r => r.id);
+  let tagById = new Map();
+  try {
+    const gm = await supabase('guild_members', {query:`?select=character_id,guilds(tag)&character_id=in.(${ids.join(',')})`});
+    tagById = new Map(gm.map(x => [x.character_id, (Array.isArray(x.guilds)?x.guilds[0]:x.guilds)?.tag || null]));
+  } catch (err) { console.error('rankings_guild_tag_error', err.message); }
+  return rows.map(r => ({...r, guildTag: tagById.get(r.id) || null}));
+}
+function handleRankings(req, res, pathname) {
+  if (pathname !== '/api/rankings' || req.method !== 'GET') return false;
+  const url = new URL(req.url, 'http://localhost');
+  const type = String(url.searchParams.get('type') || 'level');
+  const page = Math.max(1, Math.round(Number(url.searchParams.get('page')) || 1));
+  if (!RANKINGS.isValidRankType(type)) { json(res,400,{error:'Tipo de ranking inválido'}); return true; }
+  rankingsPage(type, page).then(result => {
+    // Resposta publica: so campos de exibicao (nome/classe/nivel/tag de
+    // guilda/estatisticas publicas). Nunca character_id de outro tipo de
+    // identidade, userId, token ou o save inteiro.
+    const items = result.items.map((r, idx) => {
+      const position = (result.page - 1) * result.pageSize + idx + 1;
+      if (type === 'guild') return {position, name:r.name, tag:r.tag, memberCount:r.memberCount, totalLevel:r.totalLevel, tvtWins:r.tvtWins, worldBossKills:r.worldBossKills};
+      const base = {position, name:r.name, cls:r.cls, guildTag:r.guildTag||null, level:r.level};
+      if (type === 'level') return {...base, xp:r.xp};
+      if (type === 'pvp') return {...base, kills:r.pvpKills, deaths:r.pvpDeaths, kd:RANKINGS.kdRatio(r.pvpKills,r.pvpDeaths)};
+      if (type === 'tvt') return {...base, wins:r.tvtWins, losses:r.tvtLosses, draws:r.tvtDraws, kills:r.tvtKills, deaths:r.tvtDeaths, kd:RANKINGS.kdRatio(r.tvtKills,r.tvtDeaths)};
+      if (type === 'world_boss') return {...base, kills:r.worldBossKills, participations:r.worldBossParticipations};
+      if (type === 'bestiary') return {...base, discovered:r.bestiaryDiscovered};
+      return base;
+    });
+    json(res,200,{type, page:result.page, pageSize:result.pageSize, total:result.total, totalPages:result.totalPages, items});
+  }).catch(err => {
+    console.error('rankings_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Rankings ainda não configurados no servidor.':'Não foi possível concluir. Tente novamente.'});
+  });
+  return true;
 }
 
 // ===== Fases 5.5/5.6: EventManager + World Boss instanciado =====
@@ -1804,7 +1903,7 @@ async function grantWorldBossRewards(instance){
   const ordered=[...eligible].sort(()=>secureRandom()-.5);let legendaryWinner=null,legendaryItem=null;
   for(const candidate of ordered){try{const loaded=await loadWorldBossCharacter(candidate.userId,candidate.charId);if(loaded&&loaded.save.bag.length<24){const types=DROP_TYPES_BY_CLASS[candidate.cls]||DROP_TYPES_BY_CLASS.guerreiro;const type=types[crypto.randomInt(0,types.length)];legendaryItem=createGear(type,gearLevelForMob(candidate.lvl),'legendary');legendaryWinner=candidate;break}}catch{}}
   for(const member of eligible){
-    try{await withCharLock(member.charId,async()=>{const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded)return;const {row,save}=loaded;if(save.wbRewards.includes(instance.eventId))return;const leveled=applyXpGain(save,row.lvl,WORLD_BOSS.WORLD_BOSS_REWARD.xp);save.xp=leveled.xp;save.lvl=leveled.lvl;save.gold=Math.min(500000,save.gold+WORLD_BOSS.WORLD_BOSS_REWARD.gold);save.gem=Math.min(5000,save.gem+WORLD_BOSS.WORLD_BOSS_REWARD.gem);let won=null;if(legendaryWinner&&member.charId===legendaryWinner.charId)won=grantItem(save,leveled.lvl,legendaryItem);save.wbRewards.push(instance.eventId);save.wbRewards=save.wbRewards.slice(-12);await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});member.rewarded=true;sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl,bag:save.bag,eq:save.eq,legendary:won?{n:won.n,rarity:won.rarity,enchant:won.enchant}:null})})}catch(err){console.error('world_boss_reward_error',member.charId,err.message)}
+    try{await withCharLock(member.charId,async()=>{const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded)return;const {row,save}=loaded;if(save.wbRewards.includes(instance.eventId))return;const leveled=applyXpGain(save,row.lvl,WORLD_BOSS.WORLD_BOSS_REWARD.xp);save.xp=leveled.xp;save.lvl=leveled.lvl;save.gold=Math.min(500000,save.gold+WORLD_BOSS.WORLD_BOSS_REWARD.gold);save.gem=Math.min(5000,save.gem+WORLD_BOSS.WORLD_BOSS_REWARD.gem);let won=null;if(legendaryWinner&&member.charId===legendaryWinner.charId)won=grantItem(save,leveled.lvl,legendaryItem);save.wbRewards.push(instance.eventId);save.wbRewards=save.wbRewards.slice(-12);await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});member.rewarded=true;syncRankLevelXp(member.charId,leveled.lvl,save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));bumpRankStat(member.charId,'world_boss_kills',1).catch(()=>{});bumpRankStat(member.charId,'world_boss_participations',1).catch(()=>{});sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl,bag:save.bag,eq:save.eq,legendary:won?{n:won.n,rarity:won.rarity,enchant:won.enchant}:null})})}catch(err){console.error('world_boss_reward_error',member.charId,err.message)}
   }
 }
 function finishWorldBossInstance(instance,reason){
@@ -1889,6 +1988,10 @@ async function grantTvtRewards(instance){
         save.tvtRewards.push(instance.eventId);save.tvtRewards=save.tvtRewards.slice(-12);
         await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});
         member.rewarded=true;
+        syncRankLevelXp(member.charId,leveled.lvl,save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
+        bumpRankStat(member.charId,outcome==='win'?'tvt_wins':outcome==='loss'?'tvt_losses':'tvt_draws',1).catch(()=>{});
+        if(member.kills)bumpRankStat(member.charId,'tvt_kills',member.kills).catch(()=>{});
+        if(member.deaths)bumpRankStat(member.charId,'tvt_deaths',member.deaths).catch(()=>{});
         sendToWorldBossMember(member,{type:'tvt_reward',outcome,gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl});
       });
     }catch(err){console.error('tvt_reward_error',member.charId,err.message)}
@@ -2051,6 +2154,7 @@ const server = http.createServer(async (req, res) => {
   if (await handleParty(req, res, pathname)) return;
   if (await handleGuild(req, res, pathname)) return;
   if (await handleBestiary(req, res, pathname)) return;
+  if (handleRankings(req, res, pathname)) return;
   if (handleEvents(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
