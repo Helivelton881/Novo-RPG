@@ -9,7 +9,7 @@ const EVENT_CONFIG = Object.freeze({
   announcementMinutes: Object.freeze([15, 5, 1]),
   scheduleSlots: 6,
   types: Object.freeze({
-    world_boss: Object.freeze({label:'World Boss', registrationMode:'party4', playable:false}),
+    world_boss: Object.freeze({label:'World Boss', registrationMode:'party4', playable:true}),
     team_vs_team: Object.freeze({label:'Team vs Team', registrationMode:'individual', playable:false}),
   }),
 });
@@ -91,6 +91,22 @@ class EventManager {
     if(existing)return{ok:true,alreadyRegistered:true,event,registration:existing};
     const registration={userId:player.userId,charId:player.charId,name:player.name,registeredAt:now};entries.set(player.charId,registration);
     return{ok:true,alreadyRegistered:false,event,registration};
+  }
+  registerGroup(group,eventId,now=this.now()){
+    if(!group||!group.groupId||!Array.isArray(group.members)||!group.members.length)return{ok:false,error:'INVALID_GROUP'};
+    const event=this.publicEvent(scheduleAfter(now,2,this.config).find(e=>e.id===eventId),now);
+    if(!event)return{ok:false,error:'EVENT_NOT_FOUND'};if(!event.playable)return{ok:false,error:'EVENT_UNAVAILABLE'};if(event.status!=='registration')return{ok:false,error:'REGISTRATION_CLOSED'};
+    if(!this.registrations.has(event.id))this.registrations.set(event.id,new Map());const entries=this.registrations.get(event.id);
+    const existing=[...entries.values()].find(r=>r.groupId===group.groupId);if(existing)return{ok:true,alreadyRegistered:true,event,registration:existing};
+    for(const member of group.members)if(entries.has(member.charId))return{ok:false,error:'CHAR_ALREADY_REGISTERED'};
+    const registration={...group,registeredAt:now};for(const member of group.members)entries.set(member.charId,registration);
+    return{ok:true,alreadyRegistered:false,event,registration};
+  }
+  unregisterGroup(player,eventId,now=this.now()){
+    if(!player||!player.authed||!player.userId)return{ok:false,error:'AUTH_REQUIRED'};const event=this.publicEvent(scheduleAfter(now,2,this.config).find(e=>e.id===eventId),now);
+    if(!event)return{ok:false,error:'EVENT_NOT_FOUND'};if(event.status!=='registration')return{ok:false,error:'REGISTRATION_CLOSED'};const entries=this.registrations.get(event.id);
+    if(!entries)return{ok:true,removed:false,event};const registration=[...entries.values()].find(r=>r.ownerUserId===player.userId);if(!registration)return{ok:false,error:'PARTY_LEADER_REQUIRED'};
+    for(const member of registration.members)entries.delete(member.charId);return{ok:true,removed:true,event,groupId:registration.groupId,members:registration.members};
   }
   unregister(player,eventId,now=this.now()){
     if(!player||!player.authed||!player.userId||!player.charId)return{ok:false,error:'AUTH_REQUIRED'};
