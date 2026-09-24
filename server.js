@@ -8,6 +8,7 @@ const bcrypt = require('bcryptjs');
 const { WebSocketServer, WebSocket } = require('ws');
 const GEAR_DATA = require('./game-data/gear-data.js');
 const DUNGEON_GEN = require('./game-data/dungeon-generation.js');
+const EVENT_DATA = require('./game-data/event-manager.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -1461,6 +1462,24 @@ function broadcastMap(map, payload) {
   for(const [ws,p] of clients) if(p.map===map&&ws.readyState===WebSocket.OPEN) ws.send(data);
 }
 
+// ===== Fase 5.5: EventManager (agenda/lifecycle em memoria) =====
+// Os dois tipos oficiais permanecem feature-gated como nao jogaveis. Fases
+// futuras registram handlers; este modulo nunca altera save/economia/mapa.
+const eventManager = new EVENT_DATA.EventManager({
+  announce: payload => broadcast(payload),
+  log: (name, event) => console.log(name, event.id),
+});
+function eventStatePayload(player,now=Date.now()) {
+  const state={type:'event_state',...eventManager.snapshot(now)},event=state.current,entries=event&&eventManager.registrations.get(event.id);
+  if(player&&player.authed&&player.charId)state.registration={eventId:event.id,registered:!!entries&&entries.has(player.charId)};
+  return state;
+}
+function handleEvents(req,res,pathname){
+  if(pathname!=='/api/events/status')return false;
+  if(req.method!=='GET'){json(res,405,{error:'Método não permitido'});return true}
+  json(res,200,eventManager.snapshot(Date.now()));return true;
+}
+
 function mapState(id) {
   let state=maps.get(id);
   if(!state){state={id,mobs:new Map(),hitGuard:new Map(),pvpGuard:new Map()};maps.set(id,state)}
@@ -1562,6 +1581,7 @@ const server = http.createServer(async (req, res) => {
   if (await handleCharacters(req, res, pathname)) return;
   if (await handleFriends(req, res, pathname)) return;
   if (await handleParty(req, res, pathname)) return;
+  if (handleEvents(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
   if (!file.startsWith(ROOT + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
@@ -1628,6 +1648,7 @@ async function handleWsJoin(ws, msg) {
     clients.set(ws, p);
     if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
     send(ws, {type:'welcome', id:p.id, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
+    send(ws, eventStatePayload(p));
     broadcast({type:'player_join', player:publicPlayer(p)}, ws);
   } finally { joining.delete(ws); }
 }
@@ -1675,7 +1696,17 @@ wss.on('connection', ws => {
     let p = clients.get(ws);
     if (msg.type === 'join' && !p) { await handleWsJoin(ws, msg); return; }
     if (!p) return;
-    if (msg.type === 'state') {
+    if (msg.type === 'event_status') {
+      send(ws,eventStatePayload(p));
+    } else if (msg.type === 'event_register') {
+      const result=eventManager.register(p,cleanText(msg.eventId,96));
+      send(ws,{type:'event_registration',action:'register',serverNow:Date.now(),...result});
+      send(ws,eventStatePayload(p));
+    } else if (msg.type === 'event_unregister') {
+      const result=eventManager.unregister(p,cleanText(msg.eventId,96));
+      send(ws,{type:'event_registration',action:'unregister',serverNow:Date.now(),...result});
+      send(ws,eventStatePayload(p));
+    } else if (msg.type === 'state') {
       const map = cleanText(msg.map,24);
       if (!ALLOWED_MAP.test(map)) return;
       // Instancia de masmorra (`_d#id`): so pode "continuar" na que o
@@ -1854,6 +1885,10 @@ setInterval(()=>{
   const now=Date.now();
   for(const state of maps.values())for(const mob of state.mobs.values())if(mob.dead&&mob.respawnAt&&now>=mob.respawnAt){mob.dead=false;mob.hp=mob.maxhp;mob.respawnAt=0;mob.x=Number.isFinite(mob.sx)?mob.sx:(Number(mob.x)||0);mob.y=Number.isFinite(mob.sy)?mob.sy:(Number(mob.y)||0);mob.state='idle';mob.tgt=null;mob.cd=0;mob.ret=0;mob.t=0;mob.hit=false;broadcastMap(state.id,{type:'mob_state',map:state.id,mob,killerId:null})}
   dungeonCleanupTick();
+},1000).unref();
+
+setInterval(()=>{
+  eventManager.tick(Date.now());
 },1000).unref();
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
@@ -2613,4 +2648,6 @@ module.exports = {
   grantItem, gearLevelForMob, rollGearDrop, applyGearDrops, GEAR_DROP_RATES, DROP_TYPES_BY_CLASS,
   // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   rollEnchantSuccess, applyEnchant, attemptEnchant,
+  // Fase 5.5 -- agenda/lifecycle puro e manager runtime (sem Supabase):
+  EVENT_DATA, eventManager, eventStatePayload,
 };
