@@ -789,3 +789,51 @@ Limitações intencionais: inscrições somem em restart; não há histórico; n
 ## Próxima fase
 
 Fase 5.6 — World Boss, conectado ao EventManager da Fase 5.5 sem reescrever agenda, countdown, anúncios ou inscrições.
+
+# FASE 5.6 — WORLD BOSS
+
+## Agenda, inscrição e Party
+
+O World Boss agora é o único evento jogável: continua nos horários oficiais 00:00, 04:00, 08:00, 12:00, 16:00 e 20:00 de `America/Sao_Paulo`, com inscrição nos 15 minutos anteriores e anúncios em 15/5/1 minuto. O Team vs Team permanece `playable:false` e **Em breve**.
+
+Somente o líder pode inscrever uma Party real com exatamente quatro membros. O servidor deriva a composição por `memberParty`/`parties`, encontra o personagem autenticado ativo de cada conta, rejeita seleção ambígua, anônimo, membro offline, char duplicado e mochila sem capacidade segura. A inscrição cria um snapshot imutável de `partyCode`, dono, evento e quatro identidades server-side; pedido repetido é idempotente e o cancelamento do líder remove e atualiza os quatro membros.
+
+## Instâncias e Arena do Titã
+
+No início, o servidor revalida os quatro membros e recarrega cada personagem do Supabase. Cada grupo válido recebe uma `WorldBossInstance` independente, com mapa curto `wb#<evento>#<party>`, boss e HP próprios, posições anteriores, contribuição e estado de recompensa. `WORLD_BOSS_MAP_RE` permite somente esse formato e uma mensagem `state` não permite entrar na arena de outro grupo.
+
+A Arena do Titã é fechada, ampla, usa apenas tiles originais e nasce no cliente a partir do teleporte server-driven. O **Titã Ancestral** usa o tipo exclusivo `ancient_titan`; provisoriamente reutiliza o sprite original do Senhor das Chamas em escala 2,15x, mantendo identidade lógica, hitbox e HUD próprios.
+
+## Snapshot, DPS, HP e TTK
+
+`combatSnapshot` deriva classe, nível, skills, ataque, defesa, HP, block e equipamento canônico, incluindo rarity e enchant. O mesmo snapshot congelado calibra e executa a luta: trocar equipamento depois não reduz HP para então atacar com atributos maiores.
+
+`estimateWorldBossDps` soma ataque básico e skills ofensivas legítimas pelos cooldowns reais. `calculateWorldBossHp` usa o DPS de referência total da Party multiplicado por 300 segundos, com limites finitos e positivos. Portanto o TTK determinístico de referência é 300s (5 minutos), dentro da meta de 270–330s; o timeout máximo continua separado, em 10 minutos.
+
+## Combate autoritativo e IA
+
+Ataques contra o Titã passam por `resolveWorldBossDamage`: o servidor valida participante, vida, distância, classe, skill e cooldown, e calcula o dano pelo snapshot. `msg.atk`, HP do boss e contribuição enviados pelo navegador nunca são autoridade. Anti-spam e range são mantidos, e HP/maxHP do boss só mudam no runtime do servidor.
+
+A IA server-side seleciona apenas participantes vivos e presentes na mesma instância. Ela alterna **Golpe do Titã** (normal), **Impacto Ancestral** (pesado) e **Onda Sísmica** (AoE), com wind-up/telegraph e alcance próprios. Defesa e block vêm do snapshot real; cada hit recebe teto final de 35% do maxHP, impedindo one-shot. O cliente só desenha o boss, telegraphs, barra e estados recebidos.
+
+## HP do jogador, morte, disconnect e reconnect
+
+Dentro da arena, HP, maxHP, defesa, block, morte e respawn são específicos e autoritativos no servidor. Morrer não remove XP, ouro, item ou enchant. O personagem reaparece após 10 segundos na entrada, com HP cheio; quatro mortos não resetam boss nem relógio.
+
+Disconnect apenas marca o participante offline e preserva instância/HP. Reconnect autenticado com a mesma conta e charId recupera a mesma arena, posição, Party e boss sem criar uma nova instância. Durante a luta o cliente não salva coordenadas da arena no save normal. Ao término, retorna à localização anterior validada, ou à Vila Inicial como fallback seguro.
+
+## Contribuição, timeout e recompensas
+
+`damageByChar` contabiliza somente dano realmente aplicado pelo servidor. É elegível quem causou ao menos 1% do maxHP; o valor interno de contribuição não é exposto ao cliente. Se o Titã sobreviver 10 minutos, a instância termina sem Legendary e todos retornam.
+
+Na vitória, cada elegível recebe uma vez 360 ouro, 18 gemas e 18.000 XP. Exatamente um elegível com capacidade recebe um equipamento `legendary`, `enchant:0`, UID novo, tipo compatível com a classe e nível canônico. O sorteio e a criação são server-side. `rewardGranted` bloqueia repetição na instância; `save.wbRewards`, limitado aos 12 IDs recentes, é sanitizado, protegido pelo lock econômico e persistido sob `withCharLock`, impedindo retry/reconnect e PUT genérico de duplicarem a recompensa.
+
+## Cleanup, testes e limitações
+
+Fim por derrota ou timeout remove arena, boss e índices runtime. Nenhuma migration foi criada: o pequeno histórico vive em `characters.save` JSONB. A lógica pura cobre Party, snapshot, DPS/TTK, isolamento, dano forjado, skills/cooldown, três ataques, teto defensivo, morte/respawn, disconnect, morte única, contribuição, sorteio e privacidade. A suíte inteira também preserva autenticação, personagens, shop, itens, raridade, enchant, dungeon, quests, portais, mobs, PvP, Party e EventManager.
+
+Limitação conhecida: instâncias e inscrições são memória local. Um restart do processo durante a luta perde a instância; saves permanecem válidos e o próximo carregamento cai em mapa persistente seguro. A marca persistida reduz duplicação de recompensa, mas uma interrupção externa exatamente entre efeitos separados continua sujeita às garantias transacionais disponíveis no JSONB/Supabase atual. Não foi criada arquitetura distribuída nesta fase.
+
+## Próxima fase
+
+Fase 5.7 — Team vs Team, usando o mesmo EventManager. Não iniciada nesta entrega.

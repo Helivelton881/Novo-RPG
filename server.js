@@ -9,6 +9,7 @@ const { WebSocketServer, WebSocket } = require('ws');
 const GEAR_DATA = require('./game-data/gear-data.js');
 const DUNGEON_GEN = require('./game-data/dungeon-generation.js');
 const EVENT_DATA = require('./game-data/event-manager.js');
+const WORLD_BOSS = require('./game-data/world-boss.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -27,6 +28,8 @@ const maps = new Map();
 // nenhum fluxo novo o gera mais.
 const ALLOWED_MAP = /^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)(?:_d(?:#[0-9a-f]{8})?)?$/;
 const DUNGEON_MAP_RE = /^([a-z]+)_d(?:#([0-9a-f]{8}))?$/;
+const WORLD_BOSS_MAP_RE = WORLD_BOSS.WORLD_BOSS_MAP_RE;
+function isAllowedMap(map){return ALLOWED_MAP.test(map)||WORLD_BOSS_MAP_RE.test(map)}
 const ALLOWED_CLASS = new Set(['guerreiro', 'druida', 'mago', 'arqueiro']);
 
 // ===== Roster de monstro autoritativo (Fase 1) =====
@@ -276,7 +279,7 @@ const QUEST_GATE_FIELDS = ['kills', 'gk', 'ks', 'kw', 'kp', 'kt', 'ki', 'kv'];
 // handleChest, handleQuest, creditKillReward, dungeon). gunlock e os
 // chestN entram aqui pela mesma razao (desbloqueio de portal so por
 // buy_portal; abertura de bau de campo so por handleChest).
-const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7'];
+const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards'];
 function advanceQuestOnKill(save, type, boss, lvl) {
   const q = save.quest, changed = {};
   const bump = (field, need, next) => {
@@ -701,6 +704,8 @@ function dedupeByUid(items, seen) {
 function sanitizeSave(raw, lvl) {
   const save = raw && typeof raw === 'object' ? raw : {};
   const clampInt = (v, max) => Math.max(0, Math.min(max, Math.round(Number(v) || 0)));
+  // Arenas de evento nunca sao persistidas no save; acesso e exclusivamente
+  // server-driven via WorldBossInstance.
   const map = ALLOWED_MAP.test(cleanText(save.map, 24)) ? cleanText(save.map, 24) : 'vila';
   const out = {
     cls: ALLOWED_CLASS.has(save.cls) ? save.cls : 'guerreiro', lvl,
@@ -718,6 +723,7 @@ function sanitizeSave(raw, lvl) {
     bag: [],
     eq: {},
     chat: Array.isArray(save.chat) ? save.chat.slice(-40).map(m => ({n: cleanText(m && m.n, 20), t: cleanText(m && m.t, 240), sys: !!(m && m.sys)})) : [],
+    wbRewards: Array.isArray(save.wbRewards) ? save.wbRewards.slice(-12).map(x=>cleanText(x,96)).filter(Boolean) : [],
   };
   for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
   // Um uid nunca pode aparecer duas vezes (mochila+mochila ou mochila+
@@ -1462,16 +1468,70 @@ function broadcastMap(map, payload) {
   for(const [ws,p] of clients) if(p.map===map&&ws.readyState===WebSocket.OPEN) ws.send(data);
 }
 
-// ===== Fase 5.5: EventManager (agenda/lifecycle em memoria) =====
-// Os dois tipos oficiais permanecem feature-gated como nao jogaveis. Fases
-// futuras registram handlers; este modulo nunca altera save/economia/mapa.
+// ===== Fases 5.5/5.6: EventManager + World Boss instanciado =====
 const eventManager = new EVENT_DATA.EventManager({
   announce: payload => broadcast(payload),
   log: (name, event) => console.log(name, event.id),
 });
+const worldBossInstances=new Map(),worldBossByChar=new Map();
+function activeCharacterForUser(userId){
+  const found=[];for(const [ws,p]of clients)if(p.authed&&p.userId===userId&&p.charId)found.push({ws,p});
+  const ids=new Set(found.map(x=>x.p.charId));if(ids.size!==1)return null;return found[0]||null;
+}
+function sendToWorldBossMember(member,payload){for(const [ws,p]of clients)if(p.userId===member.userId&&p.charId===member.charId)send(ws,payload)}
+async function loadWorldBossCharacter(userId,charId){
+  const rows=await supabase('characters',{query:`?select=id,name,cls,lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});const row=rows[0];
+  if(!row)return null;const save=sanitizeSave(row.save,row.lvl);return{row,save,snapshot:WORLD_BOSS.combatSnapshot({userId,charId,name:row.name||save.name,cls:row.cls,lvl:row.lvl,save})};
+}
+async function registerWorldBossParty(p,eventId){
+  if(!p.authed||!p.userId||!p.charId)return{ok:false,error:'AUTH_REQUIRED'};const code=memberParty.get(p.userId),party=code&&parties.get(code);
+  const active=new Map();if(party)for(const userId of party.members.keys()){const current=activeCharacterForUser(userId);if(current)active.set(userId,current)}
+  const loaded=new Map();for(const [userId,current]of active){try{const data=await loadWorldBossCharacter(userId,current.p.charId);if(data)loaded.set(userId,{...current.p,name:data.row.name||data.save.name,save:data.save})}catch(err){console.error('world_boss_registration_load_error',err.message)}}
+  const checked=WORLD_BOSS.validatePartyRegistration({party,requesterUserId:p.userId,activeByUser:userId=>loaded.get(userId)||null,bagHasSpace:m=>m.save.bag.length<24});if(!checked.ok)return checked;
+  const group={groupId:code,partyCode:code,ownerUserId:p.userId,members:checked.members.map(m=>({userId:m.userId,charId:m.charId,name:m.name,cls:m.cls,lvl:m.lvl}))};
+  const result=eventManager.registerGroup(group,eventId);if(result.ok)for(const member of group.members){const active=activeCharacterForUser(member.userId);sendToWorldBossMember(member,eventStatePayload(active?active.p:member))}return result;
+}
+async function startWorldBossEvent(event,registrations){
+  const groups=new Map();for(const registration of registrations.values())if(registration.groupId)groups.set(registration.groupId,registration);
+  for(const group of groups.values()){
+    try{
+      const members=[];let valid=group.members.length===4;
+      for(const member of group.members){const active=activeCharacterForUser(member.userId);if(!active||active.p.charId!==member.charId){valid=false;break}const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded){valid=false;break}members.push(loaded.snapshot)}
+      if(!valid){for(const member of group.members)sendToWorldBossMember(member,{type:'world_boss_cancelled',message:'World Boss cancelado para seu grupo: é necessário estar com os 4 jogadores online no início.'});continue}
+      const instance=WORLD_BOSS.createWorldBossInstance({eventId:event.id,partyCode:group.partyCode,members});worldBossInstances.set(instance.mapId,instance);
+      const state=mapState(instance.mapId);state.isWorldBoss=true;state.worldBoss=instance;state.mobs.set(instance.boss.id,{id:instance.boss.id,type:'ancient_titan',boss:true,lvl:40,x:instance.boss.x,y:instance.boss.y,sx:instance.boss.x,sy:instance.boss.y,hp:instance.boss.hp,maxhp:instance.boss.maxHp,state:'idle',dead:false});
+      let slot=0;for(const member of instance.members.values()){const active=activeCharacterForUser(member.userId);if(!active)continue;instance.previousLocations.set(member.charId,{map:active.p.map,x:active.p.x,y:active.p.y});member.x=650+slot*48;member.y=1450+(slot%2)*45;worldBossByChar.set(member.charId,instance.mapId);for(const [ws,p]of clients)if(p.userId===member.userId&&p.charId===member.charId){p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{...WORLD_BOSS.publicWorldBossState(instance),type:'world_boss_enter',spawn:{x:p.x,y:p.y}})}slot++}
+      console.log('world_boss_instance_start',instance.id,instance.boss.maxHp);
+    }catch(err){console.error('world_boss_start_error',group.groupId,err.message)}
+  }
+}
+function worldBossPublicSync(instance){const mob=maps.get(instance.mapId)?.mobs.get('ancient_titan');if(mob){mob.hp=instance.boss.hp;mob.maxhp=instance.boss.maxHp;mob.x=instance.boss.x;mob.y=instance.boss.y;mob.state=instance.boss.state;mob.dead=instance.defeated}broadcastMap(instance.mapId,WORLD_BOSS.publicWorldBossState(instance))}
+async function grantWorldBossRewards(instance){
+  if(instance.rewardGranted)return;instance.rewardGranted=true;const eligible=WORLD_BOSS.eligibleMembers(instance);if(!eligible.length)return;
+  const ordered=[...eligible].sort(()=>secureRandom()-.5);let legendaryWinner=null,legendaryItem=null;
+  for(const candidate of ordered){try{const loaded=await loadWorldBossCharacter(candidate.userId,candidate.charId);if(loaded&&loaded.save.bag.length<24){const types=DROP_TYPES_BY_CLASS[candidate.cls]||DROP_TYPES_BY_CLASS.guerreiro;const type=types[crypto.randomInt(0,types.length)];legendaryItem=createGear(type,gearLevelForMob(candidate.lvl),'legendary');legendaryWinner=candidate;break}}catch{}}
+  for(const member of eligible){
+    try{await withCharLock(member.charId,async()=>{const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded)return;const {row,save}=loaded;if(save.wbRewards.includes(instance.eventId))return;const leveled=applyXpGain(save,row.lvl,WORLD_BOSS.WORLD_BOSS_REWARD.xp);save.xp=leveled.xp;save.lvl=leveled.lvl;save.gold=Math.min(500000,save.gold+WORLD_BOSS.WORLD_BOSS_REWARD.gold);save.gem=Math.min(5000,save.gem+WORLD_BOSS.WORLD_BOSS_REWARD.gem);let won=null;if(legendaryWinner&&member.charId===legendaryWinner.charId)won=grantItem(save,leveled.lvl,legendaryItem);save.wbRewards.push(instance.eventId);save.wbRewards=save.wbRewards.slice(-12);await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});member.rewarded=true;sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl,bag:save.bag,eq:save.eq,legendary:won?{n:won.n,rarity:won.rarity,enchant:won.enchant}:null})})}catch(err){console.error('world_boss_reward_error',member.charId,err.message)}
+  }
+}
+function finishWorldBossInstance(instance,reason){
+  if(instance.state==='ended')return;instance.state='ended';for(const member of instance.members.values()){const prev=instance.previousLocations.get(member.charId)||{map:'vila',x:720,y:1258};for(const [ws,p]of clients)if(p.charId===member.charId&&p.userId===member.userId){p.map=isAllowedMap(prev.map)&&!WORLD_BOSS_MAP_RE.test(prev.map)?prev.map:'vila';p.x=Number.isFinite(prev.x)?prev.x:720;p.y=Number.isFinite(prev.y)?prev.y:1258;send(ws,{type:'world_boss_exit',reason,map:p.map,x:p.x,y:p.y})}worldBossByChar.delete(member.charId)}maps.delete(instance.mapId);worldBossInstances.delete(instance.mapId);console.log('world_boss_instance_end',instance.id,reason)
+}
+function tickWorldBoss(now=Date.now()){
+  for(const instance of [...worldBossInstances.values()]){
+    for(const member of instance.members.values())if(member.dead&&now>=member.respawnAt){member.dead=false;member.hp=member.maxHp;member.respawnAt=0;member.x=720;member.y=1450;sendToWorldBossMember(member,{type:'world_boss_respawn',x:member.x,y:member.y,hp:member.hp,maxHp:member.maxHp})}
+    if(instance.defeated){if(!instance.rewardGranted)grantWorldBossRewards(instance).catch(err=>console.error('world_boss_reward_error',err.message));instance.finishAt=instance.finishAt||now+4000;if(now>=instance.finishAt)finishWorldBossInstance(instance,'defeated');else worldBossPublicSync(instance);continue}
+    if(now>=instance.expiresAt){finishWorldBossInstance(instance,'timeout');continue}
+    const alive=[...instance.members.values()].filter(x=>x.online&&!x.dead);if(!alive.length){worldBossPublicSync(instance);continue}
+    const boss=instance.boss;if(boss.telegraphUntil&&now>=boss.telegraphUntil){const target=instance.members.get(boss.targetCharId),spec=WORLD_BOSS.bossAttackSpec(boss.attack);if(boss.attack==='aoe'){for(const member of alive)if(Math.hypot(member.x-boss.x,member.y-boss.y)<spec.range)WORLD_BOSS.applyBossDamage(instance,member.charId,Math.max(35,member.maxHp*spec.hpRatio),now,secureRandom)}else if(target&&Math.hypot(target.x-boss.x,target.y-boss.y)<spec.range)WORLD_BOSS.applyBossDamage(instance,target.charId,Math.max(boss.attack==='heavy'?45:25,target.maxHp*spec.hpRatio),now,secureRandom);boss.telegraphUntil=0;boss.state='recover';boss.nextAttackAt=now+1800}
+    else if(!boss.telegraphUntil&&now>=boss.nextAttackAt){const target=alive[crypto.randomInt(0,alive.length)];boss.targetCharId=target.charId;const roll=secureRandom();boss.attack=roll<.25?'aoe':roll<.55?'heavy':'normal';boss.state='wind';boss.telegraphUntil=now+WORLD_BOSS.bossAttackSpec(boss.attack).telegraphMs}
+    worldBossPublicSync(instance);
+  }
+}
+eventManager.registerEventHandler('world_boss',{durationMs:WORLD_BOSS.WORLD_BOSS_DURATION_MS,onStart:(event,registrations)=>startWorldBossEvent(event,registrations),onEnd:event=>{for(const instance of [...worldBossInstances.values()])if(instance.eventId===event.id)finishWorldBossInstance(instance,'timeout')}});
 function eventStatePayload(player,now=Date.now()) {
   const state={type:'event_state',...eventManager.snapshot(now)},event=state.current,entries=event&&eventManager.registrations.get(event.id);
-  if(player&&player.authed&&player.charId)state.registration={eventId:event.id,registered:!!entries&&entries.has(player.charId)};
+  if(player&&player.authed&&player.charId){const registration=entries&&entries.get(player.charId);state.registration={eventId:event.id,registered:!!registration,groupId:registration&&registration.groupId||null};const code=memberParty.get(player.userId),party=code&&partyView(code);state.party=party?{code:party.code,size:party.members.length,isLeader:party.ownerId===player.userId}:null}
   return state;
 }
 function handleEvents(req,res,pathname){
@@ -1600,7 +1660,7 @@ const wss = new WebSocketServer({ server, path: '/game' });
 async function resolveCharacterForWs(userId, charId) {
   if (!userId || !charId) return null;
   try {
-    const rows = await supabase('characters', {query:`?select=id,cls,lvl&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
+    const rows = await supabase('characters', {query:`?select=id,name,cls,lvl&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
     return rows[0] || null;
   } catch { return null; }
 }
@@ -1640,7 +1700,7 @@ async function handleWsJoin(ws, msg) {
     if (clients.get(ws)) return; // ja tratado por outra mensagem enquanto este join aguardava o Supabase
     const p = {
       id: crypto.randomUUID(), userId, charId: charRow ? charRow.id : null,
-      name: cleanText(msg.name, 14) || 'Herói',
+      name: charRow ? (cleanText(charRow.name,14)||'Herói') : (cleanText(msg.name, 14) || 'Herói'),
       cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : (ALLOWED_CLASS.has(msg.cls) ? msg.cls : 'guerreiro'),
       lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : Math.max(1, Math.min(99, Number(msg.lvl) || 1)),
       authed: !!charRow, map: 'vila', x: 720, y: 1258, dir: 0, moving: false, atkT: 0, atkAng: 0,
@@ -1649,6 +1709,8 @@ async function handleWsJoin(ws, msg) {
     if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
     send(ws, {type:'welcome', id:p.id, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
     send(ws, eventStatePayload(p));
+    const wbMap=p.charId&&worldBossByChar.get(p.charId),instance=wbMap&&worldBossInstances.get(wbMap),member=instance&&instance.members.get(p.charId);
+    if(member&&member.userId===p.userId&&instance.state!=='ended'){member.online=true;p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{...WORLD_BOSS.publicWorldBossState(instance),type:'world_boss_enter',spawn:{x:p.x,y:p.y},reconnect:true})}
     broadcast({type:'player_join', player:publicPlayer(p)}, ws);
   } finally { joining.delete(ws); }
 }
@@ -1699,16 +1761,19 @@ wss.on('connection', ws => {
     if (msg.type === 'event_status') {
       send(ws,eventStatePayload(p));
     } else if (msg.type === 'event_register') {
-      const result=eventManager.register(p,cleanText(msg.eventId,96));
+      const eventId=cleanText(msg.eventId,96),candidate=EVENT_DATA.scheduleAfter(Date.now(),2).find(e=>e.id===eventId);
+      const result=candidate&&candidate.type==='world_boss'?await registerWorldBossParty(p,eventId):eventManager.register(p,eventId);
       send(ws,{type:'event_registration',action:'register',serverNow:Date.now(),...result});
       send(ws,eventStatePayload(p));
     } else if (msg.type === 'event_unregister') {
-      const result=eventManager.unregister(p,cleanText(msg.eventId,96));
+      const eventId=cleanText(msg.eventId,96),candidate=EVENT_DATA.scheduleAfter(Date.now(),2).find(e=>e.id===eventId);
+      const result=candidate&&candidate.type==='world_boss'?eventManager.unregisterGroup(p,eventId):eventManager.unregister(p,eventId);
       send(ws,{type:'event_registration',action:'unregister',serverNow:Date.now(),...result});
       send(ws,eventStatePayload(p));
+      if(result.ok&&result.members)for(const member of result.members)sendToWorldBossMember(member,eventStatePayload(activeCharacterForUser(member.userId)?.p||member));
     } else if (msg.type === 'state') {
       const map = cleanText(msg.map,24);
-      if (!ALLOWED_MAP.test(map)) return;
+      if (!isAllowedMap(map)) return;
       // Instancia de masmorra (`_d#id`): so pode "continuar" na que o
       // proprio dungeon_enter ja colocou o personagem (p.map) -- nunca
       // trocar pra outra instancia, nem pra `_d` sem instancia, so
@@ -1717,6 +1782,7 @@ wss.on('connection', ws => {
       // uma mensagem 'state' sem passar pela validacao de requisito em
       // handleDungeonEnter.
       if (DUNGEON_MAP_RE.test(map) && map !== p.map) return;
+      if (WORLD_BOSS_MAP_RE.test(map) && (!worldBossByChar.has(p.charId)||worldBossByChar.get(p.charId)!==map||map!==p.map)) return;
       const x = Number(msg.x), y = Number(msg.y);
       if (!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>2880||y>2112) return;
       const atkT=Math.max(0,Math.min(.4,Number(msg.atkT)||0)),atkAng=Number(msg.atkAng)||0;
@@ -1727,11 +1793,12 @@ wss.on('connection', ws => {
       // calculado em resolveAttackDamage (baseDmgOf usa p.lvl).
       const lvl = p.authed ? p.lvl : Math.max(1,Math.min(99,Number(msg.lvl)||1));
       Object.assign(p,{map,x,y,dir:Math.max(0,Math.min(3,Number(msg.dir)|0)),moving:!!msg.moving,lvl,atkT,atkAng:Math.max(-Math.PI*2,Math.min(Math.PI*2,atkAng))});
+      if(WORLD_BOSS_MAP_RE.test(map)){const instance=worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member){member.x=x;member.y=y;member.online=true}}
       broadcast({type:'state',player:publicPlayer(p)},ws);
     } else if (msg.type === 'dungeon_enter') {
       await handleDungeonEnter(ws, p, msg);
     } else if (msg.type === 'map_join') {
-      const map=cleanText(msg.map,24);if(!ALLOWED_MAP.test(map)||map!==p.map)return;
+      const map=cleanText(msg.map,24);if(!isAllowedMap(map)||map!==p.map)return;
       const state=mapState(map),defs=Array.isArray(msg.mobs)?msg.mobs.slice(0,120):[];
       const manifest=MOB_MANIFEST[map];
       // Masmorra (state.isDungeon): roster ja foi gerado inteiro pelo
@@ -1790,6 +1857,7 @@ wss.on('connection', ws => {
       const map=cleanText(msg.map,24),state=maps.get(map);if(!state||map!==p.map)return;
       const mobId=cleanText(msg.id,48),mob=state.mobs.get(mobId);
       if(!mob||mob.dead)return;
+      if(state.isWorldBoss){const instance=state.worldBoss;if(!instance||mobId!=='ancient_titan'||worldBossByChar.get(p.charId)!==map)return;const result=WORLD_BOSS.resolveWorldBossDamage(instance,p.charId,{skill:msg.skill,splash:!!msg.splash},Date.now(),secureRandom);if(result.ok){worldBossPublicSync(instance);send(ws,{type:'world_boss_hit',damage:result.damage,bossHp:instance.boss.hp,bossMaxHp:instance.boss.maxHp})}return}
       // alcance plausivel: usa a posicao real do jogador (rastreada via
       // 'state') e a posicao do monstro simulada pelo servidor para rejeitar
       // um golpe em algo longe demais pra
@@ -1861,7 +1929,7 @@ wss.on('connection', ws => {
       broadcastMap(map,{type:'player_hit',map,targetId,attackerId:p.id,attackerName:p.name,dmg});
     } else if (msg.type === 'projectile') {
       const map=cleanText(msg.map,24),id=cleanText(msg.id,64),kind=cleanText(msg.kind,12);
-      if(map!==p.map||!ALLOWED_MAP.test(map)||!id||!['arrow','bolt','leaf','fire'].includes(kind))return;
+      if(map!==p.map||!isAllowedMap(map)||!id||!['arrow','bolt','leaf','fire'].includes(kind))return;
       const x=Number(msg.x),y=Number(msg.y),vx=Number(msg.vx),vy=Number(msg.vy),life=Math.max(.05,Math.min(2,Number(msg.life)||.5));
       if(![x,y,vx,vy].every(Number.isFinite)||Math.hypot(vx,vy)>900)return;
       broadcastMap(map,{type:'projectile',map,ownerId:p.id,projectile:{id,kind,x,y,vx,vy,life,r:Math.max(3,Math.min(14,Number(msg.r)||7)),pierce:!!msg.pierce}});
@@ -1872,7 +1940,7 @@ wss.on('connection', ws => {
       const text=cleanText(msg.text,160);if(text)broadcast({type:'chat',from:p.name,text,at:Date.now()});
     }
   });
-  ws.on('close', () => { const p=clients.get(ws);if(p){clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
+  ws.on('close', () => { const p=clients.get(ws);if(p){const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member)member.online=false;clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
 });
 
 // .unref() nos 3 setInterval deste arquivo (aqui, tickMobAI e o ping de WS
@@ -1889,6 +1957,7 @@ setInterval(()=>{
 
 setInterval(()=>{
   eventManager.tick(Date.now());
+  tickWorldBoss(Date.now());
 },1000).unref();
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
@@ -2650,4 +2719,6 @@ module.exports = {
   rollEnchantSuccess, applyEnchant, attemptEnchant,
   // Fase 5.5 -- agenda/lifecycle puro e manager runtime (sem Supabase):
   EVENT_DATA, eventManager, eventStatePayload,
+  // Fase 5.6 -- World Boss (nucleo puro + runtime em memoria):
+  WORLD_BOSS, WORLD_BOSS_MAP_RE, worldBossInstances, worldBossByChar, activeCharacterForUser, tickWorldBoss,
 };

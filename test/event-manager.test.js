@@ -46,12 +46,25 @@ test('anuncios 15/5/1 saem uma vez mesmo com centenas de ticks',()=>{
   assert.deepEqual(messages.map(x=>x.minutes),[15,5,1]);
 });
 
-test('evento nao implementado nao aceita inscricao nem anuncia',()=>{
-  const now=at('2026-09-24T19:50:00-03:00'),messages=[];
+test('TvT nao implementado nao aceita inscricao nem anuncia',()=>{
+  const now=at('2026-09-24T21:50:00-03:00'),messages=[];
   const m=new E.EventManager({now:()=>now,announce:x=>messages.push(x)}),event=m.snapshot().current;
   const before=JSON.stringify({gold:10,map:'vila'}),player={authed:true,userId:'u',charId:'c',name:'Heroi'};
   assert.deepEqual(m.register(player,event.id),{ok:false,error:'EVENT_UNAVAILABLE'});m.tick();
   assert.equal(messages.length,0);assert.equal(JSON.stringify({gold:10,map:'vila'}),before);
+});
+
+test('World Boss oficial esta jogavel e TvT continua indisponivel',()=>{
+  assert.equal(E.EVENT_CONFIG.types.world_boss.playable,true);assert.equal(E.EVENT_CONFIG.types.team_vs_team.playable,false);
+  const now=at('2026-09-24T19:50:00-03:00'),m=new E.EventManager({now:()=>now}).registerEventHandler('world_boss',{});
+  assert.equal(m.snapshot().current.type,'world_boss');assert.equal(m.snapshot().current.status,'registration');
+});
+
+test('registro de grupo associa quatro chars e cancelamento do lider remove todos',()=>{
+  const now=at('2026-09-24T19:50:00-03:00'),m=new E.EventManager({now:()=>now}).registerEventHandler('world_boss',{}),event=m.snapshot().current;
+  const group={groupId:'ABC234',ownerUserId:'u1',members:[1,2,3,4].map(n=>({userId:'u'+n,charId:'c'+n}))};
+  assert.equal(m.registerGroup(group,event.id).ok,true);assert.equal(m.registerGroup(group,event.id).alreadyRegistered,true);assert.equal(m.registrations.get(event.id).size,4);
+  assert.equal(m.unregisterGroup({authed:true,userId:'u2'},event.id).error,'PARTY_LEADER_REQUIRED');assert.equal(m.unregisterGroup({authed:true,userId:'u1'},event.id).removed,true);assert.equal(m.registrations.get(event.id).size,0);
 });
 
 test('handler fake: autenticado registra idempotente, anonimo falha e unregister remove',()=>{
