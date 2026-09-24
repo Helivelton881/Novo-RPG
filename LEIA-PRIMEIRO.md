@@ -837,3 +837,148 @@ Limitação conhecida: instâncias e inscrições são memória local. Um restar
 ## Próxima fase
 
 Fase 5.7 — Team vs Team, usando o mesmo EventManager. Não iniciada nesta entrega.
+
+# FASE 5.7 — TEAM VS TEAM
+
+## Agenda e EventManager
+
+Reaproveita 100% o `EventManager` da Fase 5.5 (`game-data/event-manager.js`) — nenhum scheduler, calendário, countdown ou sistema de anúncio novo. `EVENT_CONFIG.types.team_vs_team.playable` vira `true` (única mudança de configuração); os horários oficiais continuam 02:00/06:00/10:00/14:00/18:00/22:00 (`America/Sao_Paulo`), inscrição 15min antes, anúncios 15/5/1min — exatamente como já valiam desde a Fase 5.5, só agora com um handler de verdade plugado via `eventManager.registerEventHandler('team_vs_team', {durationMs, onStart, onEnd})`. World Boss (00/04/08/12/16/20h) continua inalterado.
+
+## Lógica pura: `game-data/tvt.js`
+
+Novo módulo, mesmo espírito de `game-data/world-boss.js` (Fase 5.6): sem HTTP/WS/Supabase, testável isoladamente. **Reaproveita o World Boss em vez de duplicar** — `require('./world-boss.js')` pra `combatSnapshot` (deriva classe/nível/skills/atk/def/maxHp/block do equipamento canônico real, incluindo rarity/enchant, exatamente igual ao World Boss) e `CLASS_BASE`/`BASIC_CD_MS`/`CLASS_SKILLS`/`DAMAGE_SKILLS`. `world-boss.js` **não foi modificado** — zero risco de regressão, confirmado pela suíte de `test/world-boss.test.js` inteira continuando verde. O que o World Boss nunca precisou (heal em aliado, buffs/debuffs com timestamp, times, placar, respawn) é implementado do zero em `tvt.js`, auditado contra o comportamento real de cada skill no cliente (`index.html`: `SKILL_FX`, `healAmt`, `barrierAmt`) antes de portar.
+
+## Configuração
+
+Máximo 8 jogadores, mínimo 4, formatos 2v2/3v3/4v4, partida de 10 minutos. Inscrição **individual** (`registrationMode:'individual'`, já preparado desde a Fase 5.5) — Party do jogador nunca decide time; o matchmaking é sempre independente da Party real.
+
+## Inscrição, reserva e cancelamento
+
+Igual a qualquer evento individual do EventManager (`eventManager.register`/`unregister`), com um teto de 8 específico do TvT que o EventManager genérico não conhece (`tvtRegistrationFull`, checado em `server.js` antes de chamar `register`, devolve `"Team vs Team lotado."` sem criar nada). No início (`startTvtEvent`), os inscritos são ordenados por `registeredAt` (ordem de chegada, nunca sorteio):
+
+- **0 a 3 inscritos**: partida cancelada (`tvt_cancelled`, `"Team vs Team cancelado: mínimo de 4 jogadores."`), nenhuma recompensa.
+- **5 ou 7 inscritos**: o(s) último(s) por `registeredAt` vira(m) **reserva** (`tvt_reserve`, `"Você ficou como reserva nesta rodada."`) — nunca teleportado, nunca recebe recompensa de participante. 5→4 jogam+1 reserva; 7→6 jogam+1 reserva.
+- **4, 6 ou 8 inscritos**: todos jogam (par exato).
+
+## Snapshot server-side
+
+No início, cada personagem é **recarregado do Supabase** (`loadTvtCharacter`, mesmo padrão de `loadWorldBossCharacter`) — nunca confia no que já estava em memória. `combatSnapshot` (reaproveitado do World Boss) congela classe/nível/skills/atk/def/maxHp/block a partir do equipamento canônico real (`save.eq`, com rarity/enchant já aplicados pelas Fases 5.1/5.3/5.4). Trocar de equipamento depois de inscrito não afeta a luta já calibrada.
+
+## PowerScore (só matchmaking — nunca dano, nunca HP)
+
+`powerScore(snapshot, eq)` combina nível×10 + atk×2.2 + def×3 + maxHp×0.35 + block×400 + soma dos ranks de skill×8, multiplicado por um fator de qualidade de equipamento (`gearQualityFactor`) que pesa rarity (`basic 1.0 / rare 1.15 / epic 1.3 / legendary 1.5`) e enchant (+2%/ponto) **além** do que já está embutido em atk/def/maxHp — testado explicitamente que nível sozinho não determina o score, e que powerScore nunca é igual a dano nem a HP.
+
+## Balanceamento — enumeração exata, não greedy
+
+`balanceTvtTeams(players)`: pra até 8 jogadores (metade = até 4), enumera **todas** as combinações de metade dos índices (`combinationsContainingFirst`, evita contar o par complementar duas vezes) e escolhe a divisão com menor diferença absoluta de powerScore total; empates são desempatados por uma penalidade pequena de composição de classe (`classComposePenalty`, só pesa quando a diferença de uma classe é ≥2, ex. 3 Druidas vs 0) — powerScore sempre domina, composição nunca sacrifica o equilíbrio real por causa da classe. Determinístico: mesma entrada sempre produz a mesma divisão.
+
+## Times: Rubra e Azul
+
+IDs internos `red`/`blue`, labels `Equipe Rubra`/`Equipe Azul` — decididos inteiramente pelo servidor (`balanceTvtTeams` + `createTvtInstance`), nunca pelo cliente. Times são **imutáveis** durante toda a partida (reconexão volta pro mesmo time, nunca troca).
+
+## `TvTInstance` e Arena
+
+`createTvtInstance({eventId, members, now})` gera `mapId` no formato `tvt#<hash-curto-do-eventId>` (mesmo padrão de derivação de `worldBossMapId`), com `players` (Map charId→estado de combate), `score:{red,blue}`, `scoreLimit` (derivado do tamanho do time), `startedAt`/`expiresAt`, `previousLocations`, `finished`/`rewardsGranted`/`state`. `TVT_MAP_RE` (`^tvt#[0-9a-z]{6,10}$`) é explícita e restrita — `isAllowedMap` a soma às regras já existentes (campo, masmorra, World Boss) sem afrouxar `ALLOWED_MAP` genericamente.
+
+A Arena TvT é fechada, simétrica e aberta (`buildTvtArena`, mesmo padrão de construção da Arena do Titã: `newWorld`+`netMap`+blocos de limite, mesmo tema de chão já usado — sem asset novo). Spawn Rubra a oeste (`x:350,y:700`), Azul a leste (`x:1850,y:700`) — mais de 1500px de distância, muito acima do maior alcance de ataque real do jogo (~550px), evitando spawn kill.
+
+## Entrada: teleporte 100% server-driven
+
+`startTvtEvent` salva `previousMap`/`previousX`/`previousY` de cada participante (`instance.previousLocations`), então move `p.map`/`p.x`/`p.y` no servidor e manda `tvt_enter` (spawn, time, `scoreLimit`, `expiresAt`) — o cliente nunca clica um portal, nunca escolhe `map:"tvt#..."` por conta própria.
+
+## Anti-teleport
+
+Mesma proteção do World Boss/masmorra: `TVT_MAP_RE.test(map)` numa mensagem `state` só é aceito se `tvtByChar.get(p.charId)===map` **e** `map===p.map` — só quem realmente pertence àquela instância pode reportar posição nela.
+
+## Combate autoritativo: `resolveTvtIntent`
+
+Dentro do TvT, dano nunca é parcialmente client-side (diferente do PvP normal de campo, que ainda deixa o alvo aplicar a própria mitigação). `TVT.resolveTvtIntent(instance, attackerCharId, {skill, targetId}, now, rng)` decide tudo: existe? vivo? time? alcance (≤550px)? cooldown? alvo válido pro tipo de skill? Calcula dano a partir do **snapshot real** (nunca de `msg.atk`), aplica mitigação (def do alvo + bônus de warcry + absorção de barreira + chance de bloqueio real), atualiza HP, detecta morte, credita kill/death/score. Testado explicitamente: `msg.atk=999999` não muda o dano; `msg.team`/`msg.score`/`msg.hp` não existem como parâmetros lidos por `resolveTvtIntent` — não têm como influenciar nada.
+
+No servidor, reaproveita o mesmo caminho de mensagem que o PvP de campo já usa pra "o golpe realmente acertou" (`player_damage`) — só que, dentro de uma instância TvT, o handler intercepta **antes** da lógica de PvP normal e delega inteiramente pra `resolveTvtIntent` (nunca cai no cálculo client-side de mitigação). Buffs/heal sem alvo de dano (`warcry`/`barrier`/`evade`/`heal`) continuam vindo por `cast_skill`, que ganhou um campo opcional `targetId` (usado só por `heal`).
+
+## Friendly fire, self-hit, range
+
+`target.team === attacker.team` → `FRIENDLY_FIRE`. `targetId === attackerCharId` → `INVALID_TARGET`. Distância > 550px → `OUT_OF_RANGE` (cobre até o spawn-kill: os dois spawns nascem fora desse alcance). Todos testados explicitamente, inclusive com `targetId` forjado tentando contornar.
+
+## Cooldowns
+
+Server-side, por instância (`member.skillCd`/`member.lastAttackAt`, nunca o cooldown global do mapa de campo) — básico e as 12 skills reais das 4 classes, mesmos valores de `SKILL_CD_MS` já usados em todo o resto do jogo (`spin:5000, dash:4000, warcry:18000, heal:7000, roots:9000, thorns:10000, fireball:4000, frost:7000, barrier:16000, multi:4000, evade:5000, pierce:8000`, replicados em `TVT_SKILL_CD_MS` porque `game-data/*.js` não importa `server.js`, mesmo padrão que `world-boss.js` já usa pra suas próprias constantes). Spam de básico ou de skill é rejeitado com `COOLDOWN`.
+
+## Skills por classe (auditadas contra `index.html` antes de portar)
+
+- **Guerreiro**: `spin`/`dash` (dano, mesmos multiplicadores de sempre) e `warcry` (buff self: `+30%+10%×(rank-1)` de dano, `+4+2×(rank-1)` de defesa, `6+2×(rank-1)` segundos — fórmula exata de `SKILL_FX.warcry` no cliente).
+- **Druida**: `heal` (cura **aliado válido**, nunca inimigo, nunca ultrapassa `maxHp`, fórmula real `45+5×lvl+18×(rank-1)` de `healAmt`), `roots` (dano + `rootUntil` no alvo, `2+.5×(rank-1)`s), `thorns` (dano + `thornsUntil` no alvo, adaptação single-target da zona de área original — ver limitação abaixo).
+- **Mago**: `fireball`/`frost` (dano; `frost` também aplica `slowUntil`, `3+(rank-1)`s) e `barrier` (buff self: absorve `40+6×lvl+20×(rank-1)` de dano por 8s, fórmula real de `barrierAmt`).
+- **Arqueiro**: `multi`/`pierce` (dano) e `evade` (buff self: `evadeUntil` por 500ms, imunidade total a dano durante a janela).
+
+Skill de outra classe é sempre `INVALID_SKILL`, testado nas 4 classes.
+
+## Status effects (timestamps server-side)
+
+`rootUntil`, `slowUntil`, `barrierUntil`+`barrierAmt`, `evadeUntil`, `warcryUntil`+`warcryAtkMul`+`warcryDefBonus`, `thornsUntil`+`thornsMul`+`thornsOwner` — todos em `member.statuses`, todos com `Date.now()` real, nunca timer do cliente. `tickTvtStatusExpiry` (chamado a cada 1s, junto do tick já existente) zera cada campo assim que `now>=Until`. `thorns` tem um tick próprio (`tickTvtThorns`, dano periódico a cada 600ms enquanto ativo, adaptação single-target — ver limitação).
+
+## HP, morte, kill/death, score
+
+`hp`/`maxHp`/`dead`/`respawnAt` são exclusivos da instância (`member`), nunca o `P.hp` do mapa de campo. Morte é confirmada **de forma síncrona** dentro de `resolveTvtIntent` (mesma garantia estrutural das Fases 5.2/5.6: nenhum `await` entre o hit que zera o HP e a marcação `dead=true`) — hits extras num alvo já morto retornam `TARGET_UNAVAILABLE` sem pontuar de novo, testado explicitamente. 1 morte = 1 ponto pro time do killer, sempre. **Morrer no TvT nunca tira XP, ouro, gema, item, rarity ou enchant** — só afeta o placar da partida.
+
+## Respawn e proteção de spawn
+
+5 segundos (`TVT_RESPAWN_MS`) pra voltar com HP cheio no spawn do próprio time (`tickTvtRespawns`, mesmo padrão de tick do World Boss). Depois do respawn, 3 segundos de proteção (`TVT_SPAWN_PROTECTION_MS`, `protectedUntil`) durante os quais o jogador **não pode receber dano** (`blocked:'protection'` no resultado, dano zero) — se o próprio protegido atacar antes disso, a proteção termina imediatamente (`clearProtectionOnAction`), testado.
+
+## Placar e fim de partida
+
+`scoreLimitForTeamSize(size)`: 2v2→10, 3v3→15, 4v4→20 (função pura, testada nos 3 tamanhos). Fim por placar (`checkTvtEnd` detecta o time no limite, fim imediato, hits depois disso não são mais aceitos porque `instance.state` já não é `'active'`) **ou** por tempo (10 minutos, `expiresAt`) — no timeout, maior placar vence; empate exato vira `draw` (`winner:null`), sem overtime nesta fase. `eventManager`'s próprio `onEnd` (disparado por `event.startAt+durationMs`) é só uma rede de segurança redundante — `tickTvt` a cada 1s já fecha a partida sozinho assim que detecta o fim; ambos os caminhos são idempotentes (`finishTvtInstance`/`grantTvtRewards` têm guardas de estado), nunca duplicam nada mesmo se os dois disparassem.
+
+## Disconnect e reconnect
+
+Desconectar **nunca** termina a partida nem pontua morte — só marca `online:false` (mesma regra do World Boss). O personagem continua pertencendo à instância. Reconectar com o mesmo `userId`+`charId` durante a partida ativa recupera automaticamente a mesma arena, time, HP e placar (`handleWsJoin`, mesmo padrão do World Boss) — nunca cria instância nova, nunca troca de time.
+
+## Anti-AFK e elegibilidade de recompensa
+
+`lastActivityAt` atualiza só em ação legítima que passou pela validação real (`resolveTvtIntent` atualiza em qualquer intent aceito — ataque, skill, heal). `isTvtEligible(member, instance, now)`: elegível se `tvtContributionScore >= 30` (dano + cura×1.5 + kills-legítimos×50 — **cura conta**, então Druida puro-suporte nunca é penalizado por não ter abates) **ou** se esteve ativo nos últimos 90 segundos mesmo com contribuição baixa (cobre quem entrou tarde ou teve pouca oportunidade de agir). Reserva nunca é elegível (nunca entra na instância). Quem nunca contribuiu e ficou inativo além da janela perde a recompensa daquela partida.
+
+## Anti-feed (documentado, afeta só elegibilidade — nunca bane)
+
+Detecção leve e explícita: uma morte é marcada como possivelmente "farmada" quando a vítima nunca agiu desde seu último respawn/entrada (`lastActivityAt <= respawnGrantedAt`) **e** morreu dentro de uma janela curta após a proteção de spawn acabar (`TVT_SPAWN_PROTECTION_MS + 1500ms`). Nesse caso, o dano da morte continua contando normalmente (não é "gameplay ilegítimo"), mas o **bônus de kill** (`legitKills`, usado só na contribuição pra recompensa) não é creditado ao atacante por aquela morte específica — critério pequeno, testável, documentado, sem banimento automático nem alteração do placar real da partida.
+
+## Recompensas — proposta inicial, derivação documentada
+
+```
+Vencedor: 120 gold, 6 gem, 6000 XP
+Perdedor:  60 gold, 3 gem, 3000 XP
+Empate:    90 gold, 4 gem, 4500 XP
+```
+
+**Sem Legendary** (World Boss continua sendo a fonte mais forte de Legendary, de propósito). Comparação feita antes de congelar: World Boss paga 360 gold/18 gem/18000 XP por uma luta calibrada pra ~5min (TTK de 300s) de Party coordenada de 4 — em taxa por minuto, TvT vencedor fica bem abaixo (~1/6) do World Boss, coerente com ser solo/individual, sem pré-requisito de grupo e mais fácil de repetir. Contra quests de nível alto (`QUEST_REWARDS`, até 1000 gold/2500 XP **uma única vez**), o TvT paga menos por partida mas é repetível 6×/dia. Contra loot de chefe de masmorra (~22 moedas de 1-9, ~100-130 gold médio), o prêmio de vitória do TvT fica na mesma faixa — parâmetro razoável pra uma partida competitiva de até 10 minutos. Números tratados como proposta inicial, ajustáveis com telemetria real de produção depois, exatamente como já foi feito com os preços de equipamento na Fase 5.1.
+
+## `tvtRewards` — idempotência e proteção
+
+Mesmo mecanismo de `wbRewards` (Fase 5.6): `save.tvtRewards` (array de `eventId`, sanitizado, limitado aos últimos 12) entra em `ECONOMY_LOCK_FIELDS` — o PUT genérico nunca consegue remover, forjar ou reabrir esse histórico pra repetir uma recompensa. `grantTvtRewards` roda inteiro dentro de `withCharLock(charId, ...)`, recarrega o personagem real do Supabase, confere `save.tvtRewards.includes(instance.eventId)` antes de conceder — cada participante elegível recebe a recompensa da partida **uma única vez**, mesmo com reconexão ou retry.
+
+## Cleanup
+
+Ao terminar (`finishTvtInstance`): retorna cada jogador pra `previousLocations` validada (nunca aceita um mapa de instância como destino — `isAllowedMap(prev.map)&&!WORLD_BOSS_MAP_RE.test&&!TVT_MAP_RE.test`) com fallback pra Vila Inicial; remove o `mapId` de `maps`; remove a instância de `tvtInstances`; remove cada `charId` de `tvtByChar`. Nenhum `Map` cresce sem limite.
+
+## Limitações conhecidas (honestas, não escondidas)
+
+- **Simplificação single-target**: no jogo normal, `spin`/`frost`/`roots`/`thorns` atingem todos os inimigos num raio (AoE). No TvT, todo skill (mesmo os originalmente AoE) age sobre **um** alvo declarado (`targetId`) — decisão deliberada: o protocolo de intenção do TvT já é baseado em alvo explícito, e resolver múltiplos alvos simultâneos com a mesma garantia de anti-forjamento aumentaria muito o escopo sem mudar nenhuma garantia de autoridade pedida nesta fase. `thorns` (zona de dano no chão no jogo normal) vira um DoT no alvo marcado (`thornsUntil`+tick), não uma área persistente no espaço.
+- **Heal só em si mesmo nesta interface**: o servidor (`resolveTvtIntent`) já suporta e testa cura em qualquer aliado válido via `targetId`, mas a interface desta fase só expõe auto-cura (mesma UX que o heal já tinha no resto do jogo) — mirar um aliado específico fica como melhoria futura de UI, não uma limitação de autoridade do servidor.
+- **Instância em memória**: igual ao World Boss, um restart do processo Render durante uma partida ativa perde a instância (sem recompensa concedida, sem penalidade persistida) — saves continuam válidos, próximo carregamento cai em mapa seguro. Nenhuma arquitetura distribuída foi criada nesta fase.
+- **Sem overtime**: empate exato ao fim do tempo é sempre `draw`, nunca prorrogação.
+- **Uma partida principal por vez**: esta primeira versão cria uma única `TvTInstance` de até 8 jogadores por ocorrência do evento — não há múltiplas arenas simultâneas de 8. A arquitetura (instância isolada por `mapId`) permite expansão futura, mas isso não foi implementado agora, de propósito (simplifica matchmaking e recompensa).
+- **Testes de fluxo completo via WS real**: registrar 8 contas e observar a partida inteira via WebSocket real dependeria da janela de inscrição real estar aberta no momento exato em que a suíte roda (sem hook de tempo injetável no processo do servidor) — mesma lacuna já aceita pela Fase 5.5/5.6 pra World Boss. A cobertura funcional real está inteira em `test/tvt.test.js` (RNG e relógio sempre injetados, determinístico).
+
+## Testes adicionados
+
+- `test/tvt.test.js` (51 testes, sempre roda, sem Supabase): config (min/max/duração/respawn/proteção/`TVT_MAP_RE`), powerScore (nunca só nível, rarity/enchant pesam, nunca é dano/HP), balanceamento (times iguais, todos aparecem uma vez, diferença mínima de powerScore não-greedy, composição de classe só desempata, determinístico), instância (mapId, spawns opostos e afastados, HP inicial), combate (dano forjado ignorado, friendly fire, self-hit, range, cooldown básico/skill, `msg.team`/`score`/`hp` sem efeito), as 4 classes e suas 12 skills reais, heal (aliado válido, nunca inimigo, nunca ultrapassa maxHp, alvo inválido rejeitado, só Druida), status (expiração de todos os 6 campos, evasão nega dano, barreira absorve parcial), morte (1 kill/1 death/1 ponto, hit extra não duplica), respawn (5s, HP cheio, spawn do time), proteção (3s, atacar encerra), fim de partida (score, tempo, empate, não reabre), elegibilidade/anti-AFK (dano ou cura contam, ativo recente conta, AFK total não conta), recompensas (win/loss/draw com valores corretos, nunca Legendary), `publicTvtState` (nunca vaza `userId`).
+- `test/tvt-ws.test.js` (2 testes, 1 sempre roda + 1 `{skip:!hasSupabase()}`): agenda pública mostra `team_vs_team.playable:true` e `world_boss.playable:true` sem vazar identidade; identidade anônima é sempre rejeitada (`AUTH_REQUIRED`), independente do horário real.
+- `test/event-manager.test.js`/`test/event-ws.test.js`: os 2 testes que antes confirmavam TvT **indisponível** (contrato da Fase 5.5) foram atualizados pra confirmar TvT **jogável** agora — mudança de comportamento esperada desta fase, não regressão.
+- **Regressão do World Boss confirmada**: `test/world-boss.test.js` (24 testes) roda inteiro e verde, sem nenhuma mudança — `game-data/world-boss.js` não foi tocado por esta fase.
+
+## Migração de banco
+
+**Nenhuma migration nova foi necessária ou criada.** `tvtRewards` vive no mesmo `characters.save` (jsonb), mesmo padrão de `wbRewards`. As 5 migrations históricas em `supabase/migrations/` não foram tocadas.
+
+## Próxima fase
+
+Bloco principal de Eventos completo (EventManager + World Boss + Team vs Team). Próxima grande fase recomendada: Guildas/Clãs — não iniciada nesta entrega.
