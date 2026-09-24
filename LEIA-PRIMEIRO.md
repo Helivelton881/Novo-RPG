@@ -285,3 +285,94 @@ O Render serve o mesmo `server.js` (HTTP + WebSocket na mesma porta, via `PORT`)
 **Não fechado nesta sessão (limitação de ferramenta, não do jogo):** não completei o loop inteiro da missão tutorial (falar com aldeã → matar 3 slimes com quest ativa → voltar → resgatar recompensa) porque a NPC "aldeã" ficou a ~1800px de distância do ponto onde cheguei, e mover o personagem via automação de browser usa eventos de teclado sintéticos (`keydown`+`keyup` instantâneos) que avançam ~0.1px por tecla — uma fração do que um jogador real com tecla segurada faria. Cobrir essa distância via automação exigiria dezenas de milhares de eventos sintéticos, custo desproporcional ao valor da validação (o mecanismo de progresso de missão já foi confirmado correto por leitura direta do código-fonte do cliente, `questHtml()`/`applyQuestResult()`). Não é um problema do servidor nem do jogo — é uma limitação conhecida de dirigir este tipo de jogo (WASD, sem clique-para-mover) por automação de teclas sintéticas.
 
 **Conclusão da Fase 5:** o vertical slice existente sobrevive intacto a todas as mudanças server-autoritativas das Fases 1-4, validado em produção real (não em mock, não em teste isolado) — conta, personagem, mundo, movimento/colisão, IA de monstro, combate, level-up, recompensas e persistência via Supabase funcionam de ponta a ponta sem nenhuma funcionalidade quebrada ou regressão encontrada.
+
+# Fase 5.1 — fundação de equipamentos (UID, nível x raridade, posse server-authoritative)
+
+**Motivação:** antes da Fase 5.1, `sanitizeItem()` validava STATS de um item (impedia `atk:999999`) mas nunca validava POSSE — `handleCharacters` (PUT genérico) aceitava `save.bag`/`save.eq` inteiros vindos do cliente e só recalculava os números a partir do `tier`. Um personagem "rastreado" (`isTracked`) podia editar `localStorage`/memória e mandar um PUT com equipamento forjado (stats legítimos pro tier, mas nunca comprado) — a compra pela loja (`handleShop`) já era uma transação de verdade desde a Fase 3, mas o PUT genérico não fechava essa brecha. Esta fase fecha essa brecha *antes* de introduzir raridades valiosas (Raro/Épico/Lendário) ou drops, exatamente como pedido: fundação primeiro.
+
+## Modelo canônico de item
+
+```
+{ uid, type, lv, rarity, enchant, n, atk, def, hp, blk, spd, req }
+```
+
+- **`uid`** — `crypto.randomUUID()` (Node), nunca `Math.random()`. Gerado uma única vez por item, no servidor, e nunca regenerado (nem em `sanitizeItem`, nem em `sanitizeSave`, nem no PUT genérico) — estável entre save/reload/equip/desequip/venda/recompra.
+- **`type`** — mesmo domínio de sempre (`sword`/`bow`/`staffd`/`staffm`/`shield`/`armor`/`helmet`/`cape`/`jewel`/`boots`).
+- **`lv`** — progressão do equipamento: uma das 11 faixas `1,4,8,12,16,20,24,28,32,36,40`. Separado de `rarity` de propósito (era o campo `tier` antigo, que acoplava as duas coisas).
+- **`rarity`** — `basic`/`rare`/`epic`/`legendary` (exibido como Básico/Raro/Épico/Lendário). Multiplica a stat base (`basic=1.00, rare=1.10, epic=1.20, legendary=1.35`) mas **nunca** o `req` — progressão de nível continua sendo o que mais importa (Lendário Nv20 nunca supera Básico Nv40; validado em teste, ver `test/gear-data.test.js`).
+- **`enchant`** — sempre `0` nesta fase (preparação pra Fase 5.4). `sanitizeItem` já trava o valor em `0..10` caso um dia apareça algo fora disso.
+- **`req`** — nível mínimo de personagem pra equipar. Pra arma/armadura sempre `= lv` (igual sempre foi). Pra escudo/capacete/capa/joia/bota: `0` nas 5 faixas legadas (`lv<=20`, preserva o comportamento antigo — nunca tiveram gate) e `= lv` só nas 6 faixas novas (`lv>20`, conteúdo que nunca existiu antes, então não há comportamento antigo pra quebrar). Decisão deliberada, documentada aqui pra não parecer inconsistência.
+
+## Fonte única de dados: `game-data/gear-data.js`
+
+Antes, `GEAR_TIERS`/`GEAR_PRICES` viviam duplicados em `server.js` e `index.html` (risco real de divergência a cada gear novo). Agora `game-data/gear-data.js` é a única fonte — `server.js` faz `require('./game-data/gear-data.js')`, `index.html` carrega `<script src="/game-data/gear-data.js"></script>` antes do script principal (servido estaticamente, sem build step). Contém: `GEAR_LEVELS`, `RARITY`, `GEAR_STATS`/`statsFor()`, `GEAR_NAMES`/`nameFor()`, `GEAR_PRICES`/`priceFor()`, `SELL_PRICES`/`sellPriceFor()`, `LEGACY_TIER_LEVEL` (migração). `test/shop-catalog.test.js` verifica explicitamente que os dois lados carregam essa fonte (não duas cópias).
+
+### Curva de nível 1-40 (como foi derivada, não chutada)
+
+Os 5 pontos legados (`lv=1,4,8,12,20`) são os valores antigos **preservados byte-a-byte** (nenhum item existente muda de força ao migrar). Os 6 pontos novos (`16,24,28,32,36,40`) continuam a mesma taxa de crescimento por nível que já existia entre os dois últimos pontos reais (`lv12→lv20`) de cada stat — extrapolação linear simples a partir de números que já estavam balanceados, não uma tabela inventada. Exemplo (`sword.atk`): `2,5,9,14,18,22,26,30,34,38,42` (lv12→20 crescia 1.0 atk/nível; a extrapolação mantém esse 1.0/nível daí em diante). Todo tipo tem crescimento estritamente monotônico verificado em teste (`test/gear-data.test.js`).
+
+### Preços (Mercador, raridade `basic` apenas)
+
+`1/4/8/12` preservam os preços já praticados (`sword: 60/180/450/900`). `20` preenche uma lacuna real — o tier5 já existia em stats mas nunca tinha preço de loja (só vinha de baú). `16-40` seguem uma curva de razão decrescente (mesmo formato da curva 1→12 real: 3x, 2.5x, 2x, ... tapeia até ~1.24x), calibrada contra renda estimada de abate (`rollMobLoot`) + recompensa de missão (`QUEST_REWARDS`) por faixa de mapa, mirando ~15-40min de jogo normal por peça. **Isto não é garantia matematicamente exata** — não há telemetria real de produção ainda, é a melhor estimativa a partir da economia hoje; ajustar com dados reais depois é esperado, não uma falha desta fase.
+
+| Nv | Espada/Arco/Cajado | Armadura | Escudo/Elmo/Bota | Capa | Joia |
+|----|---:|---:|---:|---:|---:|
+| 1  | 60   | 30   | 25   | 20   | 40   |
+| 4  | 180  | 120  | 100  | 80   | 160  |
+| 8  | 450  | 320  | 265  | 215  | 425  |
+| 12 | 900  | 700  | 585  | 465  | 935  |
+| 16 | 1500 | 1150 | 960  | 765  | 1535 |
+| 20 | 2200 | 1650 | 1375 | 1100 | 2200 |
+| 24 | 3200 | 2350 | 1960 | 1565 | 3135 |
+| 28 | 4400 | 3200 | 2665 | 2135 | 4265 |
+| 32 | 5800 | 4200 | 3500 | 2800 | 5600 |
+| 36 | 7400 | 5350 | 4460 | 3565 | 7135 |
+| 40 | 9200 | 6650 | 5540 | 4435 | 8865 |
+
+## Mercador Nv 1-40
+
+Vende **só `rarity:'basic'`**, nas 11 faixas, pra arma da classe (`guerreiro→sword`, `arqueiro→bow`, `mago→staffm`, `druida→staffd` — confirmado no código antes de mexer) + armadura + capa + joia + botas + escudo (só guerreiro). `buildShop()` no cliente e `handleShop`'s `buy_gear` no servidor usam a mesma `GEAR_DATA.GEAR_LEVELS`/`priceFor` — trocar o wire de `{type,tier}` pra `{type,lv}` foi intencional (cliente e servidor sempre andam juntos no deploy; dado *persistido* antigo continua migrando normalmente).
+
+## UID e posse server-authoritative
+
+`sanitizeItem()` aceita dois formatos: canônico (`{uid,type,lv,rarity,enchant}`, mantém o `uid` se for um UUID válido) e legado (`{type,tier}`, migra pra `lv` via `LEGACY_TIER_LEVEL` — os 5 valores reais de stats são idênticos, então nada muda de força — e ganha um `uid` novo **uma única vez**; nas leituras seguintes já bate no formato canônico e o uid persiste). Stats/nome são **sempre** recalculados a partir de `type+lv+rarity`, nunca aceitos do cliente.
+
+**`lockOwnedItems(candidateSave, ownedSave)`** (server.js) é o bloqueador crítico, usado só pelo PUT genérico (`handleCharacters`) quando o personagem já tem progresso real (`isTracked`): um item só sobrevive no PUT se o `uid` dele já existia no save **persistido** antes desse PUT (mochila ou equipado, não importa o slot — só a posse). Item cujo uid o servidor nunca viu é descartado silenciosamente (nunca fabrica item). Item que sobrevive sempre usa a cópia canônica do servidor (ignora qualquer stat/rarity/enchant/lv forjado no payload). Item que o cliente "esqueceu" de mandar de volta volta pra mochila em vez de desaparecer (a trava nunca é motivo pra perder item). **Equipar/desequipar continua funcionando 100% sem nenhuma mudança no fluxo existente**, porque mover um uid já possuído entre `bag`/`eq` não muda o conjunto de uids, só a posição — passa pela trava livremente.
+
+Além disso, `handleShop` ganhou duas operações explícitas por uid — `equip_item`/`unequip_item` — pra personagens online (valida nível, classe, slot, mochila cheia) e persistem imediatamente (não dependem do PUT debounced de 8s). `sell_item`/`buyback` agora aceitam `uid` (preferencial) mantendo `bagIndex` como fallback; `buyback` sempre devolve exatamente o mesmo objeto vendido (mesmo uid, nunca gera um novo).
+
+**Anti-duplicação:** `dedupeByUid()` garante que um uid nunca aparece duas vezes numa lista; `sanitizeSave` aplica isso dentro da mochila e no cruzamento mochila+equipado (mochila vence, cópia equipada é descartada). Save antigo com uid duplicado (não deveria existir, mas se existir) nunca gera 2 cópias — perde silenciosamente a segunda ocorrência, documentado e testado.
+
+**Concorrência:** `withCharLock(charId, fn)` (mutex simples em memória, fila por personagem) serializa `handleShop` e `handleChest` — duas requisições do mesmo personagem nunca leem o mesmo estado "antigo" e se sobrescrevem. **Limitação documentada:** só protege dentro desta instância Node (Render roda uma instância hoje); com mais de uma instância precisaria virar lock real no banco (transação Postgres). `handleCharacters` (PUT) e `handleQuest` não estão sob o lock — risco menor (sync periódico debounced, não ação de usuário disparada rapidamente), mas é uma lacuna conhecida, não resolvida nesta fase.
+
+## Ícones (sem sprites novos ainda)
+
+Arma (`sword`/`bow`/`staffd`/`staffm`) reusa os 4 frames já existentes (`w_*1..4`), escolhidos pela faixa de nível (`lv<4→1, lv<8→2, lv<12→3, senão→4`) — variedade visual sem sprite novo. Raridade controla tint/gild (reaproveitando a paleta que já existia pra `tier`: `basic`=sem tint, `rare`=azul, `epic`=roxo, `legendary`=dourado+gild), independente do nível. Slots sem múltiplos frames (`shield`/`armor`/`helmet`/`cape`/`jewel`/`boots`) usam só o tint por raridade. Nenhum ícone quebra pra Nv16-40. Documentado aqui pra quando sprites próprios por faixa forem produzidos — plugam em `GEAR[type].icons` sem mexer na lógica de seleção.
+
+## Nomes originais
+
+Todos os 54 nomes novos (6 faixas × 9 tipos) seguem a zona de campo associada àquele nível (`serra→pantano→torre→ilhas→vulcão`), ex.: `Lâmina da Matilha` (Nv16, serra/lobos) → `Lâmina do Vulcão` (Nv40, endgame). Nenhum nome copiado de Lineage II/WoW/etc.
+
+## Compatibilidade com personagens e itens antigos
+
+Migração acontece **na leitura**, sem migration de banco (não precisa — o item já vive em `characters.save` jsonb, só o formato interno do item mudou). Fluxo: `sanitizeItem` vê um item sem `uid`/`lv`/`rarity` válidos → mapeia `tier→lv` via `LEGACY_TIER_LEVEL` (`1→1, 2→4, 3→8, 4→12, 5→20`) → `rarity='basic'` → gera `uid` novo → próxima gravação já persiste no formato novo. Nenhuma migration em `supabase/migrations/` foi necessária ou criada (mandato desta fase: não normalizar equipamento em tabela própria só pra isso).
+
+## O que NÃO entrou nesta fase (de propósito)
+
+- **Enchant funcional** (botão, risco de quebra +4..+10) — só o campo `enchant:0` existe. Entra na Fase 5.4, depois que TvT/World Boss não dependerem disso.
+- **Drops de Raro/Épico/Lendário** — `createGear({type,lv,rarity})` já existe e já suporta as 4 raridades (testado), mas nenhum monstro/baú chama com raridade acima de `basic` ainda. A Fase 5.3 liga o drop.
+- **World Boss, TvT, Guilda, página pública, Phantom Players** — inalterados, fora do escopo.
+
+## Testes adicionados
+
+- `test/gear-data.test.js` (13 testes, sempre roda, sem servidor/Supabase) — curva de nível, multiplicador de raridade, req independente de raridade, preços, nomes.
+- `test/item-model.test.js` (22 testes, sempre roda — `server.js` exporta `sanitizeItem`/`sanitizeSave`/`lockOwnedItems`/`createGear`/`dedupeByUid` só pra isso, atrás de `require.main===module`, sem mudar como `node server.js` roda) — uid único/estável, migração legada, stats/nome sempre recalculados, tampering de rarity/enchant/lv/atk, posse (`lockOwnedItems`), duplicação, equip/desequip via troca de posição.
+- `test/shop-catalog.test.js` (4 testes, sempre roda) — reescrito: antes fazia regex+`vm` em cima de literais que não existem mais; agora confirma que cliente e servidor carregam a mesma `game-data/gear-data.js` e que as 11 faixas existem pras 4 classes.
+- `test/shop.test.js` (19 testes, `{skip:!hasSupabase()}`) — compra/venda/recompra/equip/unequip por uid, tampering via PUT bruto (item forjado, uid duplicado, rarity/enchant/lv/atk trocados), compras concorrentes (mutex).
+- **Os 3 `setInterval` de escopo de módulo em `server.js`** (tick de IA, ping de WS, respawn) ganharam `.unref()` — sem isso, `require('../server.js')` num teste unitário nunca deixava o processo sair sozinho (achado real durante esta fase, não uma limitação assumida de antemão). Não muda nada rodando como servidor de verdade.
+
+**Limitação honesta:** os 19 testes de `shop.test.js` (incluindo os de tampering, que são os mais importantes desta fase) **não puderam ser executados neste ambiente** — sem `SUPABASE_URL`/`SUPABASE_SECRET_KEY` locais (mesma limitação de todas as fases anteriores). Sintaxe validada, lógica equivalente já coberta por `item-model.test.js` (que testa `lockOwnedItems`/`sanitizeItem` diretamente, sem precisar de HTTP/Supabase), e a integração real foi confirmada pelo smoke test em produção (ver abaixo). Vão rodar de verdade no GitHub Actions (se os secrets estiverem configurados lá) e sempre que alguém rodar `npm test` com Supabase configurado.
+
+## Próxima fase
+
+Fase 5.2 (dungeon + inventário/economia completamente server-authoritative) é a sugestão natural do roadmap, mas fica pra quando for solicitada — esta fase não deve avançar sozinha pra Enchant, World Boss ou TvT sem essa fundação ser usada em produção primeiro.
