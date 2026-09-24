@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { WebSocketServer, WebSocket } = require('ws');
+const GEAR_DATA = require('./game-data/gear-data.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -116,21 +117,19 @@ const MOB_MANIFEST = {
 };
 const MIME = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.json':'application/json; charset=utf-8'};
 
-// Espelha GEAR/tiers do index.html (so os campos usados pela validacao
-// anti-cheat) para recalcular stats de item no servidor em vez de confiar
-// nos numeros que o cliente manda.
-const GEAR_TIERS = {
-  sword:  [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
-  bow:    [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
-  staffd: [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
-  staffm: [null,{atk:2,req:1},{atk:5,req:4},{atk:9,req:8},{atk:14,req:12},{atk:22,req:20}],
-  shield: [null,{def:2,blk:.10},{def:4,blk:.14},{def:7,blk:.18},{def:11,blk:.22},{def:16,blk:.26}],
-  armor:  [null,{def:2,hp:10,req:1},{def:4,hp:25,req:4},{def:7,hp:45,req:8},{def:10,hp:70,req:12},{def:15,hp:105,req:20}],
-  helmet: [null,{def:1,hp:6},{def:3,hp:14},{def:5,hp:28},{def:8,hp:44},{def:12,hp:66}],
-  cape:   [null,{def:1,hp:8},{def:2,hp:16},{def:4,hp:30},{def:6,hp:48},{def:9,hp:72}],
-  jewel:  [null,{atk:1,hp:5},{atk:2,hp:12},{atk:4,hp:20},{atk:6,hp:34},{atk:9,hp:52}],
-  boots:  [null,{def:1,spd:.03},{def:2,spd:.05},{def:4,spd:.08},{def:6,spd:.12},{def:9,spd:.16}],
-};
+// Modelo canonico de item (Fase 5.1): uid + type + lv (progressao 1..40) +
+// rarity (basic/rare/epic/legendary) + enchant (0..10, so 0 nesta fase) --
+// ver game-data/gear-data.js (fonte unica, compartilhada com o cliente) pra
+// as tabelas de stats/nome/preco por type x lv x rarity.
+function createGear(type, lv, rarity) {
+  const stats = GEAR_DATA.statsFor(type, lv, rarity);
+  if (!stats) return null;
+  return {
+    uid: crypto.randomUUID(), type, lv, rarity, enchant: 0,
+    n: GEAR_DATA.nameFor(type, lv),
+    atk: stats.atk || 0, def: stats.def || 0, hp: stats.hp || 0, blk: stats.blk || 0, spd: stats.spd || 0, req: stats.req || 0,
+  };
+}
 const EQ_SLOTS = ['sword','shield','armor','helmet','cape','jewel','boots'];
 const COUNTER_FIELDS = ['gk','ki','kit','kt','ktt','kp','kpt','ks','ke','kw','kwt','kv','kvt','ap','key','scr','sl','gb','bs','dt'];
 // Espelha exatamente a cadeia de contadores no comeco de killMob() (index.html):
@@ -235,15 +234,9 @@ const CLASS_ITEM_TYPES = {
   arqueiro:  ['bow','armor','helmet','cape','jewel','boots'],
 };
 
-// Espelha os precos reais da loja (buildShop/shopDo em index.html) pra
-// validar compra/venda no servidor em vez de confiar no que o cliente manda.
-const GEAR_PRICES = {
-  sword: {1:60, 2:180, 3:450, 4:900}, bow: {1:60, 2:180, 3:450, 4:900},
-  staffd: {1:60, 2:180, 3:450, 4:900}, staffm: {1:60, 2:180, 3:450, 4:900},
-  shield: {1:25}, armor: {1:30, 2:120, 3:320, 4:700}, helmet: {1:25}, cape: {1:20}, jewel: {1:40}, boots: {1:25},
-};
+// Precos de compra/venda de equipamento agora vem de GEAR_DATA (fonte unica,
+// compartilhada com o cliente) -- ver priceFor()/sellPriceFor().
 const STK_PRICES = {pv:10, pa:10, ap:5, scr:30};
-const SELL_PRICES = [0, 8, 22, 60, 140, 320];
 const PORTAL_PRICES = {floresta:400, cripta:900, serra:1600, pantano:2500, torre:3600, ilhas:5000, vulcao:7000};
 const GEM_SELL_PRICE = 25;
 const SKILL_RESET_PRICE = 30;
@@ -289,22 +282,42 @@ const CHEST_REWARDS = {
   chestOpen6: {field:'chest6', gold:200, tier:5},
   chestOpen7: {field:'chest7', gold:250, tier:5},
 };
+// `tier` aqui e o campo legado de CHEST_REWARDS (4 ou 5) -- convertido pra lv
+// real via LEGACY_TIER_LEVEL, rarity sempre 'basic' (drop de raridade melhor
+// fica pra Fase 5.3, ver LEIA-PRIMEIRO.md). uid novo garantido por createGear.
 function rollChestItem(save, lvl, tier) {
   const types = CLASS_ITEM_TYPES[save.cls] || ['armor'];
   const type = types[Math.floor(Math.random() * types.length)];
-  const item = sanitizeItem({ type, tier });
+  const lv = GEAR_DATA.LEGACY_TIER_LEVEL[tier] || 12;
+  const item = createGear(type, lv, 'basic');
   if (!item) return null;
   const slot = typeSlot(type), canEquip = !save.eq[slot] && (!item.req || lvl >= item.req);
   if (canEquip) save.eq[slot] = item;
   else if (save.bag.length < 24) save.bag.push(item);
   else return null;
   return item;
-  return { xp, lvl };
 }
 
 // shopSold e efemero por personagem (lista de recompra), como party --
 // nao sobrevive a um restart, nao precisa de tabela.
 const shopSoldByChar = new Map();
+
+// Mutex simples por personagem (Fase 5.1): serializa qualquer operacao que
+// faz leitura-altera-grava no mesmo characters.save (compra/venda/equipar/
+// desequipar em handleShop, loot de bau em handleChest) pra duas requisicoes
+// concorrentes do mesmo personagem nunca lerem o mesmo estado "antigo" e
+// sobrescreverem uma a outra (perderia ouro debitado ou duplicaria item).
+// So protege dentro desta instancia Node (o Render roda uma instancia unica
+// hoje) -- se um dia houver mais de uma instancia, isso precisa virar um lock
+// real no banco (ex.: transacao Postgres); documentado como limitacao atual.
+const charLocks = new Map();
+function withCharLock(charId, fn) {
+  const run = () => fn();
+  const prior = charLocks.get(charId) || Promise.resolve();
+  const result = prior.then(run, run);
+  charLocks.set(charId, result.catch(() => {}));
+  return result;
+}
 
 // Espelha a formula de dano e o cooldown de cada skill (CLASSES/SKILL_FX em
 // index.html) pra computar o dano no servidor em vez de aceitar o numero que
@@ -382,13 +395,49 @@ function readJson(req) {
   });
 }
 
+const UID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Reconstroi um item inteiro a partir de limites plausiveis, nunca confiando
+// em nenhum campo que o cliente manda (tipo precisa existir em GEAR_DATA;
+// nivel/raridade precisam ser valores validos; stats/nome SEMPRE recalculados
+// no servidor, o que o cliente mandar nesses campos e ignorado).
+//
+// Aceita dois formatos de entrada:
+// - Canonico (modelo novo): {uid, type, lv, rarity, enchant}. uid e mantido
+//   se for um UUID valido (posse/identidade nunca muda so por passar aqui de
+//   novo -- ver lockOwnedItems() pra onde a POSSE de fato e garantida).
+// - Legado (pre-Fase-5.1): {type, tier} (tier 1-5). Migra pra lv via
+//   LEGACY_TIER_LEVEL (os 5 valores reais de stats sao identicos, entao um
+//   item existente nao muda de forca ao migrar), rarity vira 'basic', e
+//   ganha um uid novo (nunca existiu antes) -- so acontece aqui, na leitura;
+//   depois de gravado de volta com uid, o item passa a bater no formato
+//   canonico nas proximas leituras e o uid nunca mais muda.
 function sanitizeItem(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  const tiers = GEAR_TIERS[raw.type]; if (!tiers) return null;
-  const tier = Math.round(Number(raw.tier));
-  if (!Number.isInteger(tier) || tier < 1 || tier >= tiers.length) return null;
-  const t = tiers[tier];
-  return {type: raw.type, tier, n: cleanText(raw.n, 40) || 'Item', atk: t.atk || 0, def: t.def || 0, hp: t.hp || 0, blk: t.blk || 0, spd: t.spd || 0, req: t.req || 0};
+  if (!GEAR_DATA.GEAR_STATS[raw.type]) return null;
+  let lv = Math.round(Number(raw.lv));
+  let rarity = typeof raw.rarity === 'string' && GEAR_DATA.RARITY[raw.rarity] ? raw.rarity : null;
+  if (!GEAR_DATA.GEAR_LEVELS.includes(lv) || !rarity) {
+    const legacyLv = GEAR_DATA.LEGACY_TIER_LEVEL[Math.round(Number(raw.tier))];
+    if (!legacyLv) return null;
+    lv = legacyLv; rarity = 'basic';
+  }
+  const stats = GEAR_DATA.statsFor(raw.type, lv, rarity);
+  if (!stats) return null;
+  const enchant = Math.max(0, Math.min(10, Math.round(Number(raw.enchant) || 0)));
+  const uid = typeof raw.uid === 'string' && UID_RE.test(raw.uid) ? raw.uid : crypto.randomUUID();
+  return {
+    uid, type: raw.type, lv, rarity, enchant,
+    n: GEAR_DATA.nameFor(raw.type, lv),
+    atk: stats.atk || 0, def: stats.def || 0, hp: stats.hp || 0, blk: stats.blk || 0, spd: stats.spd || 0, req: stats.req || 0,
+  };
+}
+// Garante que nenhum uid se repete numa lista de itens (mantem a primeira
+// ocorrencia). Usado tanto dentro da mochila quanto no cruzamento
+// mochila+equipado -- um mesmo item fisico nunca pode "existir" duas vezes.
+function dedupeByUid(items, seen) {
+  const out = [];
+  for (const it of items) { if (!it || seen.has(it.uid)) continue; seen.add(it.uid); out.push(it); }
+  return out;
 }
 
 // Reconstroi o save inteiro a partir de limites plausiveis em vez de
@@ -412,18 +461,25 @@ function sanitizeSave(raw, lvl) {
     gunlock: save.gunlock && typeof save.gunlock === 'object' ? Object.fromEntries(Object.entries(save.gunlock).slice(0, 20).map(([k, v]) => [cleanText(k, 24), !!v])) : {},
     skSeen: save.skSeen && typeof save.skSeen === 'object' ? Object.fromEntries(Object.entries(save.skSeen).slice(0, 20).map(([k, v]) => [cleanText(k, 20), !!v])) : {},
     sk: save.sk && typeof save.sk === 'object' ? Object.fromEntries(Object.entries(save.sk).slice(0, 10).map(([k, v]) => [cleanText(k, 20), clampInt(v, 3)])) : {},
-    bag: Array.isArray(save.bag) ? save.bag.slice(0, 24).map(sanitizeItem).filter(Boolean) : [],
+    bag: [],
     eq: {},
     chat: Array.isArray(save.chat) ? save.chat.slice(-40).map(m => ({n: cleanText(m && m.n, 20), t: cleanText(m && m.t, 240), sys: !!(m && m.sys)})) : [],
   };
   for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
+  // Um uid nunca pode aparecer duas vezes (mochila+mochila ou mochila+
+  // equipado) -- o segundo lugar onde apareceria e descartado (nunca gera
+  // copia extra do item).
+  const seenUids = new Set();
+  out.bag = dedupeByUid(Array.isArray(save.bag) ? save.bag.slice(0, 24).map(sanitizeItem) : [], seenUids);
   // Um item equipado com req (nivel minimo) maior que o nivel real nunca
   // acontece num cliente honesto (giveItem/loja so equipam se lvl>=req) --
   // so surge editando o save direto. Em vez de aceitar, desequipa e devolve
   // pra mochila (nunca perde o item, so tira a vantagem indevida do slot).
   for (const s of EQ_SLOTS) {
     let item = save.eq && save.eq[s] ? sanitizeItem(save.eq[s]) : null;
-    if (item && item.req && item.req > lvl) { if (out.bag.length < 24) out.bag.push(item); item = null; }
+    if (item && seenUids.has(item.uid)) item = null; // ja apareceu (mochila ou outro slot) -- descarta a copia
+    if (item && item.req && item.req > lvl) { if (out.bag.length < 24) { out.bag.push(item); seenUids.add(item.uid); } item = null; }
+    if (item) seenUids.add(item.uid);
     out.eq[s] = item;
   }
   // Pontos de habilidade gastos (rank-1 por skill) nunca podem passar de
@@ -437,6 +493,49 @@ function sanitizeSave(raw, lvl) {
   const spentPts = validSkills.reduce((sum, id) => sum + (filteredSk[id] - 1), 0);
   out.sk = spentPts > Math.max(0, lvl - 1) ? Object.fromEntries(validSkills.map(id => [id, 1])) : filteredSk;
   return out;
+}
+
+// Bloqueador critico de posse (Fase 5.1): usado so pelo PUT generico de
+// personagem (handleCharacters), quando o personagem ja tem progresso real
+// (isTracked). Ate aqui, sanitizeItem/sanitizeSave garantem que um item tem
+// STATS legitimos pro lv/rarity dele -- mas nao provam que o personagem
+// realmente ADQUIRIU aquele item. Sem essa trava, editar localStorage/save
+// em memoria e mandar um PUT com bag/eq forjado (item novo com uid
+// inventado) criava equipamento de graca.
+//
+// Regra: um item so sobrevive no PUT se o uid dele ja existia no save
+// PERSISTIDO antes desse PUT (em qualquer lugar -- mochila ou equipado, nao
+// importa o slot: so a posse). Itens legitimamente novos (compra, baú,
+// recompensa de missao/abate) nunca passam por aqui -- entram direto no
+// banco pelos proprios endpoints (handleShop/handleChest/creditKillReward).
+//
+// Isso NAO quebra equipar/desequipar client-side: contanto que o cliente so
+// mova itens que ja possuia entre bag/eq (exatamente o que equipFromBag/
+// unequipSlot fazem hoje), o conjunto de uids não muda, so a posicao -- passa
+// pela trava sem problema nenhum, sem precisar de nenhuma mudanca no fluxo
+// existente. Só barra uid que o servidor nunca viu.
+function lockOwnedItems(candidateSave, ownedSave) {
+  const byUid = new Map();
+  for (const it of ownedSave.bag) byUid.set(it.uid, it);
+  for (const s of EQ_SLOTS) if (ownedSave.eq[s]) byUid.set(ownedSave.eq[s].uid, ownedSave.eq[s]);
+  const used = new Set();
+  const bag = [];
+  for (const it of candidateSave.bag) {
+    if (!it || !byUid.has(it.uid) || used.has(it.uid)) continue;
+    used.add(it.uid); bag.push(byUid.get(it.uid)); // sempre a copia canonica do servidor, nunca a do cliente
+  }
+  const eq = {};
+  for (const s of EQ_SLOTS) {
+    const it = candidateSave.eq[s];
+    if (it && byUid.has(it.uid) && !used.has(it.uid)) { used.add(it.uid); eq[s] = byUid.get(it.uid); }
+    else eq[s] = null;
+  }
+  // Item que o personagem possuia mas o cliente "esqueceu" de mandar de
+  // volta nesse PUT (bug de sincronizacao, aba antiga, etc.) volta pra
+  // mochila em vez de desaparecer -- essa trava nunca é motivo pra perder item.
+  for (const it of ownedSave.bag) if (!used.has(it.uid) && bag.length < 24) { used.add(it.uid); bag.push(it); }
+  for (const s of EQ_SLOTS) { const it = ownedSave.eq[s]; if (it && !used.has(it.uid) && bag.length < 24) { used.add(it.uid); bag.push(it); } }
+  return { bag, eq };
 }
 
 function authIp(req) {
@@ -610,6 +709,8 @@ async function handleCharacters(req, res, pathname) {
         if (isTracked) {
           lvl = current.lvl; save.lvl = lvl; save.xp = currentSave.xp; save.quest = currentSave.quest;
           for (const f of QUEST_GATE_FIELDS) save[f] = currentSave[f];
+          const locked = lockOwnedItems(save, currentSave);
+          save.bag = locked.bag; save.eq = locked.eq;
         }
       }
       const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}`, body:{lvl, map: save.map, save}, prefer:'return=representation'});
@@ -637,11 +738,13 @@ const QUEST_ID_RE = /^\/api\/characters\/([0-9a-fA-F-]{8,36})\/quest$/;
 const CHEST_ID_RE = /^\/api\/characters\/([0-9a-fA-F-]{8,36})\/chest$/;
 
 // Loja/economia server-autoritativa: le o save atual do personagem no banco,
-// aplica a transacao contra as tabelas de preco acima (nunca confia em preco
-// ou "eu tenho X moedas" que o cliente manda) e grava o resultado. Fecha a
-// brecha que a sanitizacao do save sozinha nao fecha: sanitizeItem garante
-// que um item tem stats legitimos pro tier dele, mas nao garante que foi
-// pago -- so uma transacao de verdade garante isso.
+// aplica a transacao contra as tabelas de preco de GEAR_DATA (nunca confia em
+// preco, uid ou "eu tenho X moedas" que o cliente manda) e grava o resultado
+// -- tudo dentro de withCharLock, serializando qualquer outra operacao
+// concorrente do MESMO personagem. Fecha a brecha que a sanitizacao do save
+// sozinha nao fecha: sanitizeItem garante que um item tem stats legitimos
+// pro lv/rarity dele, mas nao garante que foi pago -- so uma transacao de
+// verdade (ou lockOwnedItems, pro PUT generico) garante isso.
 async function handleShop(req, res, pathname) {
   const m = SHOP_ID_RE.exec(pathname);
   if (!m) return false;
@@ -650,86 +753,110 @@ async function handleShop(req, res, pathname) {
   try {
     const user = await resolveUser(req);
     if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
-    const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
-    const row = rows0[0];
-    if (!row) { json(res,404,{error:'Personagem não encontrado'}); return true; }
-    const lvl = row.lvl;
-    const save = sanitizeSave(row.save, lvl);
     const input = await readJson(req);
-    const action = String(input.action || '');
-    let error = null;
+    const result = await withCharLock(charId, async () => {
+      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
+      const row = rows0[0];
+      if (!row) return {status:404, body:{error:'Personagem não encontrado'}};
+      const lvl = row.lvl;
+      const save = sanitizeSave(row.save, lvl);
+      const action = String(input.action || '');
+      let error = null;
 
-    if (action === 'buy_gear') {
-      const type = String(input.type || ''), tier = Math.round(Number(input.tier));
-      const price = GEAR_PRICES[type] && GEAR_PRICES[type][tier];
-      const item = price ? sanitizeItem({type, tier}) : null;
-      if (!item) error = 'Item inválido';
-      else if (!(CLASS_ITEM_TYPES[save.cls] || []).includes(type)) error = 'Item incompatível com a classe';
-      else if (save.gold < price) error = 'Moedas insuficientes';
-      else {
-        const slot = typeSlot(type), canEquip = !save.eq[slot] && (!item.req || lvl >= item.req);
-        if (!canEquip && save.bag.length >= SHOP_BAG_MAX) error = 'Mochila cheia';
-        else { save.gold -= price; if (canEquip) save.eq[slot] = item; else save.bag.push(item); }
-      }
-    } else if (action === 'buy_stack') {
-      const key = String(input.key || ''), qty = Math.max(1, Math.min(99, Math.round(Number(input.qty) || 1)));
-      const unit = ['pv','pa','ap','scr'].includes(key) ? STK_PRICES[key] : null;
-      if (!unit) error = 'Item inválido';
-      else if (save.gold < unit * qty) error = 'Moedas insuficientes';
-      else if ((save[key] || 0) + qty > 99) error = 'Você não consegue carregar tanto assim';
-      else { save.gold -= unit * qty; save[key] = (save[key] || 0) + qty; }
-    } else if (action === 'sell_item') {
-      const idx = Math.round(Number(input.bagIndex));
-      if (!Number.isInteger(idx) || idx < 0 || idx >= save.bag.length) error = 'Item não encontrado';
-      else {
-        const it = save.bag[idx], price = SELL_PRICES[it.tier] || 0;
-        save.bag.splice(idx, 1); save.gold += price;
-        const list = shopSoldByChar.get(charId) || [];
-        list.unshift({it, price: Math.ceil(price * 1.5)}); list.length = Math.min(list.length, 10);
-        shopSoldByChar.set(charId, list);
-      }
-    } else if (action === 'sell_common') {
-      let total = 0; const kept = []; const list = shopSoldByChar.get(charId) || [];
-      for (const it of save.bag) {
-        if (it.tier === 1) { total += SELL_PRICES[1]; list.unshift({it, price: Math.ceil(SELL_PRICES[1] * 1.5)}); }
-        else kept.push(it);
-      }
-      save.bag = kept; save.gold += total; list.length = Math.min(list.length, 10);
-      shopSoldByChar.set(charId, list);
-    } else if (action === 'sell_gem') {
-      const qty = Math.round(Number(input.qty) || 1);
-      if (!Number.isInteger(qty) || qty < 1 || qty > save.gem) error = 'Sem gemas suficientes';
-      else { save.gem -= qty; save.gold += qty * GEM_SELL_PRICE; }
-    } else if (action === 'buyback') {
-      const idx = Math.round(Number(input.index));
-      const list = shopSoldByChar.get(charId) || [];
-      if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) error = 'Item não encontrado';
-      else {
-        const entry = list[idx];
-        if (save.gold < entry.price) error = 'Moedas insuficientes';
+      if (action === 'buy_gear') {
+        const type = String(input.type || ''), gearLv = Math.round(Number(input.lv));
+        const price = GEAR_DATA.priceFor(type, gearLv);
+        const item = price ? createGear(type, gearLv, 'basic') : null;
+        if (!item) error = 'Item inválido';
+        else if (!(CLASS_ITEM_TYPES[save.cls] || []).includes(type)) error = 'Item incompatível com a classe';
+        else if (save.gold < price) error = 'Moedas insuficientes';
         else {
-          const slot = typeSlot(entry.it.type), canEquip = !save.eq[slot] && (!entry.it.req || lvl >= entry.it.req);
+          const slot = typeSlot(type), canEquip = !save.eq[slot] && (!item.req || lvl >= item.req);
           if (!canEquip && save.bag.length >= SHOP_BAG_MAX) error = 'Mochila cheia';
-          else { list.splice(idx, 1); shopSoldByChar.set(charId, list); save.gold -= entry.price; if (canEquip) save.eq[slot] = entry.it; else save.bag.push(entry.it); }
+          else { save.gold -= price; if (canEquip) save.eq[slot] = item; else save.bag.push(item); }
         }
+      } else if (action === 'buy_stack') {
+        const key = String(input.key || ''), qty = Math.max(1, Math.min(99, Math.round(Number(input.qty) || 1)));
+        const unit = ['pv','pa','ap','scr'].includes(key) ? STK_PRICES[key] : null;
+        if (!unit) error = 'Item inválido';
+        else if (save.gold < unit * qty) error = 'Moedas insuficientes';
+        else if ((save[key] || 0) + qty > 99) error = 'Você não consegue carregar tanto assim';
+        else { save.gold -= unit * qty; save[key] = (save[key] || 0) + qty; }
+      } else if (action === 'sell_item') {
+        const uid = cleanText(input.uid, 40);
+        const idx = uid ? save.bag.findIndex(it => it.uid === uid) : Math.round(Number(input.bagIndex));
+        if (!Number.isInteger(idx) || idx < 0 || idx >= save.bag.length) error = 'Item não encontrado';
+        else {
+          const it = save.bag[idx], price = GEAR_DATA.sellPriceFor(it.lv);
+          save.bag.splice(idx, 1); save.gold += price;
+          const list = shopSoldByChar.get(charId) || [];
+          list.unshift({it, price: Math.ceil(price * 1.5)}); list.length = Math.min(list.length, 10);
+          shopSoldByChar.set(charId, list);
+        }
+      } else if (action === 'sell_common') {
+        let total = 0; const kept = []; const list = shopSoldByChar.get(charId) || [];
+        for (const it of save.bag) {
+          if (it.lv === 1) { const price = GEAR_DATA.sellPriceFor(1); total += price; list.unshift({it, price: Math.ceil(price * 1.5)}); }
+          else kept.push(it);
+        }
+        save.bag = kept; save.gold += total; list.length = Math.min(list.length, 10);
+        shopSoldByChar.set(charId, list);
+      } else if (action === 'sell_gem') {
+        const qty = Math.round(Number(input.qty) || 1);
+        if (!Number.isInteger(qty) || qty < 1 || qty > save.gem) error = 'Sem gemas suficientes';
+        else { save.gem -= qty; save.gold += qty * GEM_SELL_PRICE; }
+      } else if (action === 'buyback') {
+        const idx = Math.round(Number(input.index));
+        const list = shopSoldByChar.get(charId) || [];
+        if (!Number.isInteger(idx) || idx < 0 || idx >= list.length) error = 'Item não encontrado';
+        else {
+          const entry = list[idx];
+          if (save.gold < entry.price) error = 'Moedas insuficientes';
+          else {
+            const slot = typeSlot(entry.it.type), canEquip = !save.eq[slot] && (!entry.it.req || lvl >= entry.it.req);
+            if (!canEquip && save.bag.length >= SHOP_BAG_MAX) error = 'Mochila cheia';
+            // buyback devolve exatamente o mesmo objeto (mesmo uid) que foi vendido -- nunca gera um novo.
+            else { list.splice(idx, 1); shopSoldByChar.set(charId, list); save.gold -= entry.price; if (canEquip) save.eq[slot] = entry.it; else save.bag.push(entry.it); }
+          }
+        }
+      } else if (action === 'equip_item') {
+        const uid = cleanText(input.uid, 40);
+        const idx = save.bag.findIndex(it => it.uid === uid);
+        if (idx < 0) error = 'Item não encontrado';
+        else {
+          const it = save.bag[idx];
+          if (it.req && lvl < it.req) error = 'Nível insuficiente';
+          else if (!(CLASS_ITEM_TYPES[save.cls] || []).includes(it.type)) error = 'Item incompatível com a classe';
+          else {
+            const slot = typeSlot(it.type), old = save.eq[slot];
+            save.bag.splice(idx, 1); save.eq[slot] = it;
+            if (old) save.bag.push(old);
+          }
+        }
+      } else if (action === 'unequip_item') {
+        const slot = String(input.slot || '');
+        if (!EQ_SLOTS.includes(slot) || !save.eq[slot]) error = 'Nada equipado nesse espaço';
+        else if (save.bag.length >= SHOP_BAG_MAX) error = 'Mochila cheia';
+        else { save.bag.push(save.eq[slot]); save.eq[slot] = null; }
+      } else if (action === 'skill_reset') {
+        if (save.gold < SKILL_RESET_PRICE) error = 'Moedas insuficientes';
+        else { save.gold -= SKILL_RESET_PRICE; for (const k of Object.keys(save.sk)) save.sk[k] = 1; }
+      } else if (action === 'buy_portal') {
+        const dest = String(input.dest || ''), price = PORTAL_PRICES[dest];
+        if (!price) error = 'Destino inválido';
+        else if (save.gunlock[dest]) error = 'Já liberado';
+        else if (save.gold < price) error = 'Moedas insuficientes';
+        else { save.gold -= price; save.gunlock[dest] = true; }
+      } else {
+        error = 'Ação inválida';
       }
-    } else if (action === 'skill_reset') {
-      if (save.gold < SKILL_RESET_PRICE) error = 'Moedas insuficientes';
-      else { save.gold -= SKILL_RESET_PRICE; for (const k of Object.keys(save.sk)) save.sk[k] = 1; }
-    } else if (action === 'buy_portal') {
-      const dest = String(input.dest || ''), price = PORTAL_PRICES[dest];
-      if (!price) error = 'Destino inválido';
-      else if (save.gunlock[dest]) error = 'Já liberado';
-      else if (save.gold < price) error = 'Moedas insuficientes';
-      else { save.gold -= price; save.gunlock[dest] = true; }
-    } else {
-      error = 'Ação inválida';
-    }
 
-    if (error) { json(res,400,{error}); return true; }
-    const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
-    if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
-    json(res,200,{character: rows[0], shopSold: shopSoldByChar.get(charId) || []}); return true;
+      if (error) return {status:400, body:{error}};
+      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
+      if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
+      return {status:200, body:{character: rows[0], shopSold: shopSoldByChar.get(charId) || []}};
+    });
+    json(res, result.status, result.body); return true;
   } catch (err) {
     console.error('shop_error', err.message, err.status || '', err.detail || '');
     if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Loja online ainda não configurada no servidor.':'Não foi possível concluir. Tente novamente.'});
@@ -782,26 +909,29 @@ async function handleChest(req, res, pathname) {
   try {
     const user = await resolveUser(req);
     if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
-    const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
-    const row = rows0[0];
-    if (!row) { json(res,404,{error:'Personagem não encontrado'}); return true; }
-    const lvl = row.lvl;
-    const save = sanitizeSave(row.save, lvl);
     const input = await readJson(req);
-    const reward = CHEST_REWARDS[String(input.flag || '')];
+    const result = await withCharLock(charId, async () => {
+      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
+      const row = rows0[0];
+      if (!row) return {status:404, body:{error:'Personagem não encontrado'}};
+      const lvl = row.lvl;
+      const save = sanitizeSave(row.save, lvl);
+      const reward = CHEST_REWARDS[String(input.flag || '')];
 
-    if (!reward) { json(res,400,{error:'Baú inválido'}); return true; }
-    if (save[reward.field]) { json(res,400,{error:'Esse baú já foi aberto'}); return true; }
-    if (save.key < 1) { json(res,400,{error:'Sem chave'}); return true; }
+      if (!reward) return {status:400, body:{error:'Baú inválido'}};
+      if (save[reward.field]) return {status:400, body:{error:'Esse baú já foi aberto'}};
+      if (save.key < 1) return {status:400, body:{error:'Sem chave'}};
 
-    save.key -= 1;
-    save[reward.field] = true;
-    save.gold = Math.min(500000, save.gold + reward.gold);
-    const item = rollChestItem(save, lvl, reward.tier);
+      save.key -= 1;
+      save[reward.field] = true;
+      save.gold = Math.min(500000, save.gold + reward.gold);
+      const item = rollChestItem(save, lvl, reward.tier);
 
-    const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
-    if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
-    json(res,200,{character: rows[0], item}); return true;
+      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
+      if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
+      return {status:200, body:{character: rows[0], item}};
+    });
+    json(res, result.status, result.body); return true;
   } catch (err) {
     console.error('chest_error', err.message, err.status || '', err.detail || '');
     if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Baús online ainda não configurados no servidor.':'Não foi possível concluir. Tente novamente.'});
@@ -1154,10 +1284,16 @@ wss.on('connection', ws => {
   ws.on('close', () => { const p=clients.get(ws);if(p){clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
 });
 
+// .unref() nos 3 setInterval deste arquivo (aqui, tickMobAI e o ping de WS
+// mais abaixo): nao muda nada rodando como servidor de verdade (o processo
+// continua vivo pelos listeners HTTP/WS reais) -- so permite que `require
+// ('./server.js')` num teste unitario puro (sem nunca chamar server.listen,
+// ver o guard require.main===module no fim do arquivo) saia sozinho quando
+// os testes terminam, em vez de ficar pendurado por causa desses timers.
 setInterval(()=>{
   const now=Date.now();
   for(const state of maps.values())for(const mob of state.mobs.values())if(mob.dead&&mob.respawnAt&&now>=mob.respawnAt){mob.dead=false;mob.hp=mob.maxhp;mob.respawnAt=0;mob.x=Number.isFinite(mob.sx)?mob.sx:(Number(mob.x)||0);mob.y=Number.isFinite(mob.sy)?mob.sy:(Number(mob.y)||0);mob.state='idle';mob.tgt=null;mob.cd=0;mob.ret=0;mob.t=0;mob.hit=false;broadcastMap(state.id,{type:'mob_state',map:state.id,mob,killerId:null})}
-},1000);
+},1000).unref();
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
 // Espelha updSlime() do cliente (index.html) -- unico tipo sem maquina de
@@ -1873,13 +2009,19 @@ function tickMobAI() {
     if (moved.length) broadcastMap(state.id, { type: 'mob_positions', map: state.id, mobs: moved });
   }
 }
-setInterval(tickMobAI, 150);
+setInterval(tickMobAI, 150).unref();
 
 setInterval(() => {
   for (const ws of clients.keys()) {
     if (!ws.isAlive) { ws.terminate(); continue; }
     ws.isAlive=false;ws.ping();
   }
-}, 30000);
+}, 30000).unref();
 
-server.listen(PORT, '0.0.0.0', () => console.log(`MMORPG Online em http://localhost:${PORT}`));
+if (require.main === module) {
+  server.listen(PORT, '0.0.0.0', () => console.log(`MMORPG Online em http://localhost:${PORT}`));
+}
+// Exportado so pra teste unitario puro (sem HTTP/Supabase) das funcoes de
+// item/posse da Fase 5.1 -- nao muda nada em como `node server.js` roda
+// (continua chamando server.listen normalmente via o guard acima).
+module.exports = { sanitizeItem, sanitizeSave, lockOwnedItems, createGear, dedupeByUid, typeSlot, CLASS_ITEM_TYPES, EQ_SLOTS, GEAR_DATA };
