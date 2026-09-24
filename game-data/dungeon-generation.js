@@ -16,6 +16,18 @@
 // ver mobStats/GEAR_DATA/CLASS_DMG -- mesmo padrao aqui).
 'use strict';
 
+// Tudo dentro de um IIFE de proposito: este arquivo e carregado como
+// <script> classico (nao module) em index.html, junto com gear-data.js e
+// o script principal -- top-level let/const de scripts classicos
+// distintos compartilham o MESMO escopo lexico global da pagina. Sem o
+// IIFE, nomes daqui (T, MASMORRA_CELL, MASMORRA_PASS, MASMORRA_WALL,
+// mazeGen, etc.) colidem com os mesmos nomes ja declarados no script
+// principal de index.html ("Identifier 'X' has already been declared" --
+// achado real rodando o servidor de verdade, quebrava a pagina inteira).
+// Node (require) ja isola cada arquivo automaticamente, entao o IIFE nao
+// muda nada la, so fecha a brecha do lado do browser.
+(function () {
+
 function mulberry(a) {
   return function () {
     a |= 0; a = a + 0x6D2B79F5 | 0;
@@ -99,6 +111,8 @@ function dungeonLayout(seed) {
   return { mz, rects, start, boss, cols: DUNGEON_COLS, rows: DUNGEON_ROWS, ox: DUNGEON_OX, oy: DUNGEON_OY, cellPx: MASMORRA_CELL * T };
 }
 
-const DATA = { mulberry, mazeGen, dungeonWallRects, cellCenter, dungeonLayout, T, MASMORRA_CELL, MASMORRA_PASS, MASMORRA_WALL, DUNGEON_COLS, DUNGEON_ROWS, DUNGEON_OX, DUNGEON_OY };
-if (typeof module !== 'undefined' && module.exports) module.exports = DATA;
-else if (typeof window !== 'undefined') window.DUNGEON_GEN = DATA;
+const DUNGEON_GEN_DATA = { mulberry, mazeGen, dungeonWallRects, cellCenter, dungeonLayout, T, MASMORRA_CELL, MASMORRA_PASS, MASMORRA_WALL, DUNGEON_COLS, DUNGEON_ROWS, DUNGEON_OX, DUNGEON_OY };
+if (typeof module !== 'undefined' && module.exports) module.exports = DUNGEON_GEN_DATA;
+else if (typeof window !== 'undefined') window.DUNGEON_GEN = DUNGEON_GEN_DATA;
+
+})();
