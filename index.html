@@ -1095,8 +1095,20 @@ const RARITY_COLOR={basic:'#e8e0cc',rare:'#5aa8ff',epic:'#c47bff',legendary:'#ff
 // Substitui RAR[it.tier] em toda exibicao -- funciona tanto pro item novo
 // (it.rarity) quanto pro legado (it.tier, comportamento original preservado).
 function rarityOf(it){return it.rarity?{n:GEAR_DATA.RARITY[it.rarity].label,c:RARITY_COLOR[it.rarity]}:RAR[it.tier]}
-function sellPriceOf(it){return it.lv?GEAR_DATA.sellPriceFor(it.lv):SELL[it.tier]}
-function isLowestGear(it){return it.lv?it.lv===1:it.tier===1}
+// Fase 5.3: texto de feedback quando kill_reward/dungeon_reward trazem um
+// `drop` (item Raro/Epico/Lendario concedido pelo servidor). Formato pedido:
+// "Item Raro obtido: X" / "Item Épico obtido: X" / "ITEM LENDÁRIO: X".
+function dropToastText(rarity,n){return rarity==='legendary'?('ITEM LENDÁRIO: '+n):('Item '+GEAR_DATA.RARITY[rarity].label+' obtido: '+n)}
+// Fase 5.3: preco de venda considera raridade (sellPriceForItem), pra nao
+// mostrar um preco de Basic pra um item Raro/Epico/Lendario no preview da
+// loja -- precisa bater com o que o servidor realmente credita (handleShop
+// action:'sell_item' usa a MESMA funcao).
+function sellPriceOf(it){return it.lv?GEAR_DATA.sellPriceForItem(it):SELL[it.tier]}
+// "Comum" pra venda em massa (botao "Vender itens comuns") agora significa
+// rarity==='basic' (Fase 5.3), nunca mais lv===1 -- mesma correcao do
+// sell_common no servidor (ver server.js), senao o botao mostraria/venderia
+// por engano um Raro/Epico/Lendario Nv1 como se fosse lixo comum.
+function isLowestGear(it){return it.rarity?it.rarity==='basic':it.tier===1}
 function tintIcon(img,tier){
   const c=document.createElement('canvas');c.width=img.width;c.height=img.height;const x=c.getContext('2d');x.drawImage(img,0,0);
   if(tier===2)return c;
@@ -2725,6 +2737,12 @@ function netConnect(){
       P.xp=m.xp;
       if(typeof m.lvl==='number'&&m.lvl!==P.lvl){const up=m.lvl>P.lvl;P.lvl=m.lvl;recalc();if(up){P.hp=P.maxhp;P.mp=P.maxmp}}
       if(m.fields)Object.assign(P,m.fields);
+      // Fase 5.3: mob de campo agora tambem pode dropar Raro/Epico
+      // (comum) ou Lendario (chefe) -- bag/eq so vem junto quando teve
+      // item de verdade (a maioria dos abates nao tem `m.drop`).
+      if(m.bag){P.bag=m.bag;for(const k of EQ_KEYS)P.eq[k]=(m.eq&&m.eq[k])||null;recalc();saveGame()}
+      if(m.drop){sfx.level();toast(dropToastText(m.drop.rarity,m.drop.n))}
+      if(m.dropLost)toast('Mochila cheia — equipamento '+GEAR_DATA.RARITY[m.dropLost.rarity].label+' não foi coletado.');
       hud();
     }
     else if(m.type==='dungeon_state')applyDungeonState(m);
@@ -2736,6 +2754,10 @@ function netConnect(){
       P.gold=m.gold;P.gem=m.gem;P.pv=m.pv;P.ap=m.ap;P.scr=m.scr;
       P.bag=m.bag||[];for(const k of EQ_KEYS)P.eq[k]=(m.eq&&m.eq[k])||null;
       recalc();hud();saveGame();
+      // Fase 5.3: masmorra agora dropa Raro/Epico (trash) ou Lendario
+      // (chefe) em vez do Basic garantido antigo -- avisa igual mob de campo.
+      if(m.drop){sfx.level();toast(dropToastText(m.drop.rarity,m.drop.n))}
+      if(m.dropLost)toast('Mochila cheia — equipamento '+GEAR_DATA.RARITY[m.dropLost.rarity].label+' não foi coletado.');
     }
   };
   NET.onclose=()=>{NET_ID=null;NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};

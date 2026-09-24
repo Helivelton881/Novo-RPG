@@ -170,10 +170,25 @@ function priceFor(type, lv) {
 const SELL_PRICES = { 1: 8, 4: 22, 8: 60, 12: 140, 16: 220, 20: 320, 24: 465, 28: 640, 32: 840, 36: 1075, 40: 1335 };
 function sellPriceFor(lv) { return SELL_PRICES[lv] || 0; }
 
+// ===== Fase 5.3: venda por raridade =====
+// Item raro/épico/lendário precisa valer mais que o Básico equivalente pro
+// Mercador -- multiplicador aplicado DEPOIS do preço base por nivel
+// (SELL_PRICES), nunca mexendo no preço de COMPRA (GEAR_PRICES, sempre
+// basic). Ex.: Nv20 Basic vende por 320 -> Rare 640, Epic 1280, Legendary
+// 2560 (2x/4x/8x, arredondado pra inteiro).
+const SELL_RARITY_MUL = { basic: 1, rare: 2, epic: 4, legendary: 8 };
+// Fonte central de venda por item -- nunca espalhar o multiplicador de
+// raridade em mais de um lugar (server.js sempre chama isto, nunca
+// sellPriceFor(lv) sozinho, pra um item que nao seja garantidamente basic).
+function sellPriceForItem(item) {
+  if (!item) return 0;
+  return Math.round(sellPriceFor(item.lv) * (SELL_RARITY_MUL[item.rarity] || 1));
+}
+
 const DATA = {
   GEAR_LEVELS, LEGACY_TIER_LEVEL, LEVEL_LEGACY_TIER, RARITY, RARITY_ORDER,
-  TYPES_WITH_LEGACY_REQ, GEAR_STATS, GEAR_NAMES, GEAR_PRICES, SELL_PRICES,
-  reqFor, statsFor, nameFor, priceFor, sellPriceFor,
+  TYPES_WITH_LEGACY_REQ, GEAR_STATS, GEAR_NAMES, GEAR_PRICES, SELL_PRICES, SELL_RARITY_MUL,
+  reqFor, statsFor, nameFor, priceFor, sellPriceFor, sellPriceForItem,
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = DATA;

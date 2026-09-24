@@ -156,7 +156,14 @@ test('chefe de masmorra: recompensa exatamente UMA vez mesmo com golpes extras l
   const rewards = conn.msgs.slice(before).filter(m => m.type === 'dungeon_reward');
   assert.equal(rewards.length, 1, `chefe deveria recompensar exatamente 1 vez, recebeu ${rewards.length}`);
   assert.equal(rewards[0].gem, 6, 'recompensa de chefe tem gema fixa (6) -- gema dobrada indicaria credito duplicado');
-  assert.equal(rewards[0].bag.length + Object.values(rewards[0].eq).filter(Boolean).length >= 3, true, 'chefe sempre da 3 itens');
+  // Fase 5.3: chefe de masmorra nao garante mais 3 itens Basic -- agora e
+  // no maximo 1 roll de Legendary a 5% (rollDungeonBossLoot). Aqui so
+  // confirma que, SE um drop aconteceu (m.drop presente), ele e sempre
+  // legendary e nunca mais de 1 -- a cobertura probabilistica completa
+  // (epic/rare/legendary/nada com rng controlado) fica em
+  // test/loot-rarity.test.js, deterministica.
+  const totalItems = rewards[0].bag.length + Object.values(rewards[0].eq).filter(Boolean).length;
+  if (rewards[0].drop) { assert.equal(rewards[0].drop.rarity, 'legendary'); assert.ok(totalItems >= 1); }
   conn.close();
 });
 

@@ -502,3 +502,155 @@ Nenhum fallback local foi adicionado para conta online (dungeon/economia): se `d
 ## Próxima fase
 
 Fase 5.3 — drops server-side por raridade (Raro/Épico em monstro de campo e masmorra, Lendário em chefe) com balanceamento de chance/nível-de-item/mapa. Fica pra quando for solicitada.
+
+# FASE 5.3 — DROPS POR RARIDADE
+
+**Motivação:** a Fase 5.1 já suportava as 4 raridades no modelo canônico do item (`sanitizeItem`/`createGear` sempre souberam calcular stats pra `rare`/`epic`/`legendary`), mas nada no jogo realmente as concedia — Mercador só vendia `basic`, e todo loot server-side (mob de campo, baú, masmorra) também só gerava `basic`. Esta fase liga a raridade de verdade: mob comum agora pode dropar Raro/Épico, chefe (campo e masmorra) pode dropar Lendário — sempre decidido pelo servidor, nunca pelo cliente.
+
+## Regra de origem por raridade
+
+| Raridade | Fonte |
+|---|---|
+| Basic | Mercador (compra) + baú de campo legado (preservado, ver seção própria abaixo) |
+| Rare | Mob comum (campo ou trash de masmorra) |
+| Epic | Mob comum (campo ou trash de masmorra) |
+| Legendary | Boss (campo ou masmorra) |
+
+Mercador continua vendendo **somente `basic`** — nenhum botão novo foi adicionado pra Rare/Epic/Legendary, e os preços de compra Basic não mudaram.
+
+## Chances de drop (`GEAR_DROP_RATES`, fonte única em `server.js`)
+
+```js
+const GEAR_DROP_RATES = {
+  common: { epic: 0.0025, rare: 0.025 }, // 0.25% / 2.5%
+  boss:   { legendary: 0.05 },           // 5%
+};
+```
+
+Mob comum: testa Epic primeiro (0.25%); só testa Rare (2.5%) se Epic falhar; se os dois falharem, nenhum equipamento — **nunca** Legendary, **nunca** Basic como drop. Cada teste consome seu próprio `roll()`, então os dois nunca "acertam" no mesmo abate (mutuamente exclusivos por construção, não por um `if/else` que poderia mascarar overlap). Boss: um único teste (5%) — Legendary ou nada, **nunca** substitui por Rare/Epic/Basic. No máximo 1 equipamento especial por morte confirmada, em qualquer caso.
+
+**Simulação (documentada, não é o resultado real de um teste rodado — os testes automatizados usam RNG injetado, ver abaixo):** 1.000 kills comuns ⇒ esperado ~25 Rare + ~2.5 Epic. 100 bosses ⇒ esperado ~5 Legendary.
+
+## Função central de drop — `rollGearDrop({mobLevel, boss, cls, rng})`
+
+Server-side, pura, testável sem Supabase (`rng` é injetável — testes controlam exatamente qual branch cada chamada toma; produção usa `Math.random` por padrão, nunca um valor vindo do cliente). Retorna `null` ou `{rarity, type, lv, item}`. Usada pelos 4 pontos de morte confirmada (mob de campo, boss de campo, trash de masmorra, boss de masmorra) — **mesma política em campo e masmorra**, sem tabelas paralelas.
+
+1. Decide `rarity` (regras acima).
+2. Escolhe `type` aleatoriamente (25% cada) dentro de `DROP_TYPES_BY_CLASS[cls]` — a classe real do personagem, resolvida server-side (`p.cls`), nunca a que o cliente reivindica.
+3. Calcula `lv` via `gearLevelForMob(mobLevel)`.
+4. Gera o item via `createGear(type, lv, rarity)` — mesma fonte canônica de sempre (uid novo, stats/nome/req recalculados de `GEAR_DATA`, nunca construído campo a campo).
+
+## Slots que participam (`DROP_TYPES_BY_CLASS`)
+
+```js
+const DROP_TYPES_BY_CLASS = {
+  guerreiro: ['sword', 'armor', 'cape', 'boots'],
+  arqueiro:  ['bow', 'armor', 'cape', 'boots'],
+  mago:      ['staffm', 'armor', 'cape', 'boots'],
+  druida:    ['staffd', 'armor', 'cape', 'boots'],
+};
+```
+
+Decisão de design explícita (não omissão): escudo/capacete/joia continuam existindo normalmente (loja, baú de campo, `CLASS_ITEM_TYPES`) mas não entram no drop Rare/Epic/Legendary nesta fase.
+
+## Nível do item dropado — `gearLevelForMob(lvl)`
+
+Fonte central, usa `GEAR_DATA.GEAR_LEVELS` (nunca duplica a lista): devolve a maior faixa que não ultrapassa o nível real do mob/boss. Ex.: mob Lv18 → gear Lv16; mob Lv23 → gear Lv20; boss Lv40 → gear Lv40.
+
+**Níveis de boss auditados (todos os 7 mapas, campo e masmorra têm os mesmos níveis por zona):**
+
+| Zona | Boss | Nível | Gear Lv resultante |
+|---|---|---|---|
+| Floresta | Goblin Brutamontes | 10 | 8 |
+| Cripta | Capitão Esqueleto | 15 | 12 |
+| Serra | Lobo Alfa | 20 | 20 |
+| Pântano | Rei Lodoso | 25 | 24 |
+| Torre | Feiticeiro Sombrio | 30 | 28 |
+| Ilhas | Senhora das Tempestades | 35 | 32 |
+| Vulcão | Senhor das Chamas (lorde) | 40 | 40 |
+
+Progressão coerente e crescente ao longo do mapa (8→12→20→24→28→32→40) — nenhum boss produz uma recompensa fora da curva do mapa, então **nenhuma tabela de exceção por boss foi necessária**.
+
+## Mob de campo
+
+`mob_damage` (branch não-dungeon): quando `mob.hp<=0` é confirmado e `!mob.temp`, roda `rollGearDrop({mobLevel:mob.lvl, boss:!!mob.boss, cls:p.cls})` (mesma condição que já decidia se `loot` econômico rolava — sequitos temporários nunca dropam nada, comportamento preservado). `mob.boss` sempre vem do roster autoritativo do servidor (`MOB_MANIFEST` pro mapa real, nunca de `defs` que o cliente manda em `map_join`) — nunca confia num `boss:true` que o cliente possa ter mandado. O drop passa por `creditKillReward` (agora recebe um 8º parâmetro `drop` opcional), que aplica via `applyGearDrops`/`grantItem` dentro do mesmo `withCharLock` de sempre, e devolve `{drop, dropLost, bag, eq}` na mensagem `kill_reward` **só quando houve item de verdade** (a maioria dos abates não dropa nada — não vale mandar o inventário inteiro toda hora).
+
+## Mob de campo — boss
+
+Mesmo caminho acima, só que com `boss:true` — testa só Legendary (5%). Preserva **tudo** que o boss já concedia (XP, gold, gem, chave de baú via `BOSS_CHEST_FIELD`, avanço de quest) — o drop de equipamento é um adicional, nunca substitui nada.
+
+## Trash de masmorra (`rollDungeonTrashLoot`)
+
+O Basic garantido a 35% (compatibilidade temporária da Fase 5.2, documentada na época como algo a remover aqui) foi **removido por completo**. Agora chama `rollGearDrop({mobLevel:lvl, boss:false, cls, rng})` — mesma política de mob comum de campo. `gold`/`gem`/`pv` preservados exatamente como estavam.
+
+## Boss de masmorra (`rollDungeonBossLoot`)
+
+Os 3 equipamentos Basic garantidos (mesma compatibilidade temporária) foram **removidos**. Agora 1 único roll de Legendary a 5% (`rollGearDrop` com `boss:true`), usando `gearLevelForMob(bossLvl)` — antes o nível do item era fixo em `lv12` independente da zona; agora segue a progressão real do chefe daquela masmorra (mesma tabela da seção "Níveis de boss" acima, já que os bosses de masmorra têm o mesmo nível dos bosses de campo). `gold` (22 moedas), `gem` (6 fixo) e `pv` (1) preservados exatamente.
+
+## Mochila cheia — item nunca desaparece silenciosamente
+
+`applyGearDrops(save, lvl, items)` (novo, usado por `creditKillReward` e `creditDungeonReward`) chama `grantItem` pra cada item e nunca perde silenciosamente um Rare/Epic/Legendary: se a mochila estiver cheia (24 itens) e não puder auto-equipar, o item é descartado (nunca persistido, nunca duplicado, nunca sobrescreve outro slot) e o servidor manda `dropLost:{rarity,n}` na mensagem — o cliente mostra `"Mochila cheia — equipamento <Raridade> não foi coletado."`. Item dropado acima do nível do personagem nunca é auto-equipado (mesma checagem de sempre em `grantItem`): vai pra mochila se houver espaço.
+
+## Feedback visual do drop
+
+`kill_reward`/`dungeon_reward` ganham os campos opcionais `drop:{rarity,n}` (quando um item foi concedido) e `dropLost:{rarity,n}` (quando não coube). Cliente (`dropToastText`) monta: `"Item Raro obtido: <nome>"`, `"Item Épico obtido: <nome>"`, `"ITEM LENDÁRIO: <nome>"` (maiúsculo, mais chamativo — só pra Legendary). Cores/tint de raridade já existiam desde a Fase 5.1 (`RARITY_COLOR`: básico neutro, raro azul, épico roxo, lendário dourado) e não precisaram de nenhuma mudança — `rarityOf(it)` já lê `it.rarity` direto.
+
+## UID e modelo canônico
+
+Todo drop passa por `createGear(type, lv, rarity)` — nunca construído campo a campo. `enchant` sempre `0` (funcional só na Fase 5.4). `uid` sempre novo (`crypto.randomUUID()`), mesmo pra dois drops idênticos (mesmo tipo/nível/raridade) — testado explicitamente. Lendário de nível baixo não supera Básico de nível alto (princípio da Fase 5.1, `GEAR_DATA` não foi rebalanceado nesta fase).
+
+## Venda por raridade (`sellPriceForItem`, `game-data/gear-data.js`)
+
+```js
+const SELL_RARITY_MUL = { basic: 1, rare: 2, epic: 4, legendary: 8 };
+function sellPriceForItem(item) { return Math.round(sellPriceFor(item.lv) * SELL_RARITY_MUL[item.rarity]); }
+```
+
+Fonte central — `server.js` (`sell_item`) sempre chama `sellPriceForItem(it)`, nunca `sellPriceFor(it.lv)` sozinho pra um item que não seja garantidamente `basic`. Preço de **compra** Basic não mudou. Exemplo: Nv20 Basic vende por 320 ⇒ Rare 640, Epic 1280, Legendary 2560. `buyback` continua devolvendo exatamente o mesmo objeto vendido (mesmo uid/rarity/lv/enchant) — preço de recompra derivado do preço de venda × 1.5 (inalterado), agora automaticamente correto porque herda o preço já ajustado por raridade.
+
+## `sell_common` — correção crítica
+
+A venda em massa ("Vender itens comuns") detectava item "comum" por `lv === 1`. Depois da Fase 5.3 isso é um bug real de perda de item: um Rare/Epic/Legendary Nv1 (possível desde que virou possível dropar raridade alta em nível baixo) seria vendido em massa junto com o lixo de verdade. Corrigido pra `rarity === 'basic'` (de **qualquer** nível — a condição agora é sobre raridade, não sobre progressão) tanto no servidor (`handleShop` action `sell_common`) quanto no espelho client-side (`isLowestGear`, usado pra montar a lista/preview do botão "Vender itens comuns"). Coberto explicitamente em teste (Rare/Epic/Legendary Nv1 nunca entram; Basic de qualquer nível entra).
+
+## Baú de campo — exceção documentada (não é bug)
+
+Os 7 baús de campo (`CHEST_REWARDS`/`rollChestItem`) continuam entregando **Basic**, sem mudança nesta fase — comportamento legado preservado de propósito, não convertido em fonte de Lendário. A regra da fase é: Mercador = Basic normal; baú de campo = Basic legado preservado; mob comum = Rare/Epic; boss = Legendary.
+
+## Tampering
+
+`sanitizeItem` já aceitava as 4 raridades desde a Fase 5.1 (necessário pra recalcular stats de qualquer item legítimo) — a proteção real sempre foi `lockOwnedItems` no PUT genérico, que só deixa sobreviver um `uid` que já existia no save **persistido**. Isso já fechava (sem nenhuma mudança nesta fase) tentativas de: pedir Legendary direto, trocar `rarity` de um item já possuído, alterar `lv`/`enchant`/stats — testado explicitamente (item Basic comprado, `rarity` forjada pra `legendary` via PUT bruto, volta pra `basic`). `mob.boss`/`mob.lvl` nunca vêm do cliente (roster autoritativo, ver Fase 5.2) — só mob confirmado boss pelo servidor roda o roll de Legendary.
+
+## Anti-farm / duplicação
+
+O roll só acontece dentro do handler `mob_damage`, de forma síncrona, no exato momento em que `mob.hp` cruza de `>0` pra `<=0` (`mob.dead=true` setado antes de qualquer `await` — mesma garantia estrutural da Fase 5.2). Golpes extras num mob já morto retornam cedo (`if(!mob||mob.dead)return`) sem rolar de novo. Respawn (mapa de campo) inicia um ciclo de vida novo, com novo roll normal. Boss: 1 kill = no máximo 1 roll de Legendary (mesma trava dupla da Fase 5.2 — síncrona + `state.bossDefeated` pra masmorra).
+
+## RNG
+
+`Math.random()` pra probabilidade de gameplay (mesmo padrão já usado em todo o resto do loot do jogo). `crypto.randomUUID()` continua exclusivo pra UID. Nenhuma chance ou seed vinda do cliente jamais influencia o resultado.
+
+## Offline
+
+Preservado sem nenhuma mudança de comportamento. Mob de **campo** nunca dropou equipamento offline (antes ou depois desta fase — `dropItem` nunca era chamado no ramo não-masmorra de `killMob`, só coins/poção/gema) — permanece assim, não foi expandido. Masmorra **offline** (`!lootOnline()`) mantém a simulação local antiga (Basic garantido) — decisão deliberada de não tocar no fallback local só-visual, documentada aqui como assimetria intencional (online usa a política nova de raridade; offline preserva o comportamento legado, já que a fronteira online/offline da Fase 5.2 já impede que progresso offline seja injetado numa conta online).
+
+## Testes adicionados
+
+- `test/loot-rarity.test.js` (25 testes, sempre roda, sem Supabase) — `gearLevelForMob` (tabela completa + nunca fora de `GEAR_LEVELS`), `GEAR_DROP_RATES`/`DROP_TYPES_BY_CLASS` (valores exatos), `rollGearDrop` com RNG injetado (Epic/Rare/nada pra comum, nunca Legendary/Basic; Legendary/nada pra boss, nunca Rare/Epic/Basic; tipo sempre dentro da classe; modelo canônico completo — enchant 0, uid válido, stats/req/nome corretos; dois drops idênticos com UIDs diferentes; Legendário baixo não supera Básico alto), `applyGearDrops` (concedido, mochila cheia sem duplicar/perder outro item, item acima do nível vai pra mochila sem auto-equipar), `rollDungeonTrashLoot`/`rollDungeonBossLoot` (sem Basic garantido, no máximo 1 item, nível segue `gearLevelForMob`), `sellPriceForItem` (multiplicadores exatos, sempre inteiro).
+- `test/rarity-shop.test.js` (4 testes, `{skip:!hasSupabase()}`) — venda por raridade (1x/2x/4x/8x reais via `handleShop`), `sell_common` nunca vende Rare/Epic/Legendary Nv1 (só Basic, de qualquer nível), `buyback` preserva uid/rarity/lv/enchant de um Epic vendido, tampering de `rarity` via PUT bruto não sobrevive.
+- `test/dungeon.test.js` — teste antigo de `rollDungeonBossLoot` ("chefe sempre dá 3 itens") atualizado pra refletir a nova política (0 ou 1 item, sempre Legendary quando existe).
+- `test/dungeon-integration.test.js` — asserção do teste de recompensa de chefe atualizada (não assume mais 3 itens Basic garantidos; confirma que, quando `drop` existe, é sempre `legendary`).
+
+**Limitação honesta (igual às fases anteriores):** `test/rarity-shop.test.js` e os demais testes `{skip:!hasSupabase()}` não puderam ser executados neste ambiente (sem `SUPABASE_URL`/`SUPABASE_SECRET_KEY` locais, sem projeto de teste dedicado). Toda a lógica probabilística/determinística de raridade (a parte mais crítica desta fase) está coberta por `loot-rarity.test.js`, que roda sempre, com RNG controlado — não depende de sorte nem de rodar milhares de kills reais.
+
+## O que NÃO entrou nesta fase (de propósito)
+
+- **Enchant funcional** (+1..+10, chance de quebra) — Fase 5.4.
+- **Ferreiro, World Boss, TvT, Guildas, Bestiário, Ranking, página pública, Phantom Players** — inalterados, fora do escopo.
+- **Escudo/capacete/joia no drop especial** — decisão de design explícita desta fase, não esquecimento.
+
+## Migração de banco
+
+**Nenhuma migration nova foi necessária ou criada.** Toda raridade nova continua vivendo no mesmo `characters.save` (jsonb) — `sanitizeItem`/`createGear` já suportavam as 4 raridades desde a Fase 5.1, só nada as concedia ainda. As 5 migrations históricas em `supabase/migrations/` não foram tocadas.
+
+## Próxima fase
+
+Fase 5.4 — Ferreiro + Enchant (+0 até +10, chance de sucesso decrescente acima de +3, equipamento quebra em caso de falha). Fica pra quando for solicitada.
