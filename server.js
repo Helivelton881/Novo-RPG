@@ -14,6 +14,7 @@ const TVT = require('./game-data/tvt.js');
 const GUILD = require('./game-data/guild.js');
 const BESTIARY = require('./game-data/bestiary.js');
 const RANKINGS = require('./game-data/rankings.js');
+const MARKET = require('./game-data/market.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -1855,6 +1856,170 @@ function handleRankings(req, res, pathname) {
   return true;
 }
 
+// ===== Fase 5.11: Mercado / Leilao =====
+// Fase mais sensivel economicamente do projeto: escrow + compra +
+// claims vivem inteiramente em funcoes SQL SECURITY DEFINER (ver
+// supabase/migrations/*_add_market_tables_and_functions.sql), cada uma
+// atomica no proprio Postgres (`for update` real, nao so withCharLock).
+// Toda chamada aqui SEMPRE passa por withCharLock() do(s) personagem(ns)
+// envolvido(s) -- fecha a corrida com o resto do codigo economico
+// existente (creditKillReward/handleShop/etc, que ainda fazem leitura-
+// altera-grava em duas chamadas REST separadas sem lock real no banco;
+// sem isso, um kill-reward em voo ao mesmo tempo de uma compra poderia
+// sobrescrever o resultado um do outro). O lock real dentro da funcao
+// SQL e quem garante correcao mesmo se um dia existirem multiplas
+// instancias Node (withCharLock sozinho so protegeria dentro desta).
+const MARKET_ERROR_MESSAGES = {
+  INVALID_PRICE: `Preço inválido (entre ${MARKET.MARKET_MIN_PRICE} e ${MARKET.MARKET_MAX_PRICE}).`,
+  CHARACTER_NOT_FOUND: 'Personagem não encontrado.',
+  ITEM_NOT_IN_BAG: 'Esse item não está na sua mochila.',
+  ITEM_ALREADY_LISTED: 'Esse item já está anunciado.',
+  LISTING_NOT_FOUND: 'Anúncio não encontrado.',
+  NOT_YOUR_LISTING: 'Esse anúncio não é seu.',
+  LISTING_NOT_ACTIVE: 'Esse item já foi vendido, cancelado ou expirou.',
+  CANNOT_BUY_OWN_LISTING: 'Você não pode comprar seu próprio anúncio.',
+  BUYER_NOT_FOUND: 'Personagem não encontrado.',
+  INSUFFICIENT_GOLD: 'Moedas insuficientes.',
+  CLAIM_NOT_FOUND: 'Item a retirar não encontrado.',
+  NOT_YOUR_CLAIM: 'Esse item a retirar não é seu.',
+  ALREADY_CLAIMED: 'Esse item já foi retirado.',
+  WRONG_CLAIM_KIND: 'Tipo de retirada inválido.',
+  BAG_FULL: 'Mochila cheia. Abra espaço e tente retirar de novo.',
+  GOLD_CAP_WOULD_OVERFLOW: 'Retirar esse valor ultrapassaria o limite de moedas. Gaste um pouco e tente de novo.',
+};
+function marketErrorMessage(code) { return MARKET_ERROR_MESSAGES[code] || 'Não foi possível concluir. Tente novamente.'; }
+const OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function marketListingView(row) {
+  const seller = Array.isArray(row.characters) ? row.characters[0] : row.characters;
+  return {
+    id: row.id, name: row.item_json?.n || '?', type: row.item_type, level: row.item_level,
+    rarity: row.item_rarity, enchant: row.item_enchant, atk: row.item_json?.atk || 0, def: row.item_json?.def || 0,
+    hp: row.item_json?.hp || 0, blk: row.item_json?.blk || 0, price: row.price, status: row.status,
+    createdAt: row.created_at, expiresAt: row.expires_at, sellerName: seller ? seller.name : '?',
+  };
+}
+
+async function handleMarket(req, res, pathname) {
+  if (pathname === '/api/market/listings' && req.method === 'GET') {
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      const q = url.searchParams;
+      const filters = ['status=eq.active'];
+      const name = cleanText(q.get('name'), 24).replace(/[,()*]/g, '');
+      if (name) filters.push(`item_json->>n=ilike.*${encodeURIComponent(name)}*`);
+      const type = cleanText(q.get('type'), 16);
+      if (type) filters.push(`item_type=eq.${encodeURIComponent(type)}`);
+      const rarity = cleanText(q.get('rarity'), 16);
+      if (rarity) filters.push(`item_rarity=eq.${encodeURIComponent(rarity)}`);
+      const lvlMin = Number(q.get('levelMin')), lvlMax = Number(q.get('levelMax'));
+      if (Number.isFinite(lvlMin)) filters.push(`item_level=gte.${Math.round(lvlMin)}`);
+      if (Number.isFinite(lvlMax)) filters.push(`item_level=lte.${Math.round(lvlMax)}`);
+      const enMin = Number(q.get('enchantMin')), enMax = Number(q.get('enchantMax'));
+      if (Number.isFinite(enMin)) filters.push(`item_enchant=gte.${Math.round(enMin)}`);
+      if (Number.isFinite(enMax)) filters.push(`item_enchant=lte.${Math.round(enMax)}`);
+      const priceMin = Number(q.get('priceMin')), priceMax = Number(q.get('priceMax'));
+      if (Number.isFinite(priceMin)) filters.push(`price=gte.${Math.round(priceMin)}`);
+      if (Number.isFinite(priceMax)) filters.push(`price=lte.${Math.round(priceMax)}`);
+      const sort = MARKET.isValidSort(q.get('sort')) ? q.get('sort') : 'newest';
+      const order = {price_asc:'price.asc', price_desc:'price.desc', newest:'created_at.desc', enchant_desc:'item_enchant.desc'}[sort];
+      const page = Math.max(1, Math.round(Number(q.get('page')) || 1));
+      const rows = await supabase('market_listings', {query:`?select=id,item_json,item_type,item_level,item_rarity,item_enchant,price,status,created_at,expires_at,characters!seller_character_id(name)&${filters.join('&')}&order=${order}&limit=500`});
+      const items = rows.map(marketListingView);
+      const paged = RANKINGS.paginate(items, page, MARKET.MARKET_PAGE_SIZE);
+      json(res,200,{page:paged.page, pageSize:paged.pageSize, total:paged.total, totalPages:paged.totalPages, items:paged.items}); return true;
+    } catch (err) {
+      console.error('market_search_error', err.message);
+      json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error:'Não foi possível concluir. Tente novamente.'}); return true;
+    }
+  }
+
+  const m = /^\/api\/market\/([0-9a-fA-F-]{8,36})(\/.*)?$/.exec(pathname);
+  if (!m) return false;
+  const charId = m[1], sub = m[2] || '';
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const character = await ownCharacter(user, charId);
+    if (!character) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+
+    if (sub === '/mine' && req.method === 'GET') {
+      const rows = await supabase('market_listings', {query:`?select=id,item_json,item_type,item_level,item_rarity,item_enchant,price,status,created_at,expires_at,buyer_character_id&seller_character_id=eq.${encodeURIComponent(charId)}&order=created_at.desc&limit=100`});
+      json(res,200,{listings: rows.map(r => ({...marketListingView({...r, characters:{name:character.name}}), sold: r.status==='sold'}))}); return true;
+    }
+
+    if (sub === '/history' && req.method === 'GET') {
+      const rows = await supabase('market_transactions', {query:`?select=id,price,fee,seller_received,created_at,item_uid,seller_character_id,buyer_character_id,seller:characters!seller_character_id(name),buyer:characters!buyer_character_id(name)&or=(seller_character_id.eq.${encodeURIComponent(charId)},buyer_character_id.eq.${encodeURIComponent(charId)})&order=created_at.desc&limit=100`});
+      const history = rows.map(r => {
+        const seller = Array.isArray(r.seller) ? r.seller[0] : r.seller, buyer = Array.isArray(r.buyer) ? r.buyer[0] : r.buyer;
+        const isSeller = r.seller_character_id === charId;
+        return {id:r.id, direction: isSeller?'sold':'bought', price:r.price, fee:r.fee, sellerReceived:r.seller_received, counterpartyName: isSeller?(buyer?buyer.name:'?'):(seller?seller.name:'?'), createdAt:r.created_at};
+      });
+      json(res,200,{history}); return true;
+    }
+
+    if (sub === '/claims' && req.method === 'GET') {
+      const rows = await supabase('market_claims', {query:`?select=id,kind,item_json,gold_amount,reason,created_at&character_id=eq.${encodeURIComponent(charId)}&claimed_at=is.null&order=created_at.asc`});
+      json(res,200,{claims: rows.map(r => ({id:r.id, kind:r.kind, item: r.kind==='item'?{name:r.item_json?.n,type:r.item_json?.type,rarity:r.item_json?.rarity,enchant:r.item_json?.enchant}:null, goldAmount:r.gold_amount, reason:r.reason, createdAt:r.created_at}))}); return true;
+    }
+
+    if (sub === '/list' && req.method === 'POST') {
+      const input = await readJson(req);
+      const itemUid = cleanText(input.itemUid, 40);
+      const price = Math.round(Number(input.price));
+      if (!itemUid) { json(res,400,{error:'Item inválido'}); return true; }
+      if (!MARKET.isValidPrice(price)) { json(res,400,{error:marketErrorMessage('INVALID_PRICE')}); return true; }
+      const result = await withCharLock(charId, () => rpc('market_list_item', {p_seller_character_id:charId, p_item_uid:itemUid, p_price:price}));
+      if (!result.ok) { json(res,400,{error:marketErrorMessage(result.error)}); return true; }
+      const listingRow = Array.isArray(result.data) ? result.data[0] : result.data;
+      json(res,201,{listing: marketListingView({...listingRow, characters:{name:character.name}})}); return true;
+    }
+
+    if (sub === '/cancel' && req.method === 'POST') {
+      const input = await readJson(req);
+      const listingId = cleanText(input.listingId, 40);
+      const result = await withCharLock(charId, () => rpc('market_cancel_listing', {p_seller_character_id:charId, p_listing_id:listingId}));
+      if (!result.ok) { json(res,400,{error:marketErrorMessage(result.error)}); return true; }
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/buy' && req.method === 'POST') {
+      const input = await readJson(req);
+      const listingId = cleanText(input.listingId, 40);
+      const operationId = cleanText(input.operationId, 40);
+      if (!OPERATION_ID_RE.test(operationId)) { json(res,400,{error:'Requisição inválida (operationId ausente).'}); return true; }
+      const listingRows = await supabase('market_listings', {query:`?select=seller_character_id&id=eq.${encodeURIComponent(listingId)}&limit=1`});
+      const sellerCharId = listingRows[0]?.seller_character_id;
+      if (!sellerCharId) { json(res,404,{error:marketErrorMessage('LISTING_NOT_FOUND')}); return true; }
+      const [lockA, lockB] = [charId, sellerCharId].sort();
+      const result = await withCharLock(lockA, () => withCharLock(lockB, () => rpc('market_buy', {p_listing_id:listingId, p_buyer_character_id:charId, p_operation_id:operationId})));
+      if (!result.ok) { json(res,400,{error:marketErrorMessage(result.error)}); return true; }
+      const tx = Array.isArray(result.data) ? result.data[0] : result.data;
+      json(res,200,{transaction:{id:tx.id, listingId:tx.listing_id, price:tx.price, fee:tx.fee, sellerReceived:tx.seller_received, createdAt:tx.created_at}}); return true;
+    }
+
+    const claimMatch = /^\/claims\/([0-9a-fA-F-]{8,36})\/(item|gold)$/.exec(sub);
+    if (claimMatch && req.method === 'POST') {
+      const claimId = claimMatch[1], kind = claimMatch[2];
+      const result = await withCharLock(charId, () => rpc(kind === 'item' ? 'market_claim_item' : 'market_claim_gold', {p_character_id:charId, p_claim_id:claimId}));
+      if (!result.ok) { json(res,400,{error:marketErrorMessage(result.error)}); return true; }
+      json(res,200,{ok:true, result:result.data}); return true;
+    }
+
+    json(res,404,{error:'Rota de mercado inválida'}); return true;
+  } catch (err) {
+    console.error('market_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Mercado ainda não configurado no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+// Expiracao de listings (72h) roda no mesmo sweep leve de 60s dos
+// convites de guilda -- nunca no tick de 1s de combate/eventos.
+function sweepExpiredMarketListings() {
+  if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) return;
+  rpc('market_expire_listings', {}).then(result => { if (!result.ok) console.error('market_expire_error', result.error); });
+}
+
 // ===== Fases 5.5/5.6: EventManager + World Boss instanciado =====
 const eventManager = new EVENT_DATA.EventManager({
   announce: payload => broadcast(payload),
@@ -2155,6 +2320,7 @@ const server = http.createServer(async (req, res) => {
   if (await handleGuild(req, res, pathname)) return;
   if (await handleBestiary(req, res, pathname)) return;
   if (handleRankings(req, res, pathname)) return;
+  if (await handleMarket(req, res, pathname)) return;
   if (handleEvents(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
@@ -2555,6 +2721,7 @@ setInterval(()=>{
 // Supabase nao estiver configurado (checado dentro de cada funcao).
 setInterval(()=>{
   sweepExpiredGuildInvites();
+  sweepExpiredMarketListings();
 },60000).unref();
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
