@@ -982,3 +982,201 @@ Ao terminar (`finishTvtInstance`): retorna cada jogador pra `previousLocations` 
 ## Próxima fase
 
 Bloco principal de Eventos completo (EventManager + World Boss + Team vs Team). Próxima grande fase recomendada: Guildas/Clãs — não iniciada nesta entrega.
+
+# FASE 5.8 — GUILDAS / CLÃ
+
+## Arquitetura: tabelas relacionais, não `characters.save`
+
+Diferente de tudo até aqui (party, amigos-em-memória, `wbRewards`/`tvtRewards` dentro do JSONB), guilda é **persistente e relacional**: três tabelas novas (`guilds`, `guild_members`, `guild_invites`, ver `supabase/migrations/20260924214726_add_guild_tables_and_functions.sql`). Nenhum dado de guilda vive em `characters.save`. Lógica pura (validação de nome/tag, matriz de permissões, TTL de convite) fica em `game-data/guild.js`, testável sem Supabase — mesmo padrão de `game-data/tvt.js`/`event-manager.js`.
+
+## Segurança: RLS habilitado, zero policies (mesmo padrão do projeto)
+
+O jogo nunca usou Supabase Auth no cliente — não existe JWT de usuário, só o sistema próprio de `users`/`sessions` por token, inteiramente mediado por `server.js` com a **service-role key**. Confirmado antes de escrever qualquer SQL: as 4 tabelas pré-existentes (`users`, `characters`, `sessions`, `friends`) têm RLS habilitado e **nenhuma policy** — todo acesso `anon`/`authenticated` já era negado por padrão; a migration da Fase 5.2 chegou a remover as únicas duas policies que existiam (baseadas em `auth.uid()`, que nunca correspondiam a nada real neste projeto). As 3 tabelas novas de guilda seguem exatamente o mesmo modelo: `alter table ... enable row level security`, zero `create policy`. Isso não é uma omissão — é a trava dura já estabelecida, e escrever policies com `auth.uid()` aqui seria security theater (nenhuma credencial de usuário jamais chega ao Postgres diretamente).
+
+## Operações atômicas via função SQL (RPC), não só `withCharLock`
+
+Criar guilda+líder, aceitar convite, promover/rebaixar, transferir liderança, sair/expulsar e dissolver usam **funções PL/pgSQL `SECURITY DEFINER`** (`guild_create`, `guild_accept_invite`, `guild_remove_member`, `guild_set_role`, `guild_transfer_leadership`, `guild_dissolve`), chamadas via `POST /rest/v1/rpc/<nome>` com a service-role key — nunca pelo cliente diretamente. Cada uma roda como uma transação real no Postgres, corrigindo uma limitação que `withCharLock` sozinho não resolveria (ele só serializa all dentro desta única instância Node; a função SQL é atômica no próprio banco, correta mesmo se um dia existirem múltiplas instâncias). Todas as funções têm `set search_path = public, pg_temp` fixo, mesmo endurecimento já aplicado a `touch_updated_at()` pela migration da Fase 3.
+
+## Constraint de unicidade real: um personagem, no máximo uma guilda
+
+`guild_members.character_id` é **chave primária** (não composta com `guild_id`) — o próprio banco impede fisicamente um personagem pertencer a duas guildas, não só uma checagem em JS. Nome e tag são únicos **case-insensitive** via índices únicos em colunas `name_lower`/`tag_lower` computadas no insert. Nome: 3–24 caracteres; Tag: 2–5 caracteres — validados em `game-data/guild.js` (`validateGuildName`/`validateGuildTag`, com normalização de espaços/maiúsculas) antes mesmo de chegar no banco, e de novo via `check` constraint no SQL como segunda linha de defesa.
+
+## Cargos e permissões (matriz pura, testável)
+
+`leader` / `officer` / `member`, sempre lidos da linha real de `guild_members` — o cliente nunca envia uma role e o servidor nunca aceita uma. Matriz (`game-data/guild.js`):
+
+- **Leader**: convida, remove officer ou member (nunca outro leader — não existe "outro leader"), promove member→officer, rebaixa officer→member, transfere liderança, dissolve.
+- **Officer**: convida, remove **apenas member comum** (nunca outro officer, nunca o leader).
+- **Member**: sai livremente, participa do chat, vê a lista de membros.
+
+Transferência de liderança é atômica (`guild_transfer_leadership`): o líder antigo vira `officer`, o novo vira `leader`, `guilds.leader_character_id` é atualizado — tudo em uma função só, nunca existe momento com 0 ou 2 líderes (verificado manualmente contra o banco real de teste: `select count(*) from guild_members where role='leader'` sempre retornou exatamente 1 antes e depois da transferência).
+
+## Sair e dissolver
+
+Member/officer saem a qualquer momento. Leader só sai diretamente se for o **único** membro (nesse caso, sair == dissolver automaticamente). Com outros membros presentes, o leader precisa transferir a liderança ou dissolver explicitamente — `guild_remove_member` recusa com `LEADER_MUST_TRANSFER_OR_DISSOLVE` caso contrário. Dissolver (`guild_dissolve`, só leader) apaga a guilda; `guild_members` e `guild_invites` somem via `on delete cascade` — uma única instrução, sempre consistente.
+
+## Convites
+
+Tabela `guild_invites`: `pending` → `accepted`/`declined`/`cancelled`/`expired`. TTL de 24h (`GUILD_INVITE_TTL_MS`). No máximo um convite **pendente** por (guilda, alvo) — índice único parcial (`where status='pending'`) barra spam de convite duplicado. `guild_accept_invite` é atômico: confere alvo correto, pendente, não expirado, personagem ainda sem guilda, guilda ainda com vaga (<20) — tudo numa função só, com `select ... for update` na linha do convite pra evitar corrida com um cancelamento/expiração simultâneo. Aceitar um convite cancela automaticamente qualquer outro convite pendente pro mesmo personagem (não faz sentido ficar "quase aceito" em duas guildas ao mesmo tempo). Convites vencidos viram `expired` num sweep leve a cada 60s (`sweepExpiredGuildInvites`, separado do tick de 1s de combate/eventos — não é tempo-crítico).
+
+## Limite de membros
+
+`GUILD_MAX_MEMBERS = 20`, constante única em `game-data/guild.js`, consultada tanto na criação de convite (checagem antecipada, UX melhor) quanto dentro de `guild_accept_invite` (checagem real, atômica — a que de fato impede estourar o limite mesmo sob concorrência).
+
+## Chat de guilda
+
+Mensagem WS `guild_chat`. Cada conexão mantém `p.guildId`/`p.guildRole`/`p.guildTag`/`p.guildName` em cache (carregado do banco no join/reconnect, atualizado a cada mutação de guilda que afeta alguém online) — a mensagem só é aceita se `p.guildId` já está preenchido (nunca confia num `guildId` que o cliente mandasse) e é retransmitida só pra quem tem o mesmo `p.guildId` em cache. **Não fica persistida no banco** (mesma decisão de escopo do chat global existente) — rate limit básico (8 mensagens/10s por conexão), texto sanitizado via `cleanText`.
+
+## Painel de Guilda (cliente)
+
+Novo botão "Guilda" no menu principal. Sem guilda: formulário de criação + lista de convites recebidos (aceitar/recusar). Como membro: nome/tag da guilda, cargo próprio, lista de membros (online/offline, classe, nível, cargo) com botões de ação condicionados à própria role (promover/rebaixar/transferir/expulsar só aparecem quando a permissão real permite — mesma matriz do servidor, verificado renderizando `scrGuild()` nos três papéis via console do navegador antes do commit), caixa de busca de personagem pra convidar (`GET /api/guild/:charId/players?q=`, exclui quem já está em alguma guilda), chat da guilda, e sair/dissolver conforme o cargo.
+
+## Testes
+
+`test/guild.test.js`: 17 testes de lógica pura (sempre rodam — validação de nome/tag incluindo normalização e rejeição pós-normalização, matriz de permissões completa para os 3 cargos, `canLeaveDirectly`, expiração de convite) + 20 testes de integração via HTTP real (`{skip:!hasSupabase()}`, pulados neste ambiente sem credenciais locais — cobrem criação, nome/tag duplicados case-insensitive, personagem já em guilda, convite/aceitar/recusar, convite pra quem já está em guilda, permissão real (member não convida, officer não promove/rebaixa/remove officer-ou-leader), promoção/rebaixamento pelo leader, transferência de liderança (nunca 0 ou 2 líderes), sair (member/officer livre, leader bloqueado com outros membros, leader único sai), dissolver (só leader, limpa membros e convites), tampering de role via payload forjado, concorrência (duas criações com o mesmo nome simultâneas — só uma vence), chat isolado por guilda real via WebSocket, e o limite de 20 membros com o 21º convite rejeitado). Além disso, as 6 funções RPC foram exercitadas manualmente contra o banco Supabase real de produção usando registros descartáveis criados e removidos na mesma sessão (nunca tocando nenhuma das contas reais existentes) — confirmando `ALREADY_IN_GUILD`, aceite de convite, bloqueio de saída do líder com membros, transferência com exatamente 1 líder antes/depois, e bloqueio/sucesso de dissolução por permissão.
+
+## Migração de banco
+
+Uma migration nova: `20260924214726_add_guild_tables_and_functions.sql` — aditiva, sem `drop` destrutivo, sem apagar nenhum dado existente. Cria `guilds`, `guild_members`, `guild_invites` e as 6 funções RPC. Aplicada e revisada antes da aplicação.
+
+## Limitações conhecidas
+
+- Busca de personagem pra convite é por nome (`ilike`), e nomes de personagem só são únicos **por conta** (`unique(user_id, name)`), não globalmente — por isso a busca sempre retorna uma lista (até 10 resultados) pro convidador escolher o personagem certo, nunca assume unicidade global de nome.
+- Sem Guild Bank, Guild Skills, Guild Wars, Castelos/Siege ou temporadas nesta fase — implementação explicitamente fora de escopo (ver spec da Fase 5.8-5.11).
+
+# FASE 5.9 — BESTIÁRIO
+
+## Catálogo canônico, sem duplicar stats
+
+`game-data/bestiary.js` lista os **14 tipos reais** do jogo (`slime`, `goblin`, `skeleton`, `wolf`, `bat`, `toxic`, `caster`, `sky`, `sala`, `elem`, `calc`, `cinza`, `lorde`, `ancient_titan`) — os mesmos `type` usados em `mobStats()`/`MOB_AI_STEP`/`DUNGEON_CFG` (server.js) e o World Boss (`WORLD_BOSS_MAP_RE`), auditados um por um antes de escrever o catálogo. Cada entrada é só metadado descritivo: nome de exibição, região, faixa de nível, se é chefe, e quais categorias de drop são possíveis (`basic`/`rare`/`epic`/`legendary`). **HP, dano e XP continuam vindo exclusivamente de `mobStats()`** — o Bestiário nunca duplica esses números, só referencia o mesmo `type`.
+
+## Progresso persistido: `character_bestiary`
+
+Tabela nova (`character_id, monster_id, discovered_at, kills, first_kill_at, last_kill_at`, chave primária composta), mesmo modelo de segurança do resto do projeto (RLS habilitado, zero policies, acesso só via `server.js` com a service-role key). Crédito de abate é uma função RPC atômica, `bestiary_record_kill(character_id, monster_id)`: `INSERT ... ON CONFLICT (character_id, monster_id) DO UPDATE SET kills = kills + 1, last_kill_at = now()` — atômico no próprio Postgres, nunca perde incremento mesmo sob concorrência real (verificado com 5 chamadas disparadas em paralelo contra o mesmo par personagem/monstro: `kills` fechou em exatamente 5). `first_kill_at`/`discovered_at` são gravados só no primeiro `INSERT`; abates seguintes só avançam `kills`/`last_kill_at`.
+
+## Autoridade: só o servidor credita
+
+`creditBestiaryKill(charId, monsterId)` é chamada exclusivamente nos pontos onde o servidor **já** confirma um abate real (nunca num ponto novo criado só pro Bestiário):
+
+- **Mob de campo**: dentro do `mob_damage` handler, no mesmo `if(mob.hp<=0)` que já credita XP/loot/quest via `creditKillReward` — usa o `mob.type` real que o servidor simulou, nunca o que o cliente reivindica.
+- **Masmorra** (trash e chefe): mesmo ponto onde `creditDungeonReward` já é chamado — `mob.type` também já existe ali (roster gerado por `DUNGEON_CFG`), então dungeon conta pro Bestiário exatamente como campo aberto.
+- **World Boss**: dentro de `grantWorldBossRewards`, protegido pelo mesmo `instance.rewardGranted` (setado de forma síncrona antes de qualquer `await`, então só executa uma vez por instância) — cada participante elegível da instância vencedora credita `ancient_titan`.
+- **Team vs Team**: não integra o Bestiário — TvT é PvP (jogador contra jogador), não existe "monstro" pra descobrir ali.
+
+`monster_id` recebido é sempre validado contra o catálogo (`BESTIARY.isValidMonsterId`) antes de chamar a função RPC — um `type` desconhecido nunca chega a criar uma linha lixo na tabela.
+
+## API
+
+- `GET /api/bestiary/catalog` — público, sem autenticação, sem dado de nenhum personagem (só o catálogo estático). Usado pra listar o total possível sem expor progresso de ninguém.
+- `GET /api/bestiary/:charId` — autenticado, exige que `charId` pertença à conta da sessão (mesmo padrão de `ownCharacter` usado em Guildas). Retorna o catálogo mesclado com o progresso real: criatura não descoberta vira só `{id, discovered:false}` (sem nome/região/descrição — "???" no cliente), criatura descoberta inclui nome/região/nível/drops possíveis/abates/datas. Nunca aceita `kills`/`discovered`/`monster_id` do cliente como verdade — é sempre leitura, nunca escrita, dessa rota.
+
+## Progresso e percentual
+
+`discovered` (contagem) e `total` (`BESTIARY_TOTAL = 14`, constante única) vêm na resposta; o percentual é calculado no cliente (`Math.round(100*discovered/total)`) — nunca armazenado, sempre derivado.
+
+## Painel de Bestiário (cliente)
+
+Novo botão "Bestiário" no menu principal. Cabeçalho mostra `X / 14 descobertos (Y%)`. Lista: criatura não descoberta aparece como "???" / "Criatura não descoberta" (sem vazar nome/região antes da primeira descoberta real); criatura descoberta mostra nome, ícone de coroa se for chefe, região, faixa de nível, categorias de drop possíveis (sem percentual exato de drop — só quais raridades são possíveis, como pedido) e total de abates. Atualiza ao abrir o painel e de novo automaticamente quando chega uma recompensa de abate (`kill_reward`) ou do World Boss (`world_boss_reward`) enquanto o painel está aberto.
+
+## Testes
+
+`test/bestiary.test.js`: 7 testes sempre rodam (catálogo com exatamente 14 entradas batendo 1:1 com os `type` reais do servidor, sem id duplicado, `isValidMonsterId` aceita real/rejeita inventado, endpoint público `/api/bestiary/catalog` sem autenticação e sem vazar progresso, nenhum monstro comum promete Legendário) + 8 testes de integração real via HTTP + RPC (`{skip:!hasSupabase()}`): autorização (sem token rejeitado, personagem de outra conta rejeitado com 404 — nunca vaza progresso alheio), progresso inicial 0/14, primeiro abate descobre a criatura com `first_kill_at === last_kill_at === discovered_at`, segundo abate incrementa `kills` sem mudar `first_kill_at` mas avançando `last_kill_at`, 5 créditos disparados em paralelo no mesmo par nunca perdem incremento (fecha em exatamente 5), integração com World Boss (`ancient_titan`), percentual correto com múltiplas criaturas descobertas. Os testes de integração chamam a **mesma função RPC** que `server.js` chama em produção (`adminRpc`, mesmo espírito de `adminPatchCharacter` já usado desde a Fase 3) — o ponto de chamada real dentro de `mob_damage`/masmorra/World Boss é coberto pela regressão de `combat.test.js`/`monsters.test.js`/`world-boss.test.js`, que continuam 100% verdes sem nenhuma mudança de comportamento de combate.
+
+## Migração de banco
+
+Uma migration nova: `20260924220401_add_bestiary_table_and_function.sql` — aditiva, sem `drop`, sem apagar dado existente. Cria `character_bestiary` e a função `bestiary_record_kill`.
+
+## Limitações conhecidas
+
+- Bestiário não mostra chance de drop precisa por design (só quais raridades são possíveis) — se essa granularidade for pedida numa fase futura, precisa vir de `GEAR_DROP_RATES`/`rollGearDrop` (fonte real), nunca de um número novo inventado no Bestiário.
+- Sem Ranking de Bestiário nesta fase (isso é Fase 5.10).
+
+# FASE 5.10 — RANKINGS
+
+## Estatísticas agregadas próprias, nunca `characters.save` inteiro
+
+Nova tabela `character_rank_stats` (`character_id` PK, `level`, `xp`, `pvp_kills`, `pvp_deaths`, `tvt_wins`, `tvt_losses`, `tvt_draws`, `tvt_kills`, `tvt_deaths`, `world_boss_kills`, `world_boss_participations`, `bestiary_discovered`) — índices dedicados por tipo de ranking (`(level desc, xp desc)`, `(tvt_wins desc, tvt_kills desc, tvt_losses asc)`, etc). Nenhuma abertura de ranking faz `select save from characters` — sempre lê só a linha pequena e indexada de `character_rank_stats`. Mesmo modelo de segurança do resto do projeto: RLS habilitado, zero policies.
+
+## Guilda: calculada ao vivo, sem tabela redundante
+
+Em vez de manter `guild_rank_stats` sincronizado a cada mutação de guilda (mais um lugar pra divergir), o ranking de guilda usa uma **view** (`guild_rank_view`, `security_invoker=true`) que agrega `guild_members` + `character_rank_stats` por guilda (`member_count`, `total_level`, `tvt_wins`, `world_boss_kills`) em tempo de consulta — sempre consistente, sem gatilho de escrita adicional. A ordenação usa soma de níveis e depois número de membros; **nunca chamada de "melhor guilda" no código ou na UI**, é só uma ordenação estatística objetiva, como pedido.
+
+## Quando o servidor atualiza (nunca o cliente)
+
+- **Nível/XP**: `syncRankLevelXp(charId, lvl, xp)` roda toda vez que o servidor já teria persistido esse nível/XP de qualquer forma — no PUT genérico de personagem (`handleCharacters`, cobre autosave a cada ~30s e qualquer sincronização manual), em `creditKillReward` (abate de campo/masmorra), em `grantWorldBossRewards` e em `grantTvtRewards` (por participante recompensado). `rank_stats_set_level_xp` grava o **valor absoluto mais recente**, não um incremento — sempre reflete o real.
+- **TvT termina**: dentro de `grantTvtRewards`, por participante elegível: `tvt_wins`/`tvt_losses`/`tvt_draws` (conforme `TVT.outcomeForTeam`) e `tvt_kills`/`tvt_deaths` (contagem real da partida) via `rank_stats_bump` — atômico, incremento real no Postgres.
+- **World Boss termina**: dentro de `grantWorldBossRewards`, por participante elegível da instância vencedora: `world_boss_kills` e `world_boss_participations` (+1 cada) — como toda recompensa de World Boss hoje só é concedida em vitória (`instance.defeated`), os dois números coincidem nesta fase; a coluna de participação existe pronta pra quando/​se existir recompensa parcial por participação sem abate.
+- **Bestiário descobre**: `syncRankBestiaryDiscovered` roda depois de todo crédito bem-sucedido em `creditBestiaryKill`, recalculando `bestiary_discovered` a partir da contagem real de `character_bestiary` (nunca incrementado às cegas).
+- **Guilda muda**: não precisa de gatilho — o ranking de guilda é sempre calculado ao vivo (ver acima), então qualquer entrada/saída/dissolução já reflete no próximo cálculo, sem sincronização extra.
+
+## PvP de campo aberto: limitação honesta, não uma lacuna escondida
+
+`pvp_kills`/`pvp_deaths` existem na tabela e a aba "PvP" existe na UI, mas **ficam sempre em 0 nesta fase**: o PvP fora do TvT nunca teve confirmação de abate server-side (desde a Fase 1 — o alvo aplica a própria mitigação localmente e o servidor só valida cooldown/alcance, ver `player_hit`/`resolveAttackDamage` fora da arena de TvT). Adicionar um "eu morri" auto-reportado pelo cliente como fonte de um ranking público seria abrir uma estatística falsificável — inaceitável dado "não sacrifique segurança econômica pra terminar mais rápido". A tabela e a aba ficam prontas pra quando o PvP de campo aberto ganhar confirmação server-side (fora do escopo desta fase); até lá, nunca um número inventado.
+
+## Backfill
+
+Rodado dentro da própria migration: `insert into character_rank_stats (character_id, level, xp) select id, lvl, (save->>'xp')::int from characters` — preenche nível/XP reais dos personagens que já existiam antes desta fase (o único dado historicamente inferível de `characters`). Campos sem histórico anterior (PvP, TvT, World Boss, Bestiário) começam no `default 0` da própria coluna — nunca um número inventado para preencher lacuna.
+
+## API pública, paginada, com cache
+
+`GET /api/rankings?type=<level|pvp|tvt|world_boss|bestiary|guild>&page=N` — sem autenticação (é uma classificação pública). `type` inválido → 400. Paginação obrigatória, 20 por página (`RANK_PAGE_SIZE`). Cache server-side em memória por `tipo:página`, TTL de 45s (`RANK_CACHE_MS`, dentro da janela de 30–60s pedida) — não recalcula a cada hit, só expira e deixa o próximo pedido recomputar. Resposta nunca inclui `character_id` de identidade real, `userId`, token ou o `save` inteiro — só `name`/`cls`/`level`/`guildTag`/métricas públicas (confirmado por teste que varre o JSON da resposta procurando essas strings).
+
+## Ordenação e desempate (puro, testável)
+
+`game-data/rankings.js` (`RANK_COMPARATORS`/`sortForType`): Nível → `level DESC, xp DESC, nome`; PvP → `kills DESC, deaths ASC, nome`; TvT → `wins DESC, kills DESC, losses ASC, nome`; World Boss → `kills DESC, participations DESC, nome`; Bestiário → `discovered DESC, nome`; Guilda → `total_level DESC, member_count DESC, nome`. Nome sempre como desempate final e estável (nunca ordem "como o banco devolveu"). K/D (`kdRatio`) é sempre **calculado na resposta**, nunca armazenado como coluna — evita o valor ficar desatualizado ou divergir de `kills`/`deaths`.
+
+## Painel de Ranking (cliente)
+
+Novo botão "Ranking" no menu principal, com abas Nível/PvP/TvT/World Boss/Bestiário/Guildas. Cada linha mostra posição, nome, classe, tag de guilda (quando existir) e a métrica principal da aba. Paginação com botões Anterior/Próxima, desabilitados nos limites. Renderização verificada nas duas formas (individual e guilda) via console do navegador antes do commit.
+
+## Testes
+
+`test/rankings.test.js`: 13 testes de lógica pura sempre rodam (config, tipos válidos, `kdRatio` sem divisão por zero, `paginate` com página além do limite, os 6 comparadores de ordenação/desempate, cache TTL hit/miss) + 6 testes de integração real (`{skip:!hasSupabase()}`): tipo inválido rejeitado (400), resposta pública nunca vaza `userId`/`save`/token, personagem de nível alto aparece na página certa, estatísticas de TvT refletidas com K/D calculado, paginação sem sobreposição entre páginas, e `rank_stats_bump` rejeitando um nome de campo inventado (protege contra SQL dinâmico — a função só tem os branches explícitos, nunca interpola nome de coluna).
+
+## Migrações de banco
+
+Duas migrations novas: `20260924221254_add_rank_stats_table_and_functions.sql` (tabela + backfill + 3 funções RPC: `rank_stats_set_level_xp`, `rank_stats_bump`, `rank_stats_sync_bestiary_discovered`) e `20260924221408_add_guild_rank_view.sql` (view agregada de guilda). Ambas aditivas, sem `drop`, sem apagar dado existente.
+
+## Limitações conhecidas
+
+- PvP de campo aberto sempre mostra 0 kills/deaths (ver seção acima) — limitação arquitetural pré-existente, não desta fase.
+- Cache de 45s significa que uma mudança de posição pode levar até 45s pra aparecer pra outro jogador olhando o ranking — aceito explicitamente pelo pedido de não recalcular a cada hit.
+- Sem sistema de temporada/season nesta fase — ranking é sempre "desde sempre" (cumulativo).
+
+# FASE 5.11 — MERCADO / LEILÃO
+
+## Arquitetura e autoridade
+
+O Mercado é um Auction House backend-first. O navegador envia somente intenção (`itemUid`, `price`, `listingId` e `operationId`); sessão e personagem são resolvidos por `server.js`, e toda mutação econômica ocorre em RPC transacional no Postgres. As tabelas `market_listings`, `market_transactions` e `market_claims` têm RLS habilitado e zero policies: não existe acesso direto do cliente Supabase.
+
+As 16 RPCs privilegiadas das Fases 5.8–5.11 tiveram `EXECUTE` revogado de `PUBLIC`, `anon` e `authenticated` pela migration `20260924232253_harden_server_only_rpc_permissions.sql`; somente `service_role` executa. Todas usam `SECURITY DEFINER` com `search_path = public, pg_temp` fixo. A mesma migration adiciona índices nas FKs novas apontadas pelo Performance Advisor e preserva os índices recém-criados, mesmo ainda sem uso de produção.
+
+## Escrow, UID e anúncio
+
+`market_list_item` bloqueia a linha real de `characters`, encontra o UID exclusivamente na mochila canônica e move o objeto JSON inteiro para escrow na mesma transação que cria o anúncio. O cliente nunca fornece rarity, enchant ou stats. Se a inserção falhar, a transação inteira é revertida e o item continua com o vendedor. Item equipado ou UID inexistente é rejeitado; o índice parcial `uq_market_listings_active_uid` impede duas listings ativas do mesmo item físico.
+
+O UID nunca é regenerado em venda, compra, cancelamento, expiração ou claim. Legendary e item +10 preservam exatamente o mesmo objeto canônico.
+
+## Compra, taxa e idempotência
+
+`market_buy` bloqueia a listing com `FOR UPDATE`, rejeita status não ativo, self-buy e saldo insuficiente, e trava comprador/vendedor em ordem determinística. A taxa oficial é 5% (`floor(price * 0.05)`): uma venda de 1.000 moedas gera taxa 50 e líquido 950. O cálculo válido é o SQL; o cliente só mostra a prévia.
+
+`operation_id` possui índice único. O wrapper de hardening usa advisory lock por operationId e exige que um retry corresponda ao mesmo comprador e à mesma listing: retry idêntico devolve a transação original; reutilização cruzada retorna `OPERATION_ID_CONFLICT`, sem débito ou transferência. Corridas buy/buy, buy/cancel e buy/expire convergem para um único estado porque operam sobre a mesma linha bloqueada.
+
+## Claims, cancelamento e expiração
+
+Se a mochila do comprador estiver cheia, o item vira claim persistente. Se o crédito do vendedor ultrapassaria o teto de 500.000 moedas, o valor líquido inteiro vira claim de ouro — nunca há truncamento silencioso. Claims são bloqueados com `FOR UPDATE`; retirada dupla produz um único efeito. Claim de item com bag cheia e claim de ouro com overflow permanecem pendentes.
+
+Cancelar só é permitido ao vendedor de listing ativa e sempre devolve o item por claim, independentemente do espaço da mochila. Listings vencem em 72 horas; o sweep de 60s chama `market_expire_listings`, que altera apenas linhas ainda ativas e cria exatamente um claim por item.
+
+## Busca, privacidade e interface
+
+Busca pública suporta nome, tipo, nível mínimo/máximo, rarity, enchant mínimo/máximo e preço mínimo/máximo; ordena por menor preço, maior preço, mais recente ou maior enchant, com páginas de 20. A resposta pública contém apenas dados de exibição do item e nome do vendedor. Histórico autenticado retorna só transações relacionadas ao personagem e nunca inclui `user_id`, email, token ou save.
+
+O menu principal possui **Mercado**, com cinco abas utilizáveis: **Comprar**, **Meus anúncios**, **Anunciar**, **Itens a retirar** e **Histórico**. Cards mostram nome, rarity, enchant, nível, stats, preço e vendedor. Compra e anúncio exigem confirmação; anúncio mostra taxa e líquido. Após mutações, o cliente recarrega o personagem real do backend para refletir bag e ouro sem confiar em cálculo local.
+
+## Concorrência, testes e limitações
+
+Cobertura pura/estrutural valida preço, taxa, filtros, grants server-only, locks, vínculo do operationId, índices e presença completa da UI. Os testes de integração cobrem ownership, UID forjado, item equipado, escrow, busca/paginação, cancelamento, compra, self-buy, saldo insuficiente, retry idempotente, bag cheia, claim, preservação de UID/rarity/enchant/Legendary +10, histórico e privacidade. Casos destrutivos de concorrência real só rodam com `SUPABASE_TEST_SAFE=1`; sem ambiente dedicado ficam explicitamente skipped e nunca usam a economia oficial.
+
+Limitações: o sweep de expiração depende do processo Render estar ativo (é idempotente e recupera vencidos no próximo ciclo); não há trading direto, mail, Cash Shop ou temporadas. As tabelas/RPCs persistem no Supabase, mas cache de Ranking e chats de Guilda continuam em memória conforme documentado nas fases próprias.

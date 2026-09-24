@@ -11,6 +11,10 @@ const DUNGEON_GEN = require('./game-data/dungeon-generation.js');
 const EVENT_DATA = require('./game-data/event-manager.js');
 const WORLD_BOSS = require('./game-data/world-boss.js');
 const TVT = require('./game-data/tvt.js');
+const GUILD = require('./game-data/guild.js');
+const BESTIARY = require('./game-data/bestiary.js');
+const RANKINGS = require('./game-data/rankings.js');
+const MARKET = require('./game-data/market.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -983,6 +987,7 @@ async function handleCharacters(req, res, pathname) {
         if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
         return {status:200, body:{character: rows[0]}};
       });
+      if (result.status === 200) syncRankLevelXp(id, result.body.character.lvl, result.body.character.save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
       json(res, result.status, result.body); return true;
     }
 
@@ -1297,6 +1302,7 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
       if (questInfo) Object.assign(pushed, advanceQuestOnKill(save, questInfo.type, questInfo.boss, questInfo.lvl));
       const { granted, lost } = drop ? applyGearDrops(save, lvl, [drop.item]) : { granted: null, lost: null };
       await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
+      syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
       const msg = {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)};
       // bag/eq so vao junto quando um item de fato mudou o save (a maioria
       // dos abates nao dropa nada -- nao vale mandar o inventario inteiro
@@ -1471,6 +1477,550 @@ function broadcastMap(map, payload) {
   for(const [ws,p] of clients) if(p.map===map&&ws.readyState===WebSocket.OPEN) ws.send(data);
 }
 
+// ===== Fase 5.8: Guildas / Cla =====
+// Estrutura relacional (guilds/guild_members/guild_invites), nunca dentro
+// de characters.save (ver supabase/migrations/*_add_guild_tables_and_
+// functions.sql). Operacoes que precisam ser atomicas (criar guilda+lider,
+// aceitar convite, transferir lideranca, sair/expulsar, dissolver) usam
+// funcoes RPC no Postgres em vez de so withCharLock -- corretas mesmo que
+// no futuro existam multiplas instancias Node (withCharLock so protege
+// dentro desta instancia; a funcao SQL e atomica no proprio banco).
+const GUILD_ID_RE = /^\/api\/guild\/([0-9a-fA-F-]{8,36})(\/.*)?$/;
+async function ownCharacter(user, charId) {
+  const rows = await supabase('characters', {query:`?select=id,name,cls,lvl&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(user.id)}&limit=1`});
+  return rows[0] || null;
+}
+async function rpc(name, body) {
+  try { return {ok:true, data: await supabase(`rpc/${name}`, {method:'POST', body, prefer:'return=representation'})}; }
+  catch (err) { return {ok:false, error: (err.detail && typeof err.detail === 'object' && (err.detail.message || err.detail.hint)) || err.message}; }
+}
+const GUILD_ERROR_MESSAGES = {
+  ALREADY_IN_GUILD: 'Você já pertence a uma guilda.',
+  NAME_OR_TAG_TAKEN: 'Nome ou tag de guilda já em uso.',
+  INVITE_NOT_FOUND: 'Convite não encontrado.',
+  INVITE_NOT_YOURS: 'Esse convite não é seu.',
+  INVITE_NOT_PENDING: 'Esse convite já foi respondido.',
+  INVITE_EXPIRED: 'Esse convite expirou.',
+  GUILD_FULL: `Guilda cheia (máximo ${GUILD.GUILD_MAX_MEMBERS} membros).`,
+  NOT_A_MEMBER: 'Você não pertence a uma guilda.',
+  INVALID_REQUEST: 'Requisição inválida.',
+  LEADER_MUST_TRANSFER_OR_DISSOLVE: 'Transfira a liderança ou dissolva a guilda antes de sair.',
+  TARGET_NOT_IN_GUILD: 'Esse personagem não está na sua guilda.',
+  INSUFFICIENT_ROLE: 'Você não tem permissão para essa ação.',
+  CANNOT_CHANGE_LEADER_ROLE: 'Não é possível alterar o cargo do líder.',
+  ALREADY_THAT_ROLE: 'Esse membro já tem esse cargo.',
+  ALREADY_LEADER: 'Esse personagem já é o líder.',
+  INVALID_ROLE: 'Cargo inválido.',
+};
+function guildErrorMessage(code) { return GUILD_ERROR_MESSAGES[code] || 'Não foi possível concluir. Tente novamente.'; }
+
+async function guildMembershipOf(charId) {
+  const rows = await supabase('guild_members', {query:`?select=guild_id,role,guilds(id,name,tag,leader_character_id)&character_id=eq.${encodeURIComponent(charId)}&limit=1`});
+  return rows[0] || null;
+}
+async function guildMembersView(guildId) {
+  const rows = await supabase('guild_members', {query:`?select=character_id,role,joined_at,characters(user_id,name,cls,lvl)&guild_id=eq.${encodeURIComponent(guildId)}&order=role.asc,joined_at.asc`});
+  return rows.map(r => {
+    const c = Array.isArray(r.characters) ? r.characters[0] : r.characters;
+    return {charId:r.character_id, role:r.role, name:c?c.name:'?', cls:c?c.cls:'guerreiro', lvl:c?c.lvl:1, online:c?isAccountOnline(c.user_id):false};
+  });
+}
+// Personagens conectados mantem guildId/guildRole/guildTag/guildName em
+// cache no proprio objeto de conexao (p) pra rotear guild_chat sem bater
+// no banco a cada mensagem -- atualizado aqui sempre que uma mutacao de
+// guilda afeta alguem que esta online agora.
+function syncGuildOnClients(members, guild) {
+  const byId = new Map(members.map(m=>[m.charId,m]));
+  for (const [,p] of clients) if (byId.has(p.charId)) { const mem=byId.get(p.charId); p.guildId=guild.id; p.guildRole=mem.role; p.guildTag=guild.tag; p.guildName=guild.name; }
+}
+async function refreshGuildCacheForGuild(guildId) {
+  const rows = await supabase('guilds', {query:`?select=id,name,tag&id=eq.${encodeURIComponent(guildId)}&limit=1`});
+  const g = rows[0]; if (!g) return;
+  syncGuildOnClients(await guildMembersView(guildId), g);
+}
+function clearGuildOnClient(charId) {
+  for (const [,p] of clients) if (p.charId === charId) { p.guildId=null; p.guildRole=null; p.guildTag=null; p.guildName=null; }
+}
+async function loadCharGuildBrief(charId) {
+  const membership = await guildMembershipOf(charId);
+  if (!membership) return null;
+  const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+  return g ? {guildId:g.id, role:membership.role, tag:g.tag, name:g.name} : null;
+}
+
+async function handleGuild(req, res, pathname) {
+  const m = GUILD_ID_RE.exec(pathname);
+  if (!m) return false;
+  const charId = m[1], sub = m[2] || '';
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const character = await ownCharacter(user, charId);
+    if (!character) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+
+    if (sub === '' && req.method === 'GET') {
+      const membership = await guildMembershipOf(charId);
+      if (!membership) { json(res,200,{guild:null}); return true; }
+      const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+      json(res,200,{guild:{id:g.id,name:g.name,tag:g.tag,leaderCharacterId:g.leader_character_id,myRole:membership.role,members:await guildMembersView(g.id)}}); return true;
+    }
+
+    if (sub === '' && req.method === 'POST') {
+      const input = await readJson(req);
+      const nameCheck = GUILD.validateGuildName(input.name);
+      if (!nameCheck.ok) { json(res,400,{error:nameCheck.error}); return true; }
+      const tagCheck = GUILD.validateGuildTag(input.tag);
+      if (!tagCheck.ok) { json(res,400,{error:tagCheck.error}); return true; }
+      const result = await rpc('guild_create', {p_character_id:charId, p_name:nameCheck.value, p_tag:tagCheck.value});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      const g = Array.isArray(result.data) ? result.data[0] : result.data;
+      syncGuildOnClients([{charId,role:'leader'}], g);
+      json(res,201,{guild:{id:g.id,name:g.name,tag:g.tag,leaderCharacterId:g.leader_character_id,myRole:'leader',members:await guildMembersView(g.id)}}); return true;
+    }
+
+    if (sub === '/players' && req.method === 'GET') {
+      const url = new URL(req.url, 'http://localhost');
+      const q = cleanText(url.searchParams.get('q'), 14).replace(/[,()*]/g, '');
+      if (q.length < 2) { json(res,200,{characters:[]}); return true; }
+      const rows = await supabase('characters', {query:`?select=id,name,cls,lvl&name=ilike.*${encodeURIComponent(q)}*&id=neq.${encodeURIComponent(charId)}&limit=10`});
+      const ids = rows.map(r=>r.id);
+      const guildedIds = ids.length ? new Set((await supabase('guild_members', {query:`?select=character_id&character_id=in.(${ids.join(',')})`})).map(x=>x.character_id)) : new Set();
+      json(res,200,{characters:rows.filter(r=>!guildedIds.has(r.id)).map(r=>({id:r.id,name:r.name,cls:r.cls,lvl:r.lvl}))}); return true;
+    }
+
+    if (sub === '/invites' && req.method === 'GET') {
+      const incoming = await supabase('guild_invites', {query:`?select=id,guild_id,created_at,expires_at,guilds(name,tag),characters!inviter_character_id(name)&target_character_id=eq.${encodeURIComponent(charId)}&status=eq.pending&order=created_at.desc`});
+      const membership = await guildMembershipOf(charId);
+      let outgoing = [];
+      if (membership && (membership.role === 'leader' || membership.role === 'officer')) {
+        const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+        outgoing = await supabase('guild_invites', {query:`?select=id,created_at,expires_at,characters!target_character_id(name)&guild_id=eq.${encodeURIComponent(g.id)}&status=eq.pending&order=created_at.desc`});
+      }
+      json(res,200,{
+        incoming: incoming.map(i=>{const g=Array.isArray(i.guilds)?i.guilds[0]:i.guilds,inv=Array.isArray(i.characters)?i.characters[0]:i.characters;return{id:i.id,guildName:g?g.name:'?',guildTag:g?g.tag:'?',inviterName:inv?inv.name:'?',createdAt:i.created_at,expiresAt:i.expires_at}}),
+        outgoing: outgoing.map(i=>{const t=Array.isArray(i.characters)?i.characters[0]:i.characters;return{id:i.id,targetName:t?t.name:'?',createdAt:i.created_at,expiresAt:i.expires_at}}),
+      }); return true;
+    }
+
+    if (sub === '/invite' && req.method === 'POST') {
+      const membership = await guildMembershipOf(charId);
+      if (!membership || !GUILD.canInvite(membership.role)) { json(res,403,{error:'Você não tem permissão para convidar.'}); return true; }
+      const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+      const input = await readJson(req);
+      const targetCharacterId = cleanText(input.targetCharacterId, 40);
+      if (!UID_RE.test(targetCharacterId) && !/^[0-9a-fA-F-]{8,36}$/.test(targetCharacterId)) { json(res,400,{error:'Personagem inválido'}); return true; }
+      const targetRows = await supabase('characters', {query:`?select=id&id=eq.${encodeURIComponent(targetCharacterId)}&limit=1`});
+      if (!targetRows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+      const targetGuild = await guildMembershipOf(targetCharacterId);
+      if (targetGuild) { json(res,400,{error:'Esse personagem já pertence a uma guilda.'}); return true; }
+      const members = await guildMembersView(g.id);
+      if (members.length >= GUILD.GUILD_MAX_MEMBERS) { json(res,400,{error:guildErrorMessage('GUILD_FULL')}); return true; }
+      try {
+        await supabase('guild_invites', {method:'POST', body:{guild_id:g.id, inviter_character_id:charId, target_character_id:targetCharacterId, expires_at:new Date(Date.now()+GUILD.GUILD_INVITE_TTL_MS).toISOString()}, prefer:'return=minimal'});
+      } catch (e) { if (e.status === 409) { json(res,400,{error:'Já existe um convite pendente para esse personagem.'}); return true; } throw e; }
+      json(res,201,{ok:true}); return true;
+    }
+
+    const inviteActionMatch = /^\/invites\/([0-9a-fA-F-]{8,36})\/(accept|decline|cancel)$/.exec(sub);
+    if (inviteActionMatch && req.method === 'POST') {
+      const inviteId = inviteActionMatch[1], action = inviteActionMatch[2];
+      if (action === 'accept') {
+        const result = await rpc('guild_accept_invite', {p_invite_id:inviteId, p_character_id:charId});
+        if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+        const gm = Array.isArray(result.data) ? result.data[0] : result.data;
+        await refreshGuildCacheForGuild(gm.guild_id);
+        const membership = await guildMembershipOf(charId);
+        const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+        json(res,200,{guild:{id:g.id,name:g.name,tag:g.tag,leaderCharacterId:g.leader_character_id,myRole:membership.role,members:await guildMembersView(g.id)}}); return true;
+      }
+      if (action === 'decline') {
+        const rows = await supabase('guild_invites', {method:'PATCH', query:`?id=eq.${encodeURIComponent(inviteId)}&target_character_id=eq.${encodeURIComponent(charId)}&status=eq.pending`, body:{status:'declined'}, prefer:'return=representation'});
+        if (!rows.length) { json(res,404,{error:'Convite não encontrado ou já respondido.'}); return true; }
+        json(res,200,{ok:true}); return true;
+      }
+      // cancel: quem convidou OU lider/officer da guilda do convite pode cancelar
+      const inviteRows = await supabase('guild_invites', {query:`?select=id,guild_id,inviter_character_id,status&id=eq.${encodeURIComponent(inviteId)}&limit=1`});
+      const invite = inviteRows[0];
+      if (!invite || invite.status !== 'pending') { json(res,404,{error:'Convite não encontrado ou já respondido.'}); return true; }
+      const membership = await guildMembershipOf(charId);
+      const isManager = membership && membership.guild_id === invite.guild_id && GUILD.canInvite(membership.role);
+      if (invite.inviter_character_id !== charId && !isManager) { json(res,403,{error:'Você não tem permissão para cancelar esse convite.'}); return true; }
+      await supabase('guild_invites', {method:'PATCH', query:`?id=eq.${encodeURIComponent(inviteId)}&status=eq.pending`, body:{status:'cancelled'}, prefer:'return=minimal'});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/leave' && req.method === 'POST') {
+      const result = await rpc('guild_remove_member', {p_actor_character_id:charId, p_target_character_id:charId, p_is_leave:true});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      const membership = await guildMembershipOf(charId);
+      clearGuildOnClient(charId);
+      if (membership) await refreshGuildCacheForGuild(membership.guild_id);
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/kick' && req.method === 'POST') {
+      const input = await readJson(req);
+      const targetCharacterId = cleanText(input.targetCharacterId, 40);
+      const result = await rpc('guild_remove_member', {p_actor_character_id:charId, p_target_character_id:targetCharacterId, p_is_leave:false});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      clearGuildOnClient(targetCharacterId);
+      for (const [ws2,p2] of clients) if (p2.charId === targetCharacterId) send(ws2,{type:'guild_removed', reason:'kicked'});
+      const membership = await guildMembershipOf(charId);
+      if (membership) await refreshGuildCacheForGuild(membership.guild_id);
+      json(res,200,{ok:true}); return true;
+    }
+
+    if ((sub === '/promote' || sub === '/demote') && req.method === 'POST') {
+      const input = await readJson(req);
+      const targetCharacterId = cleanText(input.targetCharacterId, 40);
+      const newRole = sub === '/promote' ? 'officer' : 'member';
+      const result = await rpc('guild_set_role', {p_actor_character_id:charId, p_target_character_id:targetCharacterId, p_new_role:newRole});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      const gm = Array.isArray(result.data) ? result.data[0] : result.data;
+      await refreshGuildCacheForGuild(gm.guild_id);
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/transfer' && req.method === 'POST') {
+      const input = await readJson(req);
+      const targetCharacterId = cleanText(input.targetCharacterId, 40);
+      const result = await rpc('guild_transfer_leadership', {p_actor_character_id:charId, p_new_leader_character_id:targetCharacterId});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      const membership = await guildMembershipOf(charId);
+      if (membership) await refreshGuildCacheForGuild(membership.guild_id);
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/dissolve' && req.method === 'POST') {
+      const membership = await guildMembershipOf(charId);
+      if (!membership) { json(res,400,{error:guildErrorMessage('NOT_A_MEMBER')}); return true; }
+      const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+      const members = await guildMembersView(g.id);
+      const result = await rpc('guild_dissolve', {p_actor_character_id:charId});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      for (const mem of members) { clearGuildOnClient(mem.charId); for (const [ws2,p2] of clients) if (p2.charId === mem.charId) send(ws2,{type:'guild_removed', reason:'dissolved'}); }
+      json(res,200,{ok:true}); return true;
+    }
+
+    json(res,404,{error:'Rota de guilda inválida'}); return true;
+  } catch (err) {
+    console.error('guild_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Guildas ainda não configuradas no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+// Convites pendentes vencidos (24h) viram 'expired' num sweep leve e
+// idempotente, separado do tick de 1s (nao e tempo-critico como TvT/World
+// Boss) -- roda a cada 60s, sem custo se Supabase nao estiver configurado.
+function sweepExpiredGuildInvites() {
+  if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) return;
+  supabase('guild_invites', {method:'PATCH', query:`?status=eq.pending&expires_at=lte.${encodeURIComponent(new Date().toISOString())}`, body:{status:'expired'}, prefer:'return=minimal'})
+    .catch(err => console.error('guild_invite_sweep_error', err.message));
+}
+
+// ===== Fase 5.9: Bestiario =====
+// Catalogo canonico em game-data/bestiary.js (so metadados -- stats
+// numericos continuam so em mobStats()). Progresso persistido em
+// character_bestiary via a funcao RPC bestiary_record_kill (upsert
+// atomico -- nunca perde incremento sob concorrencia). So o servidor
+// credita, sempre no mesmo ponto onde um abate real ja e confirmado
+// (mob.hp<=0 em mob_damage) -- nunca aceita monster_id/kills do cliente.
+async function creditBestiaryKill(charId, monsterId) {
+  if (!charId || !BESTIARY.isValidMonsterId(monsterId)) return;
+  const result = await rpc('bestiary_record_kill', {p_character_id:charId, p_monster_id:monsterId});
+  if (!result.ok) { console.error('bestiary_credit_error', charId, monsterId, result.error); return; }
+  syncRankBestiaryDiscovered(charId).catch(err=>console.error('rank_stats_bestiary_error',err.message));
+}
+const BESTIARY_ID_RE = /^\/api\/bestiary\/([0-9a-fA-F-]{8,36})$/;
+async function handleBestiary(req, res, pathname) {
+  if (pathname === '/api/bestiary/catalog' && req.method === 'GET') {
+    json(res,200,{catalog:BESTIARY.BESTIARY_CATALOG, total:BESTIARY.BESTIARY_TOTAL}); return true;
+  }
+  const m = BESTIARY_ID_RE.exec(pathname);
+  if (!m) return false;
+  if (req.method !== 'GET') { json(res,405,{error:'Método não permitido'}); return true; }
+  const charId = m[1];
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const character = await ownCharacter(user, charId);
+    if (!character) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+    const rows = await supabase('character_bestiary', {query:`?select=monster_id,kills,discovered_at,first_kill_at,last_kill_at&character_id=eq.${encodeURIComponent(charId)}`});
+    const byId = new Map(rows.map(r => [r.monster_id, r]));
+    const catalog = BESTIARY.BESTIARY_CATALOG.map(entry => {
+      const progress = byId.get(entry.id);
+      return progress
+        ? {id:entry.id, displayName:entry.displayName, region:entry.region, levelRange:entry.levelRange, boss:entry.boss, dropTiers:entry.dropTiers, discovered:true, kills:progress.kills, discoveredAt:progress.discovered_at, firstKillAt:progress.first_kill_at, lastKillAt:progress.last_kill_at}
+        : {id:entry.id, discovered:false};
+    });
+    json(res,200,{catalog, total:BESTIARY.BESTIARY_TOTAL, discovered:byId.size}); return true;
+  } catch (err) {
+    console.error('bestiary_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Bestiário ainda não configurado no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+// ===== Fase 5.10: Rankings =====
+// Estatisticas agregadas proprias (character_rank_stats), nunca uma
+// query completa em characters.save a cada abertura. Atualizadas pelo
+// SERVIDOR nos momentos reais (nivel/XP muda, TvT termina, World Boss
+// termina, Bestiario descobre) -- nunca pelo cliente. PvP de campo aberto
+// nao tem confirmacao server-side de abate (limitacao arquitetural ja
+// documentada desde a Fase 1 -- o alvo aplica a propria mitigacao
+// localmente); pvp_kills/pvp_deaths existem na tabela pra uso futuro mas
+// ficam sempre 0 nesta fase, nunca um numero inventado ou auto-reportado
+// pelo cliente.
+async function syncRankLevelXp(charId, lvl, xp) {
+  if (!charId) return;
+  const result = await rpc('rank_stats_set_level_xp', {p_character_id:charId, p_level:Math.round(Number(lvl)||1), p_xp:Math.round(Number(xp)||0)});
+  if (!result.ok) console.error('rank_stats_level_error', charId, result.error);
+}
+async function bumpRankStat(charId, field, delta) {
+  if (!charId) return;
+  const result = await rpc('rank_stats_bump', {p_character_id:charId, p_field:field, p_delta:delta==null?1:delta});
+  if (!result.ok) console.error('rank_stats_bump_error', charId, field, result.error);
+}
+async function syncRankBestiaryDiscovered(charId) {
+  if (!charId) return;
+  const result = await rpc('rank_stats_sync_bestiary_discovered', {p_character_id:charId});
+  if (!result.ok) console.error('rank_stats_bestiary_error', charId, result.error);
+}
+const rankCache = RANKINGS.createRankCache();
+async function fetchRankRows(type) {
+  if (type === 'guild') {
+    const rows = await supabase('guild_rank_view', {query:'?select=guild_id,name,tag,member_count,total_level,tvt_wins,world_boss_kills&limit=500'});
+    return rows.map(r => ({id:r.guild_id, name:r.name, tag:r.tag, memberCount:r.member_count, totalLevel:r.total_level, tvtWins:r.tvt_wins, worldBossKills:r.world_boss_kills}));
+  }
+  const rows = await supabase('character_rank_stats', {query:'?select=character_id,level,xp,pvp_kills,pvp_deaths,tvt_wins,tvt_losses,tvt_draws,tvt_kills,tvt_deaths,world_boss_kills,world_boss_participations,bestiary_discovered,characters(name,cls,lvl)&limit=500'});
+  return rows.map(r => {
+    const c = Array.isArray(r.characters) ? r.characters[0] : r.characters;
+    return {
+      id:r.character_id, name:c?c.name:'?', cls:c?c.cls:'guerreiro',
+      level:r.level, xp:r.xp, pvpKills:r.pvp_kills, pvpDeaths:r.pvp_deaths,
+      tvtWins:r.tvt_wins, tvtLosses:r.tvt_losses, tvtDraws:r.tvt_draws, tvtKills:r.tvt_kills, tvtDeaths:r.tvt_deaths,
+      worldBossKills:r.world_boss_kills, worldBossParticipations:r.world_boss_participations,
+      bestiaryDiscovered:r.bestiary_discovered,
+    };
+  });
+}
+async function rankingsPage(type, page) {
+  const cacheKey = type + ':' + page;
+  const cached = rankCache.get(cacheKey);
+  if (cached) return cached;
+  const rows = RANKINGS.sortForType(type, await fetchRankRows(type));
+  const withGuildTag = type === 'guild' ? rows : await attachGuildTags(rows);
+  const result = RANKINGS.paginate(withGuildTag, page, RANKINGS.RANK_PAGE_SIZE);
+  rankCache.set(cacheKey, result);
+  return result;
+}
+// Ranking de personagem mostra a tag da guilda quando existir (pedido
+// explicito da UI) -- uma unica query extra por pagina (nunca N+1 por
+// linha), so pros ids que realmente aparecem na pagina certa.
+async function attachGuildTags(rows) {
+  if (!rows.length) return rows;
+  const ids = rows.map(r => r.id);
+  let tagById = new Map();
+  try {
+    const gm = await supabase('guild_members', {query:`?select=character_id,guilds(tag)&character_id=in.(${ids.join(',')})`});
+    tagById = new Map(gm.map(x => [x.character_id, (Array.isArray(x.guilds)?x.guilds[0]:x.guilds)?.tag || null]));
+  } catch (err) { console.error('rankings_guild_tag_error', err.message); }
+  return rows.map(r => ({...r, guildTag: tagById.get(r.id) || null}));
+}
+function handleRankings(req, res, pathname) {
+  if (pathname !== '/api/rankings' || req.method !== 'GET') return false;
+  const url = new URL(req.url, 'http://localhost');
+  const type = String(url.searchParams.get('type') || 'level');
+  const page = Math.max(1, Math.round(Number(url.searchParams.get('page')) || 1));
+  if (!RANKINGS.isValidRankType(type)) { json(res,400,{error:'Tipo de ranking inválido'}); return true; }
+  rankingsPage(type, page).then(result => {
+    // Resposta publica: so campos de exibicao (nome/classe/nivel/tag de
+    // guilda/estatisticas publicas). Nunca character_id de outro tipo de
+    // identidade, userId, token ou o save inteiro.
+    const items = result.items.map((r, idx) => {
+      const position = (result.page - 1) * result.pageSize + idx + 1;
+      if (type === 'guild') return {position, name:r.name, tag:r.tag, memberCount:r.memberCount, totalLevel:r.totalLevel, tvtWins:r.tvtWins, worldBossKills:r.worldBossKills};
+      const base = {position, name:r.name, cls:r.cls, guildTag:r.guildTag||null, level:r.level};
+      if (type === 'level') return {...base, xp:r.xp};
+      if (type === 'pvp') return {...base, kills:r.pvpKills, deaths:r.pvpDeaths, kd:RANKINGS.kdRatio(r.pvpKills,r.pvpDeaths)};
+      if (type === 'tvt') return {...base, wins:r.tvtWins, losses:r.tvtLosses, draws:r.tvtDraws, kills:r.tvtKills, deaths:r.tvtDeaths, kd:RANKINGS.kdRatio(r.tvtKills,r.tvtDeaths)};
+      if (type === 'world_boss') return {...base, kills:r.worldBossKills, participations:r.worldBossParticipations};
+      if (type === 'bestiary') return {...base, discovered:r.bestiaryDiscovered};
+      return base;
+    });
+    json(res,200,{type, page:result.page, pageSize:result.pageSize, total:result.total, totalPages:result.totalPages, items});
+  }).catch(err => {
+    console.error('rankings_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Rankings ainda não configurados no servidor.':'Não foi possível concluir. Tente novamente.'});
+  });
+  return true;
+}
+
+// ===== Fase 5.11: Mercado / Leilao =====
+// Fase mais sensivel economicamente do projeto: escrow + compra +
+// claims vivem inteiramente em funcoes SQL SECURITY DEFINER (ver
+// supabase/migrations/*_add_market_tables_and_functions.sql), cada uma
+// atomica no proprio Postgres (`for update` real, nao so withCharLock).
+// Toda chamada aqui SEMPRE passa por withCharLock() do(s) personagem(ns)
+// envolvido(s) -- fecha a corrida com o resto do codigo economico
+// existente (creditKillReward/handleShop/etc, que ainda fazem leitura-
+// altera-grava em duas chamadas REST separadas sem lock real no banco;
+// sem isso, um kill-reward em voo ao mesmo tempo de uma compra poderia
+// sobrescrever o resultado um do outro). O lock real dentro da funcao
+// SQL e quem garante correcao mesmo se um dia existirem multiplas
+// instancias Node (withCharLock sozinho so protegeria dentro desta).
+const MARKET_ERROR_MESSAGES = {
+  INVALID_PRICE: `Preço inválido (entre ${MARKET.MARKET_MIN_PRICE} e ${MARKET.MARKET_MAX_PRICE}).`,
+  CHARACTER_NOT_FOUND: 'Personagem não encontrado.',
+  ITEM_NOT_IN_BAG: 'Esse item não está na sua mochila.',
+  ITEM_ALREADY_LISTED: 'Esse item já está anunciado.',
+  LISTING_NOT_FOUND: 'Anúncio não encontrado.',
+  NOT_YOUR_LISTING: 'Esse anúncio não é seu.',
+  LISTING_NOT_ACTIVE: 'Esse item já foi vendido, cancelado ou expirou.',
+  CANNOT_BUY_OWN_LISTING: 'Você não pode comprar seu próprio anúncio.',
+  BUYER_NOT_FOUND: 'Personagem não encontrado.',
+  INSUFFICIENT_GOLD: 'Moedas insuficientes.',
+  CLAIM_NOT_FOUND: 'Item a retirar não encontrado.',
+  NOT_YOUR_CLAIM: 'Esse item a retirar não é seu.',
+  ALREADY_CLAIMED: 'Esse item já foi retirado.',
+  WRONG_CLAIM_KIND: 'Tipo de retirada inválido.',
+  BAG_FULL: 'Mochila cheia. Abra espaço e tente retirar de novo.',
+  GOLD_CAP_WOULD_OVERFLOW: 'Retirar esse valor ultrapassaria o limite de moedas. Gaste um pouco e tente de novo.',
+  OPERATION_ID_CONFLICT: 'Esta identificação de compra já foi usada em outra operação.',
+};
+function marketErrorMessage(code) { return MARKET_ERROR_MESSAGES[code] || 'Não foi possível concluir. Tente novamente.'; }
+const OPERATION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function marketListingView(row) {
+  const seller = Array.isArray(row.characters) ? row.characters[0] : row.characters;
+  return {
+    id: row.id, name: row.item_json?.n || '?', type: row.item_type, level: row.item_level,
+    rarity: row.item_rarity, enchant: row.item_enchant, atk: row.item_json?.atk || 0, def: row.item_json?.def || 0,
+    hp: row.item_json?.hp || 0, blk: row.item_json?.blk || 0, price: row.price, status: row.status,
+    createdAt: row.created_at, expiresAt: row.expires_at, sellerName: seller ? seller.name : '?',
+  };
+}
+
+async function handleMarket(req, res, pathname) {
+  if (pathname === '/api/market/listings' && req.method === 'GET') {
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      const q = url.searchParams;
+      const filters = ['status=eq.active'];
+      const name = cleanText(q.get('name'), 24).replace(/[,()*]/g, '');
+      if (name) filters.push(`item_json->>n=ilike.*${encodeURIComponent(name)}*`);
+      const type = cleanText(q.get('type'), 16);
+      if (type) filters.push(`item_type=eq.${encodeURIComponent(type)}`);
+      const rarity = cleanText(q.get('rarity'), 16);
+      if (rarity) filters.push(`item_rarity=eq.${encodeURIComponent(rarity)}`);
+      const lvlMin = Number(q.get('levelMin')), lvlMax = Number(q.get('levelMax'));
+      if (Number.isFinite(lvlMin)) filters.push(`item_level=gte.${Math.round(lvlMin)}`);
+      if (Number.isFinite(lvlMax)) filters.push(`item_level=lte.${Math.round(lvlMax)}`);
+      const enMin = Number(q.get('enchantMin')), enMax = Number(q.get('enchantMax'));
+      if (Number.isFinite(enMin)) filters.push(`item_enchant=gte.${Math.round(enMin)}`);
+      if (Number.isFinite(enMax)) filters.push(`item_enchant=lte.${Math.round(enMax)}`);
+      const priceMin = Number(q.get('priceMin')), priceMax = Number(q.get('priceMax'));
+      if (Number.isFinite(priceMin)) filters.push(`price=gte.${Math.round(priceMin)}`);
+      if (Number.isFinite(priceMax)) filters.push(`price=lte.${Math.round(priceMax)}`);
+      const sort = MARKET.isValidSort(q.get('sort')) ? q.get('sort') : 'newest';
+      const order = {price_asc:'price.asc', price_desc:'price.desc', newest:'created_at.desc', enchant_desc:'item_enchant.desc'}[sort];
+      const page = Math.max(1, Math.round(Number(q.get('page')) || 1));
+      const rows = await supabase('market_listings', {query:`?select=id,item_json,item_type,item_level,item_rarity,item_enchant,price,status,created_at,expires_at,characters!seller_character_id(name)&${filters.join('&')}&order=${order}&limit=500`});
+      const items = rows.map(marketListingView);
+      const paged = RANKINGS.paginate(items, page, MARKET.MARKET_PAGE_SIZE);
+      json(res,200,{page:paged.page, pageSize:paged.pageSize, total:paged.total, totalPages:paged.totalPages, items:paged.items}); return true;
+    } catch (err) {
+      console.error('market_search_error', err.message);
+      json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error:'Não foi possível concluir. Tente novamente.'}); return true;
+    }
+  }
+
+  const m = /^\/api\/market\/([0-9a-fA-F-]{8,36})(\/.*)?$/.exec(pathname);
+  if (!m) return false;
+  const charId = m[1], sub = m[2] || '';
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const character = await ownCharacter(user, charId);
+    if (!character) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+
+    if (sub === '/mine' && req.method === 'GET') {
+      const rows = await supabase('market_listings', {query:`?select=id,item_json,item_type,item_level,item_rarity,item_enchant,price,status,created_at,expires_at,buyer_character_id&seller_character_id=eq.${encodeURIComponent(charId)}&order=created_at.desc&limit=100`});
+      json(res,200,{listings: rows.map(r => ({...marketListingView({...r, characters:{name:character.name}}), sold: r.status==='sold'}))}); return true;
+    }
+
+    if (sub === '/history' && req.method === 'GET') {
+      const rows = await supabase('market_transactions', {query:`?select=id,price,fee,seller_received,created_at,item_uid,seller_character_id,buyer_character_id,seller:characters!seller_character_id(name),buyer:characters!buyer_character_id(name)&or=(seller_character_id.eq.${encodeURIComponent(charId)},buyer_character_id.eq.${encodeURIComponent(charId)})&order=created_at.desc&limit=100`});
+      const history = rows.map(r => {
+        const seller = Array.isArray(r.seller) ? r.seller[0] : r.seller, buyer = Array.isArray(r.buyer) ? r.buyer[0] : r.buyer;
+        const isSeller = r.seller_character_id === charId;
+        return {id:r.id, direction: isSeller?'sold':'bought', price:r.price, fee:r.fee, sellerReceived:r.seller_received, counterpartyName: isSeller?(buyer?buyer.name:'?'):(seller?seller.name:'?'), createdAt:r.created_at};
+      });
+      json(res,200,{history}); return true;
+    }
+
+    if (sub === '/claims' && req.method === 'GET') {
+      const rows = await supabase('market_claims', {query:`?select=id,kind,item_json,gold_amount,reason,created_at&character_id=eq.${encodeURIComponent(charId)}&claimed_at=is.null&order=created_at.asc`});
+      json(res,200,{claims: rows.map(r => ({id:r.id, kind:r.kind, item: r.kind==='item'?{name:r.item_json?.n,type:r.item_json?.type,level:r.item_json?.lv,rarity:r.item_json?.rarity,enchant:r.item_json?.enchant,atk:r.item_json?.atk||0,def:r.item_json?.def||0,hp:r.item_json?.hp||0,blk:r.item_json?.blk||0}:null, goldAmount:r.gold_amount, reason:r.reason, createdAt:r.created_at}))}); return true;
+    }
+
+    if (sub === '/list' && req.method === 'POST') {
+      const input = await readJson(req);
+      const itemUid = cleanText(input.itemUid, 40);
+      const price = Math.round(Number(input.price));
+      if (!itemUid) { json(res,400,{error:'Item inválido'}); return true; }
+      if (!MARKET.isValidPrice(price)) { json(res,400,{error:marketErrorMessage('INVALID_PRICE')}); return true; }
+      const result = await withCharLock(charId, () => rpc('market_list_item', {p_seller_character_id:charId, p_item_uid:itemUid, p_price:price}));
+      if (!result.ok) { json(res,400,{error:marketErrorMessage(result.error)}); return true; }
+      const listingRow = Array.isArray(result.data) ? result.data[0] : result.data;
+      json(res,201,{listing: marketListingView({...listingRow, characters:{name:character.name}})}); return true;
+    }
+
+    if (sub === '/cancel' && req.method === 'POST') {
+      const input = await readJson(req);
+      const listingId = cleanText(input.listingId, 40);
+      const result = await withCharLock(charId, () => rpc('market_cancel_listing', {p_seller_character_id:charId, p_listing_id:listingId}));
+      if (!result.ok) { json(res,400,{error:marketErrorMessage(result.error)}); return true; }
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/buy' && req.method === 'POST') {
+      const input = await readJson(req);
+      const listingId = cleanText(input.listingId, 40);
+      const operationId = cleanText(input.operationId, 40);
+      if (!OPERATION_ID_RE.test(operationId)) { json(res,400,{error:'Requisição inválida (operationId ausente).'}); return true; }
+      const listingRows = await supabase('market_listings', {query:`?select=seller_character_id&id=eq.${encodeURIComponent(listingId)}&limit=1`});
+      const sellerCharId = listingRows[0]?.seller_character_id;
+      if (!sellerCharId) { json(res,404,{error:marketErrorMessage('LISTING_NOT_FOUND')}); return true; }
+      const [lockA, lockB] = [charId, sellerCharId].sort();
+      const result = await withCharLock(lockA, () => withCharLock(lockB, () => rpc('market_buy', {p_listing_id:listingId, p_buyer_character_id:charId, p_operation_id:operationId})));
+      if (!result.ok) { json(res,400,{error:marketErrorMessage(result.error)}); return true; }
+      const tx = Array.isArray(result.data) ? result.data[0] : result.data;
+      json(res,200,{transaction:{id:tx.id, listingId:tx.listing_id, price:tx.price, fee:tx.fee, sellerReceived:tx.seller_received, createdAt:tx.created_at}}); return true;
+    }
+
+    const claimMatch = /^\/claims\/([0-9a-fA-F-]{8,36})\/(item|gold)$/.exec(sub);
+    if (claimMatch && req.method === 'POST') {
+      const claimId = claimMatch[1], kind = claimMatch[2];
+      const result = await withCharLock(charId, () => rpc(kind === 'item' ? 'market_claim_item' : 'market_claim_gold', {p_character_id:charId, p_claim_id:claimId}));
+      if (!result.ok) { json(res,400,{error:marketErrorMessage(result.error)}); return true; }
+      json(res,200,{ok:true, result:result.data}); return true;
+    }
+
+    json(res,404,{error:'Rota de mercado inválida'}); return true;
+  } catch (err) {
+    console.error('market_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Mercado ainda não configurado no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+// Expiracao de listings (72h) roda no mesmo sweep leve de 60s dos
+// convites de guilda -- nunca no tick de 1s de combate/eventos.
+function sweepExpiredMarketListings() {
+  if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) return;
+  rpc('market_expire_listings', {}).then(result => { if (!result.ok) console.error('market_expire_error', result.error); });
+}
+
 // ===== Fases 5.5/5.6: EventManager + World Boss instanciado =====
 const eventManager = new EVENT_DATA.EventManager({
   announce: payload => broadcast(payload),
@@ -1511,10 +2061,15 @@ async function startWorldBossEvent(event,registrations){
 function worldBossPublicSync(instance){const mob=maps.get(instance.mapId)?.mobs.get('ancient_titan');if(mob){mob.hp=instance.boss.hp;mob.maxhp=instance.boss.maxHp;mob.x=instance.boss.x;mob.y=instance.boss.y;mob.state=instance.boss.state;mob.dead=instance.defeated}broadcastMap(instance.mapId,WORLD_BOSS.publicWorldBossState(instance))}
 async function grantWorldBossRewards(instance){
   if(instance.rewardGranted)return;instance.rewardGranted=true;const eligible=WORLD_BOSS.eligibleMembers(instance);if(!eligible.length)return;
+  // Fase 5.9: participantes elegiveis da instancia vencedora (mesmo
+  // criterio de elegibilidade do World Boss ja usado pra recompensa)
+  // registram o abate do Tita Ancestral no bestiario -- guardado pelo
+  // mesmo instance.rewardGranted acima, nunca credita duas vezes.
+  for(const member of eligible)creditBestiaryKill(member.charId,'ancient_titan').catch(err=>console.error('bestiary_credit_error',err.message));
   const ordered=[...eligible].sort(()=>secureRandom()-.5);let legendaryWinner=null,legendaryItem=null;
   for(const candidate of ordered){try{const loaded=await loadWorldBossCharacter(candidate.userId,candidate.charId);if(loaded&&loaded.save.bag.length<24){const types=DROP_TYPES_BY_CLASS[candidate.cls]||DROP_TYPES_BY_CLASS.guerreiro;const type=types[crypto.randomInt(0,types.length)];legendaryItem=createGear(type,gearLevelForMob(candidate.lvl),'legendary');legendaryWinner=candidate;break}}catch{}}
   for(const member of eligible){
-    try{await withCharLock(member.charId,async()=>{const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded)return;const {row,save}=loaded;if(save.wbRewards.includes(instance.eventId))return;const leveled=applyXpGain(save,row.lvl,WORLD_BOSS.WORLD_BOSS_REWARD.xp);save.xp=leveled.xp;save.lvl=leveled.lvl;save.gold=Math.min(500000,save.gold+WORLD_BOSS.WORLD_BOSS_REWARD.gold);save.gem=Math.min(5000,save.gem+WORLD_BOSS.WORLD_BOSS_REWARD.gem);let won=null;if(legendaryWinner&&member.charId===legendaryWinner.charId)won=grantItem(save,leveled.lvl,legendaryItem);save.wbRewards.push(instance.eventId);save.wbRewards=save.wbRewards.slice(-12);await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});member.rewarded=true;sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl,bag:save.bag,eq:save.eq,legendary:won?{n:won.n,rarity:won.rarity,enchant:won.enchant}:null})})}catch(err){console.error('world_boss_reward_error',member.charId,err.message)}
+    try{await withCharLock(member.charId,async()=>{const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded)return;const {row,save}=loaded;if(save.wbRewards.includes(instance.eventId))return;const leveled=applyXpGain(save,row.lvl,WORLD_BOSS.WORLD_BOSS_REWARD.xp);save.xp=leveled.xp;save.lvl=leveled.lvl;save.gold=Math.min(500000,save.gold+WORLD_BOSS.WORLD_BOSS_REWARD.gold);save.gem=Math.min(5000,save.gem+WORLD_BOSS.WORLD_BOSS_REWARD.gem);let won=null;if(legendaryWinner&&member.charId===legendaryWinner.charId)won=grantItem(save,leveled.lvl,legendaryItem);save.wbRewards.push(instance.eventId);save.wbRewards=save.wbRewards.slice(-12);await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});member.rewarded=true;syncRankLevelXp(member.charId,leveled.lvl,save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));bumpRankStat(member.charId,'world_boss_kills',1).catch(()=>{});bumpRankStat(member.charId,'world_boss_participations',1).catch(()=>{});sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl,bag:save.bag,eq:save.eq,legendary:won?{n:won.n,rarity:won.rarity,enchant:won.enchant}:null})})}catch(err){console.error('world_boss_reward_error',member.charId,err.message)}
   }
 }
 function finishWorldBossInstance(instance,reason){
@@ -1599,6 +2154,10 @@ async function grantTvtRewards(instance){
         save.tvtRewards.push(instance.eventId);save.tvtRewards=save.tvtRewards.slice(-12);
         await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});
         member.rewarded=true;
+        syncRankLevelXp(member.charId,leveled.lvl,save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
+        bumpRankStat(member.charId,outcome==='win'?'tvt_wins':outcome==='loss'?'tvt_losses':'tvt_draws',1).catch(()=>{});
+        if(member.kills)bumpRankStat(member.charId,'tvt_kills',member.kills).catch(()=>{});
+        if(member.deaths)bumpRankStat(member.charId,'tvt_deaths',member.deaths).catch(()=>{});
         sendToWorldBossMember(member,{type:'tvt_reward',outcome,gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl});
       });
     }catch(err){console.error('tvt_reward_error',member.charId,err.message)}
@@ -1759,6 +2318,10 @@ const server = http.createServer(async (req, res) => {
   if (await handleCharacters(req, res, pathname)) return;
   if (await handleFriends(req, res, pathname)) return;
   if (await handleParty(req, res, pathname)) return;
+  if (await handleGuild(req, res, pathname)) return;
+  if (await handleBestiary(req, res, pathname)) return;
+  if (handleRankings(req, res, pathname)) return;
+  if (await handleMarket(req, res, pathname)) return;
   if (handleEvents(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
@@ -1822,8 +2385,13 @@ async function handleWsJoin(ws, msg) {
       cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : (ALLOWED_CLASS.has(msg.cls) ? msg.cls : 'guerreiro'),
       lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : Math.max(1, Math.min(99, Number(msg.lvl) || 1)),
       authed: !!charRow, map: 'vila', x: 720, y: 1258, dir: 0, moving: false, atkT: 0, atkAng: 0,
+      guildId: null, guildRole: null, guildTag: null, guildName: null,
     };
     clients.set(ws, p);
+    // Fase 5.8: guilda e persistente (Supabase), nao efemera como Party --
+    // carrega a filiacao real do banco no join/reconnect pra rotear
+    // guild_chat sem bater no banco a cada mensagem.
+    if (p.charId) { try { const brief = await loadCharGuildBrief(p.charId); if (brief) { p.guildId=brief.guildId; p.guildRole=brief.role; p.guildTag=brief.tag; p.guildName=brief.name; } } catch (err) { console.error('ws_join_guild_error', err.message); } }
     if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
     send(ws, {type:'welcome', id:p.id, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
     send(ws, eventStatePayload(p));
@@ -2039,6 +2607,7 @@ wss.on('connection', ws => {
           }else if(!mob.boss){
             creditDungeonReward(ws,p,rollDungeonTrashLoot(mob.lvl,p.cls));
           }
+          if(p.charId&&mob.type)creditBestiaryKill(p.charId,mob.type).catch(err=>console.error('bestiary_credit_error',err.message));
         }else if(mob.type){
           const stats=mobStats(mob.type,mob.lvl,mob.boss,mob.k);
           if(stats){
@@ -2052,6 +2621,7 @@ wss.on('connection', ws => {
             // fazia (loot fica null acima pelo mesmo motivo).
             const drop=mob.temp?null:rollGearDrop({mobLevel:mob.lvl,boss:!!mob.boss,cls:p.cls});
             creditKillReward(ws,p,xpGain,killCounterFields(mob.type,mob.lvl,mob.boss),loot,bossChestField,questInfo,drop);
+            if(p.charId)creditBestiaryKill(p.charId,mob.type).catch(err=>console.error('bestiary_credit_error',err.message));
           }
         }
       }
@@ -2107,6 +2677,17 @@ wss.on('connection', ws => {
       broadcastMap(map,{type:'projectile_end',map,ownerId:p.id,id,x:Number(msg.x)||0,y:Number(msg.y)||0,boom:!!msg.boom});
     } else if (msg.type === 'chat') {
       const text=cleanText(msg.text,160);if(text)broadcast({type:'chat',from:p.name,text,at:Date.now()});
+    } else if (msg.type === 'guild_chat') {
+      // Fase 5.8: so quem realmente esta em memoria como membro (cache
+      // carregado no join/reconnect e atualizado a cada mutacao de guilda)
+      // pode falar -- nunca confia num guildId que o cliente mandasse.
+      if (!p.guildId) return;
+      const now=Date.now(); p.recentGuildChat=(p.recentGuildChat||[]).filter(t=>now-t<10000);
+      if (p.recentGuildChat.length>=8) return;
+      p.recentGuildChat.push(now);
+      const text=cleanText(msg.text,240); if(!text)return;
+      const payload=JSON.stringify({type:'guild_chat', from:p.name, charId:p.charId, text, at:now});
+      for (const [ws2,p2] of clients) if (p2.guildId===p.guildId && ws2.readyState===WebSocket.OPEN) ws2.send(payload);
     }
   });
   ws.on('close', () => { const p=clients.get(ws);if(p){const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member)member.online=false;
@@ -2135,6 +2716,14 @@ setInterval(()=>{
   tickWorldBoss(Date.now());
   tickTvt(Date.now());
 },1000).unref();
+
+// Sweeps leves e nao tempo-criticos (convites de guilda vencidos) --
+// rodam bem mais devagar que o tick de combate/eventos, sem custo se
+// Supabase nao estiver configurado (checado dentro de cada funcao).
+setInterval(()=>{
+  sweepExpiredGuildInvites();
+  sweepExpiredMarketListings();
+},60000).unref();
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
 // Espelha updSlime() do cliente (index.html) -- unico tipo sem maquina de
