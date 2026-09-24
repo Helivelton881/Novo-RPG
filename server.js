@@ -11,6 +11,7 @@ const DUNGEON_GEN = require('./game-data/dungeon-generation.js');
 const EVENT_DATA = require('./game-data/event-manager.js');
 const WORLD_BOSS = require('./game-data/world-boss.js');
 const TVT = require('./game-data/tvt.js');
+const GUILD = require('./game-data/guild.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -1471,6 +1472,247 @@ function broadcastMap(map, payload) {
   for(const [ws,p] of clients) if(p.map===map&&ws.readyState===WebSocket.OPEN) ws.send(data);
 }
 
+// ===== Fase 5.8: Guildas / Cla =====
+// Estrutura relacional (guilds/guild_members/guild_invites), nunca dentro
+// de characters.save (ver supabase/migrations/*_add_guild_tables_and_
+// functions.sql). Operacoes que precisam ser atomicas (criar guilda+lider,
+// aceitar convite, transferir lideranca, sair/expulsar, dissolver) usam
+// funcoes RPC no Postgres em vez de so withCharLock -- corretas mesmo que
+// no futuro existam multiplas instancias Node (withCharLock so protege
+// dentro desta instancia; a funcao SQL e atomica no proprio banco).
+const GUILD_ID_RE = /^\/api\/guild\/([0-9a-fA-F-]{8,36})(\/.*)?$/;
+async function ownCharacter(user, charId) {
+  const rows = await supabase('characters', {query:`?select=id,name,cls,lvl&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(user.id)}&limit=1`});
+  return rows[0] || null;
+}
+async function rpc(name, body) {
+  try { return {ok:true, data: await supabase(`rpc/${name}`, {method:'POST', body, prefer:'return=representation'})}; }
+  catch (err) { return {ok:false, error: (err.detail && typeof err.detail === 'object' && (err.detail.message || err.detail.hint)) || err.message}; }
+}
+const GUILD_ERROR_MESSAGES = {
+  ALREADY_IN_GUILD: 'Você já pertence a uma guilda.',
+  NAME_OR_TAG_TAKEN: 'Nome ou tag de guilda já em uso.',
+  INVITE_NOT_FOUND: 'Convite não encontrado.',
+  INVITE_NOT_YOURS: 'Esse convite não é seu.',
+  INVITE_NOT_PENDING: 'Esse convite já foi respondido.',
+  INVITE_EXPIRED: 'Esse convite expirou.',
+  GUILD_FULL: `Guilda cheia (máximo ${GUILD.GUILD_MAX_MEMBERS} membros).`,
+  NOT_A_MEMBER: 'Você não pertence a uma guilda.',
+  INVALID_REQUEST: 'Requisição inválida.',
+  LEADER_MUST_TRANSFER_OR_DISSOLVE: 'Transfira a liderança ou dissolva a guilda antes de sair.',
+  TARGET_NOT_IN_GUILD: 'Esse personagem não está na sua guilda.',
+  INSUFFICIENT_ROLE: 'Você não tem permissão para essa ação.',
+  CANNOT_CHANGE_LEADER_ROLE: 'Não é possível alterar o cargo do líder.',
+  ALREADY_THAT_ROLE: 'Esse membro já tem esse cargo.',
+  ALREADY_LEADER: 'Esse personagem já é o líder.',
+  INVALID_ROLE: 'Cargo inválido.',
+};
+function guildErrorMessage(code) { return GUILD_ERROR_MESSAGES[code] || 'Não foi possível concluir. Tente novamente.'; }
+
+async function guildMembershipOf(charId) {
+  const rows = await supabase('guild_members', {query:`?select=guild_id,role,guilds(id,name,tag,leader_character_id)&character_id=eq.${encodeURIComponent(charId)}&limit=1`});
+  return rows[0] || null;
+}
+async function guildMembersView(guildId) {
+  const rows = await supabase('guild_members', {query:`?select=character_id,role,joined_at,characters(user_id,name,cls,lvl)&guild_id=eq.${encodeURIComponent(guildId)}&order=role.asc,joined_at.asc`});
+  return rows.map(r => {
+    const c = Array.isArray(r.characters) ? r.characters[0] : r.characters;
+    return {charId:r.character_id, role:r.role, name:c?c.name:'?', cls:c?c.cls:'guerreiro', lvl:c?c.lvl:1, online:c?isAccountOnline(c.user_id):false};
+  });
+}
+// Personagens conectados mantem guildId/guildRole/guildTag/guildName em
+// cache no proprio objeto de conexao (p) pra rotear guild_chat sem bater
+// no banco a cada mensagem -- atualizado aqui sempre que uma mutacao de
+// guilda afeta alguem que esta online agora.
+function syncGuildOnClients(members, guild) {
+  const byId = new Map(members.map(m=>[m.charId,m]));
+  for (const [,p] of clients) if (byId.has(p.charId)) { const mem=byId.get(p.charId); p.guildId=guild.id; p.guildRole=mem.role; p.guildTag=guild.tag; p.guildName=guild.name; }
+}
+async function refreshGuildCacheForGuild(guildId) {
+  const rows = await supabase('guilds', {query:`?select=id,name,tag&id=eq.${encodeURIComponent(guildId)}&limit=1`});
+  const g = rows[0]; if (!g) return;
+  syncGuildOnClients(await guildMembersView(guildId), g);
+}
+function clearGuildOnClient(charId) {
+  for (const [,p] of clients) if (p.charId === charId) { p.guildId=null; p.guildRole=null; p.guildTag=null; p.guildName=null; }
+}
+async function loadCharGuildBrief(charId) {
+  const membership = await guildMembershipOf(charId);
+  if (!membership) return null;
+  const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+  return g ? {guildId:g.id, role:membership.role, tag:g.tag, name:g.name} : null;
+}
+
+async function handleGuild(req, res, pathname) {
+  const m = GUILD_ID_RE.exec(pathname);
+  if (!m) return false;
+  const charId = m[1], sub = m[2] || '';
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const character = await ownCharacter(user, charId);
+    if (!character) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+
+    if (sub === '' && req.method === 'GET') {
+      const membership = await guildMembershipOf(charId);
+      if (!membership) { json(res,200,{guild:null}); return true; }
+      const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+      json(res,200,{guild:{id:g.id,name:g.name,tag:g.tag,leaderCharacterId:g.leader_character_id,myRole:membership.role,members:await guildMembersView(g.id)}}); return true;
+    }
+
+    if (sub === '' && req.method === 'POST') {
+      const input = await readJson(req);
+      const nameCheck = GUILD.validateGuildName(input.name);
+      if (!nameCheck.ok) { json(res,400,{error:nameCheck.error}); return true; }
+      const tagCheck = GUILD.validateGuildTag(input.tag);
+      if (!tagCheck.ok) { json(res,400,{error:tagCheck.error}); return true; }
+      const result = await rpc('guild_create', {p_character_id:charId, p_name:nameCheck.value, p_tag:tagCheck.value});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      const g = Array.isArray(result.data) ? result.data[0] : result.data;
+      syncGuildOnClients([{charId,role:'leader'}], g);
+      json(res,201,{guild:{id:g.id,name:g.name,tag:g.tag,leaderCharacterId:g.leader_character_id,myRole:'leader',members:await guildMembersView(g.id)}}); return true;
+    }
+
+    if (sub === '/players' && req.method === 'GET') {
+      const url = new URL(req.url, 'http://localhost');
+      const q = cleanText(url.searchParams.get('q'), 14).replace(/[,()*]/g, '');
+      if (q.length < 2) { json(res,200,{characters:[]}); return true; }
+      const rows = await supabase('characters', {query:`?select=id,name,cls,lvl&name=ilike.*${encodeURIComponent(q)}*&id=neq.${encodeURIComponent(charId)}&limit=10`});
+      const ids = rows.map(r=>r.id);
+      const guildedIds = ids.length ? new Set((await supabase('guild_members', {query:`?select=character_id&character_id=in.(${ids.join(',')})`})).map(x=>x.character_id)) : new Set();
+      json(res,200,{characters:rows.filter(r=>!guildedIds.has(r.id)).map(r=>({id:r.id,name:r.name,cls:r.cls,lvl:r.lvl}))}); return true;
+    }
+
+    if (sub === '/invites' && req.method === 'GET') {
+      const incoming = await supabase('guild_invites', {query:`?select=id,guild_id,created_at,expires_at,guilds(name,tag),characters!inviter_character_id(name)&target_character_id=eq.${encodeURIComponent(charId)}&status=eq.pending&order=created_at.desc`});
+      const membership = await guildMembershipOf(charId);
+      let outgoing = [];
+      if (membership && (membership.role === 'leader' || membership.role === 'officer')) {
+        const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+        outgoing = await supabase('guild_invites', {query:`?select=id,created_at,expires_at,characters!target_character_id(name)&guild_id=eq.${encodeURIComponent(g.id)}&status=eq.pending&order=created_at.desc`});
+      }
+      json(res,200,{
+        incoming: incoming.map(i=>{const g=Array.isArray(i.guilds)?i.guilds[0]:i.guilds,inv=Array.isArray(i.characters)?i.characters[0]:i.characters;return{id:i.id,guildName:g?g.name:'?',guildTag:g?g.tag:'?',inviterName:inv?inv.name:'?',createdAt:i.created_at,expiresAt:i.expires_at}}),
+        outgoing: outgoing.map(i=>{const t=Array.isArray(i.characters)?i.characters[0]:i.characters;return{id:i.id,targetName:t?t.name:'?',createdAt:i.created_at,expiresAt:i.expires_at}}),
+      }); return true;
+    }
+
+    if (sub === '/invite' && req.method === 'POST') {
+      const membership = await guildMembershipOf(charId);
+      if (!membership || !GUILD.canInvite(membership.role)) { json(res,403,{error:'Você não tem permissão para convidar.'}); return true; }
+      const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+      const input = await readJson(req);
+      const targetCharacterId = cleanText(input.targetCharacterId, 40);
+      if (!UID_RE.test(targetCharacterId) && !/^[0-9a-fA-F-]{8,36}$/.test(targetCharacterId)) { json(res,400,{error:'Personagem inválido'}); return true; }
+      const targetRows = await supabase('characters', {query:`?select=id&id=eq.${encodeURIComponent(targetCharacterId)}&limit=1`});
+      if (!targetRows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+      const targetGuild = await guildMembershipOf(targetCharacterId);
+      if (targetGuild) { json(res,400,{error:'Esse personagem já pertence a uma guilda.'}); return true; }
+      const members = await guildMembersView(g.id);
+      if (members.length >= GUILD.GUILD_MAX_MEMBERS) { json(res,400,{error:guildErrorMessage('GUILD_FULL')}); return true; }
+      try {
+        await supabase('guild_invites', {method:'POST', body:{guild_id:g.id, inviter_character_id:charId, target_character_id:targetCharacterId, expires_at:new Date(Date.now()+GUILD.GUILD_INVITE_TTL_MS).toISOString()}, prefer:'return=minimal'});
+      } catch (e) { if (e.status === 409) { json(res,400,{error:'Já existe um convite pendente para esse personagem.'}); return true; } throw e; }
+      json(res,201,{ok:true}); return true;
+    }
+
+    const inviteActionMatch = /^\/invites\/([0-9a-fA-F-]{8,36})\/(accept|decline|cancel)$/.exec(sub);
+    if (inviteActionMatch && req.method === 'POST') {
+      const inviteId = inviteActionMatch[1], action = inviteActionMatch[2];
+      if (action === 'accept') {
+        const result = await rpc('guild_accept_invite', {p_invite_id:inviteId, p_character_id:charId});
+        if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+        const gm = Array.isArray(result.data) ? result.data[0] : result.data;
+        await refreshGuildCacheForGuild(gm.guild_id);
+        const membership = await guildMembershipOf(charId);
+        const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+        json(res,200,{guild:{id:g.id,name:g.name,tag:g.tag,leaderCharacterId:g.leader_character_id,myRole:membership.role,members:await guildMembersView(g.id)}}); return true;
+      }
+      if (action === 'decline') {
+        const rows = await supabase('guild_invites', {method:'PATCH', query:`?id=eq.${encodeURIComponent(inviteId)}&target_character_id=eq.${encodeURIComponent(charId)}&status=eq.pending`, body:{status:'declined'}, prefer:'return=representation'});
+        if (!rows.length) { json(res,404,{error:'Convite não encontrado ou já respondido.'}); return true; }
+        json(res,200,{ok:true}); return true;
+      }
+      // cancel: quem convidou OU lider/officer da guilda do convite pode cancelar
+      const inviteRows = await supabase('guild_invites', {query:`?select=id,guild_id,inviter_character_id,status&id=eq.${encodeURIComponent(inviteId)}&limit=1`});
+      const invite = inviteRows[0];
+      if (!invite || invite.status !== 'pending') { json(res,404,{error:'Convite não encontrado ou já respondido.'}); return true; }
+      const membership = await guildMembershipOf(charId);
+      const isManager = membership && membership.guild_id === invite.guild_id && GUILD.canInvite(membership.role);
+      if (invite.inviter_character_id !== charId && !isManager) { json(res,403,{error:'Você não tem permissão para cancelar esse convite.'}); return true; }
+      await supabase('guild_invites', {method:'PATCH', query:`?id=eq.${encodeURIComponent(inviteId)}&status=eq.pending`, body:{status:'cancelled'}, prefer:'return=minimal'});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/leave' && req.method === 'POST') {
+      const result = await rpc('guild_remove_member', {p_actor_character_id:charId, p_target_character_id:charId, p_is_leave:true});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      const membership = await guildMembershipOf(charId);
+      clearGuildOnClient(charId);
+      if (membership) await refreshGuildCacheForGuild(membership.guild_id);
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/kick' && req.method === 'POST') {
+      const input = await readJson(req);
+      const targetCharacterId = cleanText(input.targetCharacterId, 40);
+      const result = await rpc('guild_remove_member', {p_actor_character_id:charId, p_target_character_id:targetCharacterId, p_is_leave:false});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      clearGuildOnClient(targetCharacterId);
+      for (const [ws2,p2] of clients) if (p2.charId === targetCharacterId) send(ws2,{type:'guild_removed', reason:'kicked'});
+      const membership = await guildMembershipOf(charId);
+      if (membership) await refreshGuildCacheForGuild(membership.guild_id);
+      json(res,200,{ok:true}); return true;
+    }
+
+    if ((sub === '/promote' || sub === '/demote') && req.method === 'POST') {
+      const input = await readJson(req);
+      const targetCharacterId = cleanText(input.targetCharacterId, 40);
+      const newRole = sub === '/promote' ? 'officer' : 'member';
+      const result = await rpc('guild_set_role', {p_actor_character_id:charId, p_target_character_id:targetCharacterId, p_new_role:newRole});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      const gm = Array.isArray(result.data) ? result.data[0] : result.data;
+      await refreshGuildCacheForGuild(gm.guild_id);
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/transfer' && req.method === 'POST') {
+      const input = await readJson(req);
+      const targetCharacterId = cleanText(input.targetCharacterId, 40);
+      const result = await rpc('guild_transfer_leadership', {p_actor_character_id:charId, p_new_leader_character_id:targetCharacterId});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      const membership = await guildMembershipOf(charId);
+      if (membership) await refreshGuildCacheForGuild(membership.guild_id);
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (sub === '/dissolve' && req.method === 'POST') {
+      const membership = await guildMembershipOf(charId);
+      if (!membership) { json(res,400,{error:guildErrorMessage('NOT_A_MEMBER')}); return true; }
+      const g = Array.isArray(membership.guilds) ? membership.guilds[0] : membership.guilds;
+      const members = await guildMembersView(g.id);
+      const result = await rpc('guild_dissolve', {p_actor_character_id:charId});
+      if (!result.ok) { json(res,400,{error:guildErrorMessage(result.error)}); return true; }
+      for (const mem of members) { clearGuildOnClient(mem.charId); for (const [ws2,p2] of clients) if (p2.charId === mem.charId) send(ws2,{type:'guild_removed', reason:'dissolved'}); }
+      json(res,200,{ok:true}); return true;
+    }
+
+    json(res,404,{error:'Rota de guilda inválida'}); return true;
+  } catch (err) {
+    console.error('guild_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Guildas ainda não configuradas no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+// Convites pendentes vencidos (24h) viram 'expired' num sweep leve e
+// idempotente, separado do tick de 1s (nao e tempo-critico como TvT/World
+// Boss) -- roda a cada 60s, sem custo se Supabase nao estiver configurado.
+function sweepExpiredGuildInvites() {
+  if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) return;
+  supabase('guild_invites', {method:'PATCH', query:`?status=eq.pending&expires_at=lte.${encodeURIComponent(new Date().toISOString())}`, body:{status:'expired'}, prefer:'return=minimal'})
+    .catch(err => console.error('guild_invite_sweep_error', err.message));
+}
+
 // ===== Fases 5.5/5.6: EventManager + World Boss instanciado =====
 const eventManager = new EVENT_DATA.EventManager({
   announce: payload => broadcast(payload),
@@ -1759,6 +2001,7 @@ const server = http.createServer(async (req, res) => {
   if (await handleCharacters(req, res, pathname)) return;
   if (await handleFriends(req, res, pathname)) return;
   if (await handleParty(req, res, pathname)) return;
+  if (await handleGuild(req, res, pathname)) return;
   if (handleEvents(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
@@ -1822,8 +2065,13 @@ async function handleWsJoin(ws, msg) {
       cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : (ALLOWED_CLASS.has(msg.cls) ? msg.cls : 'guerreiro'),
       lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : Math.max(1, Math.min(99, Number(msg.lvl) || 1)),
       authed: !!charRow, map: 'vila', x: 720, y: 1258, dir: 0, moving: false, atkT: 0, atkAng: 0,
+      guildId: null, guildRole: null, guildTag: null, guildName: null,
     };
     clients.set(ws, p);
+    // Fase 5.8: guilda e persistente (Supabase), nao efemera como Party --
+    // carrega a filiacao real do banco no join/reconnect pra rotear
+    // guild_chat sem bater no banco a cada mensagem.
+    if (p.charId) { try { const brief = await loadCharGuildBrief(p.charId); if (brief) { p.guildId=brief.guildId; p.guildRole=brief.role; p.guildTag=brief.tag; p.guildName=brief.name; } } catch (err) { console.error('ws_join_guild_error', err.message); } }
     if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
     send(ws, {type:'welcome', id:p.id, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
     send(ws, eventStatePayload(p));
@@ -2107,6 +2355,17 @@ wss.on('connection', ws => {
       broadcastMap(map,{type:'projectile_end',map,ownerId:p.id,id,x:Number(msg.x)||0,y:Number(msg.y)||0,boom:!!msg.boom});
     } else if (msg.type === 'chat') {
       const text=cleanText(msg.text,160);if(text)broadcast({type:'chat',from:p.name,text,at:Date.now()});
+    } else if (msg.type === 'guild_chat') {
+      // Fase 5.8: so quem realmente esta em memoria como membro (cache
+      // carregado no join/reconnect e atualizado a cada mutacao de guilda)
+      // pode falar -- nunca confia num guildId que o cliente mandasse.
+      if (!p.guildId) return;
+      const now=Date.now(); p.recentGuildChat=(p.recentGuildChat||[]).filter(t=>now-t<10000);
+      if (p.recentGuildChat.length>=8) return;
+      p.recentGuildChat.push(now);
+      const text=cleanText(msg.text,240); if(!text)return;
+      const payload=JSON.stringify({type:'guild_chat', from:p.name, charId:p.charId, text, at:now});
+      for (const [ws2,p2] of clients) if (p2.guildId===p.guildId && ws2.readyState===WebSocket.OPEN) ws2.send(payload);
     }
   });
   ws.on('close', () => { const p=clients.get(ws);if(p){const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member)member.online=false;
@@ -2135,6 +2394,13 @@ setInterval(()=>{
   tickWorldBoss(Date.now());
   tickTvt(Date.now());
 },1000).unref();
+
+// Sweeps leves e nao tempo-criticos (convites de guilda vencidos) --
+// rodam bem mais devagar que o tick de combate/eventos, sem custo se
+// Supabase nao estiver configurado (checado dentro de cada funcao).
+setInterval(()=>{
+  sweepExpiredGuildInvites();
+},60000).unref();
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
 // Espelha updSlime() do cliente (index.html) -- unico tipo sem maquina de
