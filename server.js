@@ -10,6 +10,7 @@ const GEAR_DATA = require('./game-data/gear-data.js');
 const DUNGEON_GEN = require('./game-data/dungeon-generation.js');
 const EVENT_DATA = require('./game-data/event-manager.js');
 const WORLD_BOSS = require('./game-data/world-boss.js');
+const TVT = require('./game-data/tvt.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -29,7 +30,8 @@ const maps = new Map();
 const ALLOWED_MAP = /^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)(?:_d(?:#[0-9a-f]{8})?)?$/;
 const DUNGEON_MAP_RE = /^([a-z]+)_d(?:#([0-9a-f]{8}))?$/;
 const WORLD_BOSS_MAP_RE = WORLD_BOSS.WORLD_BOSS_MAP_RE;
-function isAllowedMap(map){return ALLOWED_MAP.test(map)||WORLD_BOSS_MAP_RE.test(map)}
+const TVT_MAP_RE = TVT.TVT_MAP_RE;
+function isAllowedMap(map){return ALLOWED_MAP.test(map)||WORLD_BOSS_MAP_RE.test(map)||TVT_MAP_RE.test(map)}
 const ALLOWED_CLASS = new Set(['guerreiro', 'druida', 'mago', 'arqueiro']);
 
 // ===== Roster de monstro autoritativo (Fase 1) =====
@@ -279,7 +281,7 @@ const QUEST_GATE_FIELDS = ['kills', 'gk', 'ks', 'kw', 'kp', 'kt', 'ki', 'kv'];
 // handleChest, handleQuest, creditKillReward, dungeon). gunlock e os
 // chestN entram aqui pela mesma razao (desbloqueio de portal so por
 // buy_portal; abertura de bau de campo so por handleChest).
-const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards'];
+const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards'];
 function advanceQuestOnKill(save, type, boss, lvl) {
   const q = save.quest, changed = {};
   const bump = (field, need, next) => {
@@ -724,6 +726,7 @@ function sanitizeSave(raw, lvl) {
     eq: {},
     chat: Array.isArray(save.chat) ? save.chat.slice(-40).map(m => ({n: cleanText(m && m.n, 20), t: cleanText(m && m.t, 240), sys: !!(m && m.sys)})) : [],
     wbRewards: Array.isArray(save.wbRewards) ? save.wbRewards.slice(-12).map(x=>cleanText(x,96)).filter(Boolean) : [],
+    tvtRewards: Array.isArray(save.tvtRewards) ? save.tvtRewards.slice(-12).map(x=>cleanText(x,96)).filter(Boolean) : [],
   };
   for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
   // Um uid nunca pode aparecer duas vezes (mochila+mochila ou mochila+
@@ -1529,6 +1532,115 @@ function tickWorldBoss(now=Date.now()){
   }
 }
 eventManager.registerEventHandler('world_boss',{durationMs:WORLD_BOSS.WORLD_BOSS_DURATION_MS,onStart:(event,registrations)=>startWorldBossEvent(event,registrations),onEnd:event=>{for(const instance of [...worldBossInstances.values()])if(instance.eventId===event.id)finishWorldBossInstance(instance,'timeout')}});
+
+// ===== Fase 5.7: Team vs Team =====
+// Mesmo EventManager da Fase 5.5 (registerEventHandler), mesma infra de
+// mapa/mutex/persistencia das Fases 5.1-5.6 -- nenhum scheduler novo,
+// nenhum sistema de anuncio novo, nenhum lock novo. A logica pura (config,
+// powerScore, balanceamento, combate, status, placar, recompensa) vive em
+// game-data/tvt.js (TVT), testavel sem HTTP/WS/Supabase.
+const tvtInstances=new Map(),tvtByChar=new Map();
+async function loadTvtCharacter(userId,charId){
+  const rows=await supabase('characters',{query:`?select=id,name,cls,lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});const row=rows[0];
+  if(!row)return null;const save=sanitizeSave(row.save,row.lvl);
+  const snapshot=WORLD_BOSS.combatSnapshot({userId,charId,name:row.name||save.name,cls:row.cls,lvl:row.lvl,save});
+  return{row,save,snapshot,eq:save.eq};
+}
+// Fase 5.7: inscricao individual (mesmo eventManager.register ja usado
+// genericamente pelo WS) precisa so de um teto de 8 -- unico bit especifico
+// de TvT que o EventManager (generico) nao sabe (World Boss nunca precisou
+// disso, party ja e sempre exatamente 4).
+function tvtRegistrationFull(eventId){const entries=eventManager.registrations.get(eventId);return!!entries&&entries.size>=TVT.TVT_MAX_PLAYERS}
+async function startTvtEvent(event,registrations){
+  try{
+    const regs=[...registrations.values()].sort((a,b)=>a.registeredAt-b.registeredAt);
+    if(regs.length<TVT.TVT_MIN_PLAYERS){for(const r of regs)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: mínimo de 4 jogadores.'});return}
+    const capped=regs.slice(0,TVT.TVT_MAX_PLAYERS);
+    const usable=capped.length%2===0?capped:capped.slice(0,capped.length-1);
+    const reserve=capped.slice(usable.length);
+    for(const r of reserve)sendToWorldBossMember(r,{type:'tvt_reserve',message:'Você ficou como reserva nesta rodada.'});
+    const loaded=[];
+    for(const r of usable){
+      const active=activeCharacterForUser(r.userId);if(!active||active.p.charId!==r.charId)continue;
+      try{const data=await loadTvtCharacter(r.userId,r.charId);if(data)loaded.push({userId:r.userId,charId:r.charId,name:data.row.name||data.save.name,cls:data.row.cls,lvl:data.row.lvl,save:data.save,snapshot:data.snapshot,powerScore:TVT.powerScore(data.snapshot,data.eq)});}
+      catch(err){console.error('tvt_load_error',r.charId,err.message)}
+    }
+    if(loaded.length<TVT.TVT_MIN_PLAYERS){for(const r of usable)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: mínimo de 4 jogadores.'});return}
+    const evenLoaded=loaded.length%2===0?loaded:loaded.slice(0,loaded.length-1);
+    const teams=TVT.balanceTvtTeams(evenLoaded);
+    const byCharId=new Map(evenLoaded.map(m=>[m.charId,m]));
+    const members=[];
+    for(const team of TVT.TVT_TEAM_IDS)for(const charId of teams[team]){const m=byCharId.get(charId);members.push({userId:m.userId,charId:m.charId,name:m.name,cls:m.cls,lvl:m.lvl,team,snapshot:m.snapshot});}
+    const instance=TVT.createTvtInstance({eventId:event.id,members});
+    tvtInstances.set(instance.mapId,instance);
+    const state=mapState(instance.mapId);state.isTvt=true;state.tvt=instance;
+    for(const member of instance.players.values()){
+      const active=activeCharacterForUser(member.userId);if(!active)continue;
+      instance.previousLocations.set(member.charId,{map:active.p.map,x:active.p.x,y:active.p.y});
+      tvtByChar.set(member.charId,instance.mapId);
+      for(const[ws,p]of clients)if(p.userId===member.userId&&p.charId===member.charId){p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{type:'tvt_enter',mapId:instance.mapId,team:member.team,spawn:{x:member.x,y:member.y},scoreLimit:instance.scoreLimit,expiresAt:instance.expiresAt});}
+    }
+    console.log('tvt_instance_start',instance.id,instance.mapId,[...instance.players.values()].map(p=>p.team+':'+p.charId).join(','));
+  }catch(err){console.error('tvt_start_error',event.id,err.message)}
+}
+function tvtPublicSync(instance){broadcastMap(instance.mapId,TVT.publicTvtState(instance))}
+async function grantTvtRewards(instance){
+  if(instance.rewardsGranted)return;instance.rewardsGranted=true;
+  const now=Date.now();
+  for(const member of instance.players.values()){
+    if(!TVT.isTvtEligible(member,instance,now))continue;
+    try{
+      await withCharLock(member.charId,async()=>{
+        const loaded=await loadTvtCharacter(member.userId,member.charId);if(!loaded)return;const{row,save}=loaded;
+        if(save.tvtRewards.includes(instance.eventId))return;
+        const outcome=TVT.outcomeForTeam(member.team,instance.winner),reward=TVT.tvtRewardFor(outcome);
+        const leveled=applyXpGain(save,row.lvl,reward.xp);save.xp=leveled.xp;save.lvl=leveled.lvl;
+        save.gold=Math.min(500000,save.gold+reward.gold);save.gem=Math.min(5000,save.gem+reward.gem);
+        save.tvtRewards.push(instance.eventId);save.tvtRewards=save.tvtRewards.slice(-12);
+        await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});
+        member.rewarded=true;
+        sendToWorldBossMember(member,{type:'tvt_reward',outcome,gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl});
+      });
+    }catch(err){console.error('tvt_reward_error',member.charId,err.message)}
+  }
+}
+function finishTvtInstance(instance,reason,winner){
+  if(instance.state==='ended')return;instance.state='ended';instance.finished=true;instance.endedReason=reason;instance.winner=winner===undefined?null:winner;
+  for(const member of instance.players.values()){
+    const prev=instance.previousLocations.get(member.charId)||{map:'vila',x:720,y:1258};
+    for(const[ws,p]of clients)if(p.charId===member.charId&&p.userId===member.userId){
+      p.map=isAllowedMap(prev.map)&&!WORLD_BOSS_MAP_RE.test(prev.map)&&!TVT_MAP_RE.test(prev.map)?prev.map:'vila';
+      p.x=Number.isFinite(prev.x)?prev.x:720;p.y=Number.isFinite(prev.y)?prev.y:1258;
+      send(ws,{type:'tvt_exit',reason,winner:instance.winner,score:instance.score,outcome:TVT.outcomeForTeam(member.team,instance.winner),map:p.map,x:p.x,y:p.y});
+    }
+    tvtByChar.delete(member.charId);
+  }
+  maps.delete(instance.mapId);tvtInstances.delete(instance.mapId);
+  console.log('tvt_instance_end',instance.id,reason,instance.winner||'draw');
+}
+function tickTvt(now=Date.now()){
+  for(const instance of[...tvtInstances.values()]){
+    const respawned=TVT.tickTvtRespawns(instance,now);
+    TVT.tickTvtStatusExpiry(instance,now);
+    const thornsEvents=TVT.tickTvtThorns(instance,now,secureRandom);
+    if(respawned.length)for(const charId of respawned){const p=instance.players.get(charId);sendToWorldBossMember(p,{type:'tvt_respawn',x:p.x,y:p.y,hp:p.hp,maxHp:p.maxHp})}
+    if(thornsEvents.length||respawned.length)tvtPublicSync(instance);
+    const end=TVT.checkTvtEnd(instance,now);
+    if(end){instance.winner=end.winner;grantTvtRewards(instance).catch(err=>console.error('tvt_reward_error',err.message));finishTvtInstance(instance,end.reason,end.winner);continue}
+  }
+}
+// onEnd (disparado pelo proprio EventManager em event.startAt+durationMs)
+// e so uma REDE DE SEGURANCA -- tickTvt (a cada 1s) ja fecha a partida
+// sozinho assim que checkTvtEnd detecta o timeout real da INSTANCIA
+// (instance.expiresAt, definido no momento em que ela foi criada, um pouco
+// depois de event.startAt). Calcula o vencedor direto do placar atual (nao
+// via checkTvtEnd, que so retornaria algo apos instance.expiresAt -- evitar
+// declarar empate por engano so por causa da pequena defasagem de relogio
+// entre o evento e a instancia). finishTvtInstance/grantTvtRewards sao
+// idempotentes (guardas state/rewardsGranted), entao rodar os dois
+// caminhos nunca duplica nada.
+eventManager.registerEventHandler('team_vs_team',{durationMs:TVT.TVT_DURATION_MS,onStart:(event,registrations)=>startTvtEvent(event,registrations),onEnd:event=>{for(const instance of[...tvtInstances.values()])if(instance.eventId===event.id&&instance.state!=='ended'){const winner=instance.score.red===instance.score.blue?null:(instance.score.red>instance.score.blue?'red':'blue');instance.winner=winner;grantTvtRewards(instance).catch(err=>console.error('tvt_reward_error',err.message));finishTvtInstance(instance,'timeout',winner)}}});
+
 function eventStatePayload(player,now=Date.now()) {
   const state={type:'event_state',...eventManager.snapshot(now)},event=state.current,entries=event&&eventManager.registrations.get(event.id);
   if(player&&player.authed&&player.charId){const registration=entries&&entries.get(player.charId);state.registration={eventId:event.id,registered:!!registration,groupId:registration&&registration.groupId||null};const code=memberParty.get(player.userId),party=code&&partyView(code);state.party=party?{code:party.code,size:party.members.length,isLeader:party.ownerId===player.userId}:null}
@@ -1628,8 +1740,14 @@ function dungeonCleanupTick() {
   }
 }
 
+// Fase 5.7: charId (quando autenticado) agora tambem vai pros OUTROS
+// clientes via publicPlayer -- nao e segredo (ja e devolvido pro proprio
+// dono desde sempre, e nunca usado sozinho como prova de posse em nenhum
+// endpoint, so identidade). Necessario pro cliente saber QUAL charId
+// corresponde a um jogador remoto visivel na arena de TvT (miras
+// player_damage/cast_skill por charId real, nao pela conexao efemera).
 function publicPlayer(player) {
-  return {id:player.id,name:player.name,cls:player.cls,map:player.map,x:player.x,y:player.y,dir:player.dir,moving:player.moving,lvl:player.lvl,atkT:player.atkT||0,atkAng:player.atkAng||0};
+  return {id:player.id,name:player.name,cls:player.cls,map:player.map,x:player.x,y:player.y,dir:player.dir,moving:player.moving,lvl:player.lvl,atkT:player.atkT||0,atkAng:player.atkAng||0,charId:player.charId||null};
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1711,6 +1829,11 @@ async function handleWsJoin(ws, msg) {
     send(ws, eventStatePayload(p));
     const wbMap=p.charId&&worldBossByChar.get(p.charId),instance=wbMap&&worldBossInstances.get(wbMap),member=instance&&instance.members.get(p.charId);
     if(member&&member.userId===p.userId&&instance.state!=='ended'){member.online=true;p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{...WORLD_BOSS.publicWorldBossState(instance),type:'world_boss_enter',spawn:{x:p.x,y:p.y},reconnect:true})}
+    // Fase 5.7: mesma reconexao do World Boss -- mesmo userId+charId
+    // durante partida ativa volta pra MESMA arena/time/HP/placar (nunca
+    // cria instancia nova, nunca muda de time).
+    const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);
+    if(tvtMember&&tvtMember.userId===p.userId&&tvtInstance.state!=='ended'){tvtMember.online=true;p.map=tvtInstance.mapId;p.x=tvtMember.x;p.y=tvtMember.y;send(ws,{type:'tvt_enter',mapId:tvtInstance.mapId,team:tvtMember.team,spawn:{x:p.x,y:p.y},scoreLimit:tvtInstance.scoreLimit,expiresAt:tvtInstance.expiresAt,reconnect:true});send(ws,TVT.publicTvtState(tvtInstance))}
     broadcast({type:'player_join', player:publicPlayer(p)}, ws);
   } finally { joining.delete(ws); }
 }
@@ -1762,7 +1885,13 @@ wss.on('connection', ws => {
       send(ws,eventStatePayload(p));
     } else if (msg.type === 'event_register') {
       const eventId=cleanText(msg.eventId,96),candidate=EVENT_DATA.scheduleAfter(Date.now(),2).find(e=>e.id===eventId);
-      const result=candidate&&candidate.type==='world_boss'?await registerWorldBossParty(p,eventId):eventManager.register(p,eventId);
+      // Fase 5.7: teto de 8 e especifico do TvT (World Boss nunca precisou,
+      // party ja e sempre 4) -- checado ANTES de chamar o EventManager
+      // generico, que nao conhece esse limite. Pedido repetido do mesmo
+      // char continua idempotente (eventManager.register ja trata isso).
+      const result=candidate&&candidate.type==='world_boss'?await registerWorldBossParty(p,eventId)
+        :(candidate&&candidate.type==='team_vs_team'&&tvtRegistrationFull(eventId)&&!eventManager.registrations.get(eventId)?.has(p.charId))?{ok:false,error:'Team vs Team lotado.'}
+        :eventManager.register(p,eventId);
       send(ws,{type:'event_registration',action:'register',serverNow:Date.now(),...result});
       send(ws,eventStatePayload(p));
     } else if (msg.type === 'event_unregister') {
@@ -1783,6 +1912,10 @@ wss.on('connection', ws => {
       // handleDungeonEnter.
       if (DUNGEON_MAP_RE.test(map) && map !== p.map) return;
       if (WORLD_BOSS_MAP_RE.test(map) && (!worldBossByChar.has(p.charId)||worldBossByChar.get(p.charId)!==map||map!==p.map)) return;
+      // Mesma protecao anti-teleport do World Boss/masmorra: so quem
+      // realmente pertence a essa TvTInstance (tvtByChar) pode reportar
+      // estado nesse mapId, e so nessa mesma instancia que ja estava.
+      if (TVT_MAP_RE.test(map) && (!tvtByChar.has(p.charId)||tvtByChar.get(p.charId)!==map||map!==p.map)) return;
       const x = Number(msg.x), y = Number(msg.y);
       if (!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>2880||y>2112) return;
       const atkT=Math.max(0,Math.min(.4,Number(msg.atkT)||0)),atkAng=Number(msg.atkAng)||0;
@@ -1794,6 +1927,7 @@ wss.on('connection', ws => {
       const lvl = p.authed ? p.lvl : Math.max(1,Math.min(99,Number(msg.lvl)||1));
       Object.assign(p,{map,x,y,dir:Math.max(0,Math.min(3,Number(msg.dir)|0)),moving:!!msg.moving,lvl,atkT,atkAng:Math.max(-Math.PI*2,Math.min(Math.PI*2,atkAng))});
       if(WORLD_BOSS_MAP_RE.test(map)){const instance=worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member){member.x=x;member.y=y;member.online=true}}
+      if(TVT_MAP_RE.test(map)){const instance=tvtInstances.get(map),member=instance&&instance.players.get(p.charId);if(member&&!member.dead){member.x=x;member.y=y;member.online=true}}
       broadcast({type:'state',player:publicPlayer(p)},ws);
     } else if (msg.type === 'dungeon_enter') {
       await handleDungeonEnter(ws, p, msg);
@@ -1844,6 +1978,20 @@ wss.on('connection', ws => {
       const map=cleanText(msg.map,24);if(map!==p.map)return;
       const id=cleanText(msg.id,16),sk=Math.max(1,Math.min(3,Math.round(Number(msg.sk))||1)),atk=clampAtk(msg.atk);
       if(!(CLASS_SKILLS[p.cls]||[]).includes(id))return;
+      // Fase 5.7: dentro do TvT, warcry/barrier/evade/heal (nao-dano) sao
+      // resolvidos 100% por TVT.resolveTvtIntent (chance/custo/estado
+      // proprios da instancia -- nada a ver com P.wc/P.shield do mapa de
+      // campo). Skills de DANO (spin/dash/roots/thorns/fireball/frost/
+      // multi/pierce) continuam indo por player_damage (mesmo caminho que
+      // PvP normal ja usa pra "o golpe realmente acertou"), entao nao
+      // interceptamos DAMAGE_SKILLS aqui.
+      if(TVT_MAP_RE.test(map)&&(TVT.TVT_BUFF_SKILLS.has(id)||id==='heal')){
+        const instance=tvtInstances.get(map);if(!instance||tvtByChar.get(p.charId)!==map)return;
+        const targetId=cleanText(msg.targetId,64);
+        const result=TVT.resolveTvtIntent(instance,p.charId,{skill:id,targetId},Date.now(),secureRandom);
+        if(result.ok){tvtPublicSync(instance);if(result.kind==='heal')send(ws,{type:'tvt_heal',...result})}
+        return;
+      }
       const now=Date.now();
       p.skillCd=p.skillCd||{};
       if(now<(p.skillCd[id]||0))return;
@@ -1909,12 +2057,33 @@ wss.on('connection', ws => {
       }
       broadcastMap(map,{type:'mob_state',map,mob,killerId:mob.dead?p.id:null});
     } else if (msg.type === 'player_damage') {
+      const mapEarly=cleanText(msg.map,24);
+      // Fase 5.7: dentro do TvT, PvP NUNCA e client-side -- ao contrario do
+      // PvP normal (abaixo, que so calcula cooldown/alcance e deixa o
+      // ALVO aplicar a propria mitigacao), aqui o servidor calcula ataque
+      // E mitigacao E HP E morte E placar inteiros, via
+      // TVT.resolveTvtIntent (snapshot real, nunca msg.atk/hp/team/score
+      // do cliente). targetId aqui e o CHARID real do alvo (ver
+      // publicPlayer -- o cliente resolve isso a partir do estado
+      // publico dos jogadores na mesma arena).
+      if(TVT_MAP_RE.test(mapEarly)){
+        const instance=tvtInstances.get(mapEarly);if(!instance||tvtByChar.get(p.charId)!==mapEarly||mapEarly!==p.map)return;
+        const targetIdTvt=cleanText(msg.targetId,64),skillTvt=cleanText(msg.skill,16);
+        const result=TVT.resolveTvtIntent(instance,p.charId,{skill:skillTvt,targetId:targetIdTvt},Date.now(),secureRandom);
+        if(result.ok){
+          tvtPublicSync(instance);
+          if(result.kind==='damage'&&!result.evaded&&result.blocked!=='protection')broadcastMap(mapEarly,{type:'tvt_hit',attackerId:p.charId,targetId:result.targetId,damage:result.damage,skill:result.skill,killed:!!result.killed});
+          const end=TVT.checkTvtEnd(instance,Date.now());
+          if(end){instance.winner=end.winner;grantTvtRewards(instance).catch(err=>console.error('tvt_reward_error',err.message));finishTvtInstance(instance,end.reason,end.winner)}
+        }
+        return;
+      }
       // PvP: liberado fora da vila. O servidor nunca rastreia o HP do
       // defensor -- reaproveita a mesma validacao de dano/cooldown do PvE
       // (resolveAttackDamage) e manda o dano bruto pro alvo, que aplica a
       // propria mitigacao (defesa/bloqueio/escudo) localmente, exatamente
       // como ja faz contra ataques de monstro (hurtPlayer no cliente).
-      const map=cleanText(msg.map,24);if(map!==p.map||map==='vila')return;
+      const map=mapEarly;if(map!==p.map||map==='vila')return;
       const targetId=cleanText(msg.targetId,64);if(!targetId||targetId===p.id)return;
       let target=null;for(const other of clients.values())if(other.id===targetId&&other.map===map){target=other;break}
       if(!target)return;
@@ -1940,7 +2109,13 @@ wss.on('connection', ws => {
       const text=cleanText(msg.text,160);if(text)broadcast({type:'chat',from:p.name,text,at:Date.now()});
     }
   });
-  ws.on('close', () => { const p=clients.get(ws);if(p){const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member)member.online=false;clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
+  ws.on('close', () => { const p=clients.get(ws);if(p){const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member)member.online=false;
+    // Fase 5.7: desconectar NAO termina a partida nem pontua morte -- so
+    // marca offline (mesma regra do World Boss). O personagem continua
+    // pertencendo a instancia; reconectar com o mesmo userId/charId acha
+    // ela de novo em handleWsJoin.
+    const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);if(tvtMember)tvtMember.online=false;
+    clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
 });
 
 // .unref() nos 3 setInterval deste arquivo (aqui, tickMobAI e o ping de WS
@@ -1958,6 +2133,7 @@ setInterval(()=>{
 setInterval(()=>{
   eventManager.tick(Date.now());
   tickWorldBoss(Date.now());
+  tickTvt(Date.now());
 },1000).unref();
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
@@ -2721,4 +2897,6 @@ module.exports = {
   EVENT_DATA, eventManager, eventStatePayload,
   // Fase 5.6 -- World Boss (nucleo puro + runtime em memoria):
   WORLD_BOSS, WORLD_BOSS_MAP_RE, worldBossInstances, worldBossByChar, activeCharacterForUser, tickWorldBoss,
+  // Fase 5.7 -- Team vs Team (nucleo puro em game-data/tvt.js + runtime em memoria):
+  TVT, TVT_MAP_RE, tvtInstances, tvtByChar, tickTvt, startTvtEvent, finishTvtInstance, grantTvtRewards, tvtRegistrationFull, loadTvtCharacter,
 };
