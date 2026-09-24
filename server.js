@@ -12,6 +12,7 @@ const EVENT_DATA = require('./game-data/event-manager.js');
 const WORLD_BOSS = require('./game-data/world-boss.js');
 const TVT = require('./game-data/tvt.js');
 const GUILD = require('./game-data/guild.js');
+const BESTIARY = require('./game-data/bestiary.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -1713,6 +1714,48 @@ function sweepExpiredGuildInvites() {
     .catch(err => console.error('guild_invite_sweep_error', err.message));
 }
 
+// ===== Fase 5.9: Bestiario =====
+// Catalogo canonico em game-data/bestiary.js (so metadados -- stats
+// numericos continuam so em mobStats()). Progresso persistido em
+// character_bestiary via a funcao RPC bestiary_record_kill (upsert
+// atomico -- nunca perde incremento sob concorrencia). So o servidor
+// credita, sempre no mesmo ponto onde um abate real ja e confirmado
+// (mob.hp<=0 em mob_damage) -- nunca aceita monster_id/kills do cliente.
+async function creditBestiaryKill(charId, monsterId) {
+  if (!charId || !BESTIARY.isValidMonsterId(monsterId)) return;
+  const result = await rpc('bestiary_record_kill', {p_character_id:charId, p_monster_id:monsterId});
+  if (!result.ok) console.error('bestiary_credit_error', charId, monsterId, result.error);
+}
+const BESTIARY_ID_RE = /^\/api\/bestiary\/([0-9a-fA-F-]{8,36})$/;
+async function handleBestiary(req, res, pathname) {
+  if (pathname === '/api/bestiary/catalog' && req.method === 'GET') {
+    json(res,200,{catalog:BESTIARY.BESTIARY_CATALOG, total:BESTIARY.BESTIARY_TOTAL}); return true;
+  }
+  const m = BESTIARY_ID_RE.exec(pathname);
+  if (!m) return false;
+  if (req.method !== 'GET') { json(res,405,{error:'Método não permitido'}); return true; }
+  const charId = m[1];
+  try {
+    const user = await resolveUser(req);
+    if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const character = await ownCharacter(user, charId);
+    if (!character) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+    const rows = await supabase('character_bestiary', {query:`?select=monster_id,kills,discovered_at,first_kill_at,last_kill_at&character_id=eq.${encodeURIComponent(charId)}`});
+    const byId = new Map(rows.map(r => [r.monster_id, r]));
+    const catalog = BESTIARY.BESTIARY_CATALOG.map(entry => {
+      const progress = byId.get(entry.id);
+      return progress
+        ? {id:entry.id, displayName:entry.displayName, region:entry.region, levelRange:entry.levelRange, boss:entry.boss, dropTiers:entry.dropTiers, discovered:true, kills:progress.kills, discoveredAt:progress.discovered_at, firstKillAt:progress.first_kill_at, lastKillAt:progress.last_kill_at}
+        : {id:entry.id, discovered:false};
+    });
+    json(res,200,{catalog, total:BESTIARY.BESTIARY_TOTAL, discovered:byId.size}); return true;
+  } catch (err) {
+    console.error('bestiary_error', err.message, err.status || '', err.detail || '');
+    if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Bestiário ainda não configurado no servidor.':'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
 // ===== Fases 5.5/5.6: EventManager + World Boss instanciado =====
 const eventManager = new EVENT_DATA.EventManager({
   announce: payload => broadcast(payload),
@@ -1753,6 +1796,11 @@ async function startWorldBossEvent(event,registrations){
 function worldBossPublicSync(instance){const mob=maps.get(instance.mapId)?.mobs.get('ancient_titan');if(mob){mob.hp=instance.boss.hp;mob.maxhp=instance.boss.maxHp;mob.x=instance.boss.x;mob.y=instance.boss.y;mob.state=instance.boss.state;mob.dead=instance.defeated}broadcastMap(instance.mapId,WORLD_BOSS.publicWorldBossState(instance))}
 async function grantWorldBossRewards(instance){
   if(instance.rewardGranted)return;instance.rewardGranted=true;const eligible=WORLD_BOSS.eligibleMembers(instance);if(!eligible.length)return;
+  // Fase 5.9: participantes elegiveis da instancia vencedora (mesmo
+  // criterio de elegibilidade do World Boss ja usado pra recompensa)
+  // registram o abate do Tita Ancestral no bestiario -- guardado pelo
+  // mesmo instance.rewardGranted acima, nunca credita duas vezes.
+  for(const member of eligible)creditBestiaryKill(member.charId,'ancient_titan').catch(err=>console.error('bestiary_credit_error',err.message));
   const ordered=[...eligible].sort(()=>secureRandom()-.5);let legendaryWinner=null,legendaryItem=null;
   for(const candidate of ordered){try{const loaded=await loadWorldBossCharacter(candidate.userId,candidate.charId);if(loaded&&loaded.save.bag.length<24){const types=DROP_TYPES_BY_CLASS[candidate.cls]||DROP_TYPES_BY_CLASS.guerreiro;const type=types[crypto.randomInt(0,types.length)];legendaryItem=createGear(type,gearLevelForMob(candidate.lvl),'legendary');legendaryWinner=candidate;break}}catch{}}
   for(const member of eligible){
@@ -2002,6 +2050,7 @@ const server = http.createServer(async (req, res) => {
   if (await handleFriends(req, res, pathname)) return;
   if (await handleParty(req, res, pathname)) return;
   if (await handleGuild(req, res, pathname)) return;
+  if (await handleBestiary(req, res, pathname)) return;
   if (handleEvents(req, res, pathname)) return;
   const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
@@ -2287,6 +2336,7 @@ wss.on('connection', ws => {
           }else if(!mob.boss){
             creditDungeonReward(ws,p,rollDungeonTrashLoot(mob.lvl,p.cls));
           }
+          if(p.charId&&mob.type)creditBestiaryKill(p.charId,mob.type).catch(err=>console.error('bestiary_credit_error',err.message));
         }else if(mob.type){
           const stats=mobStats(mob.type,mob.lvl,mob.boss,mob.k);
           if(stats){
@@ -2300,6 +2350,7 @@ wss.on('connection', ws => {
             // fazia (loot fica null acima pelo mesmo motivo).
             const drop=mob.temp?null:rollGearDrop({mobLevel:mob.lvl,boss:!!mob.boss,cls:p.cls});
             creditKillReward(ws,p,xpGain,killCounterFields(mob.type,mob.lvl,mob.boss),loot,bossChestField,questInfo,drop);
+            if(p.charId)creditBestiaryKill(p.charId,mob.type).catch(err=>console.error('bestiary_credit_error',err.message));
           }
         }
       }
