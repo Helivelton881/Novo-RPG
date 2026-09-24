@@ -135,18 +135,68 @@ function reqFor(type, lv) {
 
 function round2(v) { return Math.round(v * 100) / 100; }
 
-// Stats finais (com rarity aplicada) pra um type+lv+rarity. Nao mexe em req
-// (rarity nunca altera nivel minimo, só o "poder" do item).
-function statsFor(type, lv, rarity) {
+// ===== Fase 5.4: enchant (+0..+10) =====
+// So os 4 grupos do design (arma da classe, armadura, capa, bota) recebem
+// bonus de enchant -- escudo/capacete/joia continuam existindo mas nunca
+// aparecem aqui, entao ENCHANT_BONUS[type] fica undefined pra eles e
+// statsFor trata isso como "sem bonus" (mesma coisa que enchant=0 faria).
+// Bonus por PONTO de enchant, aplicado sobre o stat ja com rarity (nao
+// composto -- ver statsFor: sempre base*rarityMul*enchantMul, nunca stat
+// atual*bonus repetido a cada tentativa, pra nao acumular erro de
+// arredondamento). Botas so recebem bonus em `def` -- `spd` e propositalmente
+// deixado de fora (stat sensivel demais, ver LEIA-PRIMEIRO.md "Fase 5.4").
+const ENCHANT_MAX = 10;
+const ENCHANT_BONUS = {
+  sword: { atk: 0.03 }, bow: { atk: 0.03 }, staffd: { atk: 0.03 }, staffm: { atk: 0.03 },
+  armor: { def: 0.02, hp: 0.02 },
+  cape: { def: 0.02, hp: 0.02 },
+  boots: { def: 0.02 },
+};
+// Tipos tecnicamente elegiveis pra enchant nesta fase -- shield/helmet/jewel
+// ficam de fora de proposito (continuam funcionando normalmente, so nao
+// participam do Ferreiro).
+const ENCHANTABLE_TYPES = new Set(Object.keys(ENCHANT_BONUS));
+// Chance de SUCESSO por enchant ALVO (+1..+10) -- indice = enchant que a
+// tentativa esta tentando ALCANCAR (nao o atual). +1/+2/+3 sempre 100%
+// ("safe enchant", nunca quebra); a partir de +4 cai e uma falha destroi o
+// equipamento (sem downgrade, sem protecao -- ver rollEnchantSuccess em
+// server.js, que consome esta tabela).
+const ENCHANT_SUCCESS = { 1: 1.00, 2: 1.00, 3: 1.00, 4: 0.70, 5: 0.60, 6: 0.50, 7: 0.40, 8: 0.30, 9: 0.20, 10: 0.10 };
+function enchantChance(target) { return ENCHANT_SUCCESS[target] || null; }
+// Custo em ouro de uma tentativa, sempre sobre o preco BASIC do
+// type+lv (GEAR_DATA.priceFor -- nunca multiplicado pela rarity real do
+// item, decisao explicita desta fase pra nao punir duas vezes um item ja
+// raro/caro). Minimo de 25 ouro pras faixas baratas (ex.: Nv1) nao ficarem
+// de graca.
+const ENCHANT_COST_RATE = { 1: 0.05, 2: 0.07, 3: 0.10, 4: 0.15, 5: 0.20, 6: 0.30, 7: 0.40, 8: 0.55, 9: 0.75, 10: 1.00 };
+function enchantCost(type, lv, target) {
+  const rate = ENCHANT_COST_RATE[target];
+  const base = priceFor(type, lv);
+  if (!rate || !base) return null;
+  return Math.max(25, Math.round(base * rate));
+}
+
+// Stats finais (com rarity E enchant aplicados) pra um type+lv+rarity+enchant.
+// Nao mexe em req (nem rarity nem enchant alteram nivel minimo, só o "poder"
+// do item). SEMPRE calcula a partir do stat BASE original (GEAR_STATS) --
+// nunca compõe sobre o stat atual do item, pra nao acumular drift de
+// arredondamento entre tentativas sucessivas de enchant.
+// `enchant` e opcional (default 0) -- todo call site que nao passa continua
+// produzindo EXATAMENTE o mesmo resultado de antes da Fase 5.4 (compatibilidade
+// +0, ver teste de regressão explícito em test/gear-data.test.js).
+function statsFor(type, lv, rarity, enchant) {
   const base = GEAR_STATS[type] && GEAR_STATS[type][lv];
   if (!base) return null;
-  const mul = (RARITY[rarity] || RARITY.basic).mul;
+  const rarityMul = (RARITY[rarity] || RARITY.basic).mul;
+  const bonus = ENCHANT_BONUS[type] || {};
+  const ench = Math.max(0, Math.min(ENCHANT_MAX, Math.round(Number(enchant) || 0)));
+  const mulFor = (stat) => rarityMul * (1 + (bonus[stat] || 0) * ench);
   const out = { req: reqFor(type, lv) };
-  if (base.atk) out.atk = Math.round(base.atk * mul);
-  if (base.def) out.def = Math.round(base.def * mul);
-  if (base.hp) out.hp = Math.round(base.hp * mul);
-  if (base.blk) out.blk = round2(base.blk * mul);
-  if (base.spd) out.spd = round2(base.spd * mul);
+  if (base.atk) out.atk = Math.round(base.atk * mulFor('atk'));
+  if (base.def) out.def = Math.round(base.def * mulFor('def'));
+  if (base.hp) out.hp = Math.round(base.hp * mulFor('hp'));
+  if (base.blk) out.blk = round2(base.blk * mulFor('blk'));
+  if (base.spd) out.spd = round2(base.spd * mulFor('spd'));
   return out;
 }
 
@@ -180,6 +230,11 @@ const SELL_RARITY_MUL = { basic: 1, rare: 2, epic: 4, legendary: 8 };
 // Fonte central de venda por item -- nunca espalhar o multiplicador de
 // raridade em mais de um lugar (server.js sempre chama isto, nunca
 // sellPriceFor(lv) sozinho, pra um item que nao seja garantidamente basic).
+// Fase 5.4: propositalmente NAO considera `item.enchant` -- se encantar
+// aumentasse o preco de venda, a tentativa de enchant viraria um mecanismo
+// de gerar ouro adicional (comprar barato, arriscar +1/+2/+3 de graca,
+// vender mais caro), o que nao é a intenção do sistema. Só lv+rarity
+// entram na conta, documentado aqui de propósito (não é bug/esquecimento).
 function sellPriceForItem(item) {
   if (!item) return 0;
   return Math.round(sellPriceFor(item.lv) * (SELL_RARITY_MUL[item.rarity] || 1));
@@ -187,6 +242,8 @@ function sellPriceForItem(item) {
 
 const DATA = {
   GEAR_LEVELS, LEGACY_TIER_LEVEL, LEVEL_LEGACY_TIER, RARITY, RARITY_ORDER,
+  ENCHANT_MAX, ENCHANT_BONUS, ENCHANTABLE_TYPES, ENCHANT_SUCCESS, ENCHANT_COST_RATE,
+  enchantChance, enchantCost,
   TYPES_WITH_LEGACY_REQ, GEAR_STATS, GEAR_NAMES, GEAR_PRICES, SELL_PRICES, SELL_RARITY_MUL,
   reqFor, statsFor, nameFor, priceFor, sellPriceFor, sellPriceForItem,
 };
