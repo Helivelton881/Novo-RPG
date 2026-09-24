@@ -654,3 +654,100 @@ Preservado sem nenhuma mudança de comportamento. Mob de **campo** nunca dropou 
 ## Próxima fase
 
 Fase 5.4 — Ferreiro + Enchant (+0 até +10, chance de sucesso decrescente acima de +3, equipamento quebra em caso de falha). Fica pra quando for solicitada.
+
+# FASE 5.4 — FERREIRO + ENCHANT
+
+**Motivação:** desde a Fase 5.1 o modelo canônico do item já reservava um campo `enchant` (sempre `0`), preparado exatamente para esta fase. Agora ele passa a fazer alguma coisa de verdade: um NPC Ferreiro na Vila deixa o jogador arriscar melhorar um equipamento em até +10, com chance decrescente e risco real de perda acima de +3 — sempre decidido pelo servidor, nunca pelo cliente.
+
+## NPC Ferreiro
+
+Reaproveita o sistema de NPC já existente (`npcDefs`/`NPCS`/`openDialog`) — nada de framework paralelo. Adicionado à Vila em `x:25*T,y:12.9*T` (perto do Mercador, mesma área de comércio), sem sprite próprio (sem asset novo nesta fase): usa `spriteKey:'guarda'` pra reaproveitar o visual do NPC "Guarda Real" já carregado, mecanismo genérico adicionado ao `forEach` de `npcDefs` (`n.spriteKey||n.id`) que qualquer NPC futuro sem sprite dedicado também pode usar. Interagir abre uma janela própria (`#blacksmith`/`openBlacksmith`), não o sistema de diálogo de texto — mesmo padrão que o Mercador já usa pra `openShop`.
+
+## Itens elegíveis
+
+Só os 4 grupos do design: arma da classe (`sword`/`bow`/`staffd`/`staffm`), `armor`, `cape`, `boots` — `GEAR_DATA.ENCHANTABLE_TYPES` (fonte única, cliente e servidor leem a mesma lista). `shield`/`helmet`/`jewel` continuam funcionando normalmente em todo o resto do jogo, só não aparecem na lista do Ferreiro nem aceitam a ação `enchant_item` (rejeitados explicitamente, sem cobrar). Todas as 4 raridades (`basic/rare/epic/legendary`) podem ser encantadas — **enchant nunca altera `rarity`** (Epic +6 continua Epic), nem `lv`/`req`/`type`/`uid`/`n` (nome canônico persistido nunca muda; a UI mostra "+N Nome" só na exibição).
+
+## Tabela de chance (`GEAR_DATA.ENCHANT_SUCCESS`)
+
+```
++1..+3 = 100% ("safe enchant", nunca quebra)
++4 = 70%   +5 = 60%   +6 = 50%   +7 = 40%
++8 = 30%   +9 = 20%   +10 = 10%
+```
+
+Acima de +3, falhar **destrói o equipamento definitivamente** — sem downgrade, sem devolver pra +0, sem proteção, sem cópia substituta. O uid simplesmente deixa de existir. Nenhuma exceção foi implementada nesta fase (Enchant Scroll/Blessed Scroll/seguro ficam para o futuro, fora de escopo aqui).
+
+## Custo (`GEAR_DATA.ENCHANT_COST_RATE` + `enchantCost`)
+
+Sempre um percentual do **preço Basic** de compra (`GEAR_DATA.priceFor(type, lv)`) do mesmo type+lv — nunca multiplicado pela raridade real do item (Rare/Epic/Legendary pagam o mesmo custo de tentativa que um Basic equivalente, decisão explícita pra não punir duas vezes um item já raro). Alvo `+1..+10` → `5%/7%/10%/15%/20%/30%/40%/55%/75%/100%` do preço Basic, com piso de **25 ouro**. Cobrado **uma única vez por tentativa válida**, sucesso ou falha — só um pedido inválido (item não encontrado/não elegível/já +10/estado obsoleto) nunca cobra nada.
+
+## Stats (não composto, sempre a partir do valor base original)
+
+`GEAR_DATA.statsFor(type, lv, rarity, enchant)` — novo 4º parâmetro opcional (omitir = `0`, mesmo resultado de sempre: **regressão +0 garantida e testada explicitamente**). Fórmula: `stat = round(base × rarityMul × (1 + bônusPorTipo × enchant))`, sempre recalculada do `GEAR_STATS` base — nunca compõe sobre o stat atual do item entre tentativas (evita drift de arredondamento acumulado). `ENCHANT_BONUS` (fonte única):
+
+- **Arma** (`sword/bow/staffd/staffm`): `+3% atk` por ponto (`+0=100%, +1=103%, +3=109%, +5=115%, +10=130%`).
+- **Armadura/Capa**: `+2% def e hp` por ponto (`+10 = 120%`).
+- **Botas**: `+2% def` por ponto — **`spd` propositalmente NÃO recebe bônus de enchant** (stat sensível demais; raridade continua podendo afetar `spd`, só enchant não).
+
+## Fluxo server-authoritative (`enchant_item`)
+
+Nova ação em `handleShop` (mesmo endpoint/mutex/sessão da loja — nenhuma rota paralela), dentro do mesmo `withCharLock(charId, ...)` que já serializa toda economia. Núcleo extraído como função pura testável, `attemptEnchant(save, uid, expectedEnchant, rng)` (mesmo padrão de `rollGearDrop`/`applyGearDrops` da Fase 5.3): localiza o uid em `bag` **ou** `eq`, valida elegibilidade/`+10`/estado esperado, cobra o custo, rola `rollEnchantSuccess(target, rng)` (`rng` injetável nos testes; produção usa `crypto.randomInt` via `secureRandom()` — nunca `Math.random`, porque a operação pode destruir equipamento valioso) e muta `save` diretamente. Sucesso: `applyEnchant(item, target)` reconstrói o item preservando `uid/type/lv/rarity/n` e recalculando stats — no mesmo slot (`eq`) ou substituindo o mesmo índice (`bag`). Falha (+4 ou mais): remove de `save.eq[slot]=null` ou `save.bag.splice(...)` — o uid nunca mais aparece em lugar nenhum do save.
+
+## Proteção contra clique duplo/request obsoleta (`expectedEnchant`)
+
+Toda tentativa manda `{uid, expectedEnchant}` — o servidor exige `expectedEnchant === item.enchant` (o valor **realmente persistido**, nunca o que o cliente supõe). A primeira requisição que executa dentro do `withCharLock` muda o enchant de verdade; qualquer segunda tentativa com o `expectedEnchant` antigo (duplo clique, requisição duplicada) recebe `STALE_ENCHANT_STATE` **sem cobrar nada** — testado com duas requisições literalmente concorrentes (`Promise.all`) confirmando que só uma executa. Cliente também tem uma guarda própria (`bsBusy`, desabilita o botão durante a viagem de ida e volta), mas a proteção real é essa validação server-side, não a UI.
+
+## Proteção por UID
+
+`attemptEnchant` só localiza o item pelo `uid` real dentro do `save` já carregado do banco (nunca aceita `type`/`lv`/`rarity` vindos do payload pra "montar" um item) — uid inexistente, uid de outro personagem, ou tipo/estado incompatível são sempre rejeitados antes de qualquer cobrança ou roll.
+
+## Mutex
+
+Reaproveita o `withCharLock` já existente desde a Fase 5.1/5.2 — nenhum lock novo, nenhuma fila paralela. `enchant_item` roda serializado com qualquer outra operação econômica do mesmo personagem (compra, venda, loot), do mesmo jeito que as outras ações de `handleShop` já rodavam.
+
+## `sell_common` — proteção crítica contra vender item encantado sem querer
+
+Desde a Fase 5.3, `sell_common` só vende `rarity === 'basic'`. Agora **também exige `enchant === 0`** — um Basic +8 é fruto de risco/gasto real no Ferreiro e nunca pode ser varrido junto com lixo comum sem confirmação explícita do jogador. Corrigido tanto no servidor (`handleShop`) quanto no espelho client-side (`isLowestGear`, usado pra montar a lista/preview do botão "Vender itens comuns"). `sellPriceForItem` continua **propositalmente não considerando `enchant`** no preço (só `lv`+`rarity`, herdado da Fase 5.3) — se encantar aumentasse o valor de venda, a tentativa viraria um mecanismo de gerar ouro adicional, o que não é a intenção do sistema.
+
+## Buyback
+
+Sem nenhuma mudança de código — `buyback` já devolvia exatamente o mesmo objeto vendido (mesmo `uid`) desde a Fase 5.1, então um item Epic +7 vendido volta Epic +7, mesmo uid, mesmo `lv`, testado explicitamente.
+
+## Tampering / PUT genérico
+
+`sanitizeItem` foi ajustado pra passar o `enchant` real pra `statsFor` **toda vez que o item passa por ele** (compra, leitura de save, equipar/desequipar, PUT) — sem isso, um item encantado "esqueceria" o bônus assim que o save fosse relido. A proteção contra **forjar** enchant já existia desde a Fase 5.1: `lockOwnedItems` sempre substitui um item pela cópia **canônica persistida no banco** quando o uid já era conhecido, nunca aceitando nenhum campo (incluindo `enchant`) que o payload do PUT tenta sobrescrever — confirmado com teste explícito (item real `enchant:0`, PUT manda `enchant:10`, continua `0` depois do reload).
+
+## RNG
+
+`Math.random()` client-side nunca influencia o resultado — produção usa `crypto.randomInt` (`secureRandom()`), a mesma família de RNG seguro já usada pro seed de masmorra (Fase 5.2). `rollEnchantSuccess`/`attemptEnchant` aceitam um `rng` injetável só pra teste determinístico (nunca exposto por nenhuma rota, nunca controlável pelo cliente).
+
+## Auditoria de ATK (clampAtk)
+
+Máximo teórico calculado nesta fase: arma Legendary Nv40 +10 → `round(42 × 1.35 × 1.30) = 74` de atk no item. Somado ao multiplicador de classe (`CLS.wm`, maior é Mago em `1.3`) → `round(74×1.3) = 96`, mais joia Basic Nv40 (`17`, joia não é enchantável nesta fase) → **113 de ATK máximo legítimo**. `clampAtk = 120` (Fase 5.2) já cobre esse valor com folga (7 de margem) — **nenhum ajuste foi necessário**. Cálculo documentado aqui em vez de simplesmente subir o teto sem justificativa.
+
+## Limitações conhecidas (honestas, não escondidas)
+
+- **HP/mitigação final do jogador ainda é parcialmente client-side** (limitação já documentada desde a Fase 5.2) — o bônus de enchant em `armor`/`cape`/`boots` funciona corretamente no `recalc()` existente (soma de `def`/`hp` dos itens equipados), mas a aplicação final do dano/mitigação continua não 100% server-derivada. Não foi objetivo desta fase reescrever combate.
+- **Efeito visual do enchant é só CSS** (`filter:drop-shadow`, 3 faixas: `+4..+6` discreto, `+7..+9` mais forte, `+10` especial) aplicado ao ícone do item — sem sprite/asset novo, sem canvas extra, sem custo de FPS perceptível. Uma aura mais elaborada (partículas, animação no personagem) fica como melhoria futura, não implementada aqui de propósito (evitar reestruturação grande de renderização por uma fase que é sobre economia/servidor).
+- **Ferreiro offline**: preservado sem mudança de comportamento — o offline nunca teve sistema de enchant antes, e esta fase não adicionou um fallback local pra ele (não fazia parte do escopo; a fronteira online/economia server-authoritative da Fase 5.2 já impede que qualquer progresso offline seja injetado numa conta online via PUT).
+
+## Testes adicionados
+
+- `test/enchant.test.js` (31 testes, sempre roda, sem Supabase) — tabela de chance exata, fronteiras de `rollEnchantSuccess` (`0.6999`→sucesso / `0.7000`→falha em +4, mesma lógica em +10), custo (fórmula + piso de 25), **regressão +0 explícita** (com e sem o 4º parâmetro), stats por tipo (arma/armadura/capa/botas, incluindo `spd` de botas nunca mudando), raridade+enchant combinados (Basic/Rare/Epic/Legendary +10), `applyEnchant` preservando uid/type/lv/rarity/req/n, e o fluxo completo de `attemptEnchant` contra saves simulados: safe enchant sequencial, quebra forçada (+4, +5, +9→+10), MAX_ENCHANT, ouro insuficiente, `STALE_ENCHANT_STATE`, item equipado vs. mochila, tipo não permitido, uid forjado, anti-duplicação.
+- `test/blacksmith.test.js` (12 testes, `{skip:!hasSupabase()}`) — fluxo real via HTTP (`handleShop` de verdade): `+1` e sequência `+1→+2→+3` sempre bem-sucedidos (únicos alvos deterministicamente testáveis contra o RNG seguro real, que não é injetável pelo cliente por design), item equipado, tipos não elegíveis, uid inexistente/de outra conta, ouro insuficiente, `MAX_ENCHANT`, `STALE_ENCHANT_STATE`, **duas requisições concorrentes reais** (`Promise.all`) confirmando que só uma executa, tampering via PUT bruto, `buyback` preservando enchant, `sell_common` nunca vendendo item encantado.
+- `test/portal.test.js` — `ctx` do teste isolado de `winSig()` atualizado com `bsOpen`/`bsSel` (novas variáveis que a função passou a referenciar).
+
+**Limitação honesta (igual às fases anteriores):** os alvos `+4` a `+10` (a parte probabilística real) só têm cobertura determinística via `test/enchant.test.js`, com RNG injetado — não existe teste HTTP forçando uma quebra real, porque o RNG de produção é propositalmente `crypto.randomInt` server-only, não injetável pelo cliente (a instrução desta fase é explícita: nenhum "código pra forçar enchant em produção", nenhum "debug RNG"). `test/blacksmith.test.js` não pôde ser executado neste ambiente (sem `SUPABASE_URL`/`SUPABASE_SECRET_KEY` locais, sem projeto de teste dedicado) — mesma lacuna documentada desde a Fase 5.2.
+
+## O que NÃO entrou nesta fase (de propósito)
+
+- **Enchant Scroll / Blessed Scroll / Protected Scroll / proteção contra quebra / downgrade em falha** — Ferreiro usa só ouro nesta fase; scrolls especiais ficam pro futuro.
+- **World Boss, Event Manager, Team vs Team, Guildas, Bestiário, Ranking, página pública, Phantom Players** — inalterados, fora do escopo.
+
+## Migração de banco
+
+**Nenhuma migration nova foi necessária ou criada.** `enchant` já vivia no objeto do item dentro de `characters.save` (jsonb) desde a Fase 5.1 — esta fase só passou a usá-lo de verdade. As 5 migrations históricas em `supabase/migrations/` não foram tocadas.
+
+## Próxima fase
+
+Fase 5.5 — Event Manager (eventos automáticos de 2 em 2 horas, preparação para World Boss e Team vs Team). Fica pra quando for solicitada.
