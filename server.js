@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { WebSocketServer, WebSocket } = require('ws');
 const GEAR_DATA = require('./game-data/gear-data.js');
+const DUNGEON_GEN = require('./game-data/dungeon-generation.js');
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -16,7 +17,15 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const authAttempts = new Map();
 const clients = new Map();
 const maps = new Map();
-const ALLOWED_MAP = /^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)(?:_d)?$/;
+// Fase 5.2: masmorra agora usa uma chave de mapa por INSTANCIA
+// (`<zona>_d#<id8hex>`) em vez de compartilhar um unico `<zona>_d` global
+// entre qualquer personagem que entrar -- reaproveita playersOnMap/
+// broadcastMap/tickMobAI sem nenhuma mudanca estrutural neles (so
+// precisam que p.map seja essa string; ver handleDungeonEnter). `_d` sem
+// sufixo continua aceito por compatibilidade de mensagens antigas, mas
+// nenhum fluxo novo o gera mais.
+const ALLOWED_MAP = /^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)(?:_d(?:#[0-9a-f]{8})?)?$/;
+const DUNGEON_MAP_RE = /^([a-z]+)_d(?:#([0-9a-f]{8}))?$/;
 const ALLOWED_CLASS = new Set(['guerreiro', 'druida', 'mago', 'arqueiro']);
 
 // ===== Roster de monstro autoritativo (Fase 1) =====
@@ -115,6 +124,20 @@ const MOB_MANIFEST = {
     { type: 'sala', lvl: 35, boss: false, temp: true }, { type: 'sala', lvl: 35, boss: false, temp: true }, { type: 'sala', lvl: 35, boss: false, temp: true },
   ],
 };
+// Fase 5.2 — roster de masmorra server-side. Espelha exatamente as
+// escolhas de tipo/faixa de nivel de MASMORRA_CFG (index.html): mesmo
+// range de nivel de trash, mesmas proporcoes por zona (pantano/torre 50/50,
+// ilhas 35/35/30, vulcao 30/30/25/15), mesmo nivel/HPx3 de chefe. Só a
+// escolha de QUAL classe entra em qual zona muda (nada) -- preservado.
+const DUNGEON_CFG = {
+  floresta: { lvlLo: 6, lvlHi: 9, trash: rnd => ({ type: 'goblin', lvl: 6 + Math.floor(rnd() * 4) }), boss: { type: 'goblin', lvl: 10 } },
+  cripta:   { lvlLo: 11, lvlHi: 14, trash: rnd => ({ type: 'skeleton', lvl: 11 + Math.floor(rnd() * 4) }), boss: { type: 'skeleton', lvl: 15 } },
+  serra:    { lvlLo: 16, lvlHi: 19, trash: rnd => ({ type: 'wolf', lvl: 16 + Math.floor(rnd() * 4) }), boss: { type: 'wolf', lvl: 20 } },
+  pantano:  { lvlLo: 21, lvlHi: 24, trash: rnd => rnd() < .5 ? { type: 'bat', lvl: 21 + Math.floor(rnd() * 4) } : { type: 'toxic', lvl: 21 + Math.floor(rnd() * 4) }, boss: { type: 'toxic', lvl: 25 } },
+  torre:    { lvlLo: 26, lvlHi: 29, trash: rnd => rnd() < .5 ? { type: 'caster', lvl: 26 + Math.floor(rnd() * 4) } : { type: 'skeleton', lvl: 26 + Math.floor(rnd() * 4) }, boss: { type: 'caster', lvl: 30 } },
+  ilhas:    { lvlLo: 31, lvlHi: 34, trash: rnd => { const r = rnd(); return r < .35 ? { type: 'sky', k: 'h', lvl: 31 + Math.floor(rnd() * 4) } : r < .7 ? { type: 'sky', k: 's', lvl: 31 + Math.floor(rnd() * 4) } : { type: 'bat', lvl: 31 + Math.floor(rnd() * 4) }; }, boss: { type: 'sky', k: 'b', lvl: 35 } },
+  vulcao:   { lvlLo: 36, lvlHi: 39, trash: rnd => { const r = rnd(); return r < .3 ? { type: 'sala', lvl: 36 + Math.floor(rnd() * 4) } : r < .6 ? { type: 'elem', lvl: 36 + Math.floor(rnd() * 4) } : r < .85 ? { type: 'calc', lvl: 36 + Math.floor(rnd() * 4) } : { type: 'cinza', lvl: 36 + Math.floor(rnd() * 4) }; }, boss: { type: 'lorde', lvl: 40 } },
+};
 const MIME = {'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.png':'image/png','.json':'application/json; charset=utf-8'};
 
 // Modelo canonico de item (Fase 5.1): uid + type + lv (progressao 1..40) +
@@ -182,6 +205,59 @@ function rollMobLoot(type, boss, lvl) {
 // daquele mapa ainda nao foi aberto (mesma condicao do cliente: if(!P.chestOpenN)).
 const BOSS_CHEST_FIELD = { goblin: 'chest', skeleton: 'chest2', wolf: 'chest3', toxic: 'chest4', caster: 'chest5', sky: 'chest6', lorde: 'chest7' };
 
+// ===== Fase 5.2: loot de masmorra (server-side) =====
+// Espelha pickTier() do cliente (index.html) exatamente -- decide o tier
+// LEGADO (1-5) do item de trash de masmorra a partir do nivel do mob.
+// Convertido pra lv real via LEGACY_TIER_LEVEL (mesma migracao que
+// qualquer item legado passa em sanitizeItem). rarity sempre 'basic' --
+// Épico/Lendário são Fase 5.3, ainda não ligados aqui.
+function pickTier(l) {
+  const r = Math.random();
+  if (l <= 3) return r < .8 ? 1 : 2;
+  if (l <= 7) return r < .15 ? 1 : (r < .85 ? 2 : 3);
+  if (l >= 35) return r < .02 ? 3 : (r < .28 ? 4 : 5);
+  if (l >= 30) return r < .03 ? 3 : (r < .35 ? 4 : 5);
+  if (l >= 25) return r < .05 ? 3 : (r < .5 ? 4 : 5);
+  if (l >= 20) return r < .05 ? 2 : (r < .35 ? 3 : (r < .85 ? 4 : 5));
+  if (l >= 15) return r < .12 ? 2 : (r < .55 ? 3 : 4);
+  if (l >= 10) return r < .25 ? 2 : (r < .8 ? 3 : 4);
+  return r < .5 ? 2 : (r < .95 ? 3 : 4);
+}
+// Espelha dropLoot(3+rand*3,6,.14,.08) + 35% dropItem(pickTier(lvl)) do
+// ramo `s.dun` de killMob() no cliente -- mob comum de masmorra nunca
+// concede XP (preservado, ver creditDungeonReward). `cls` decide o tipo
+// de item sorteado (mesma logica de CLASS_ITEM_TYPES ja usada em
+// rollChestItem).
+function rollDungeonTrashLoot(lvl, cls) {
+  let gold = 0; const coins = 3 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < coins; i++) gold += 1 + Math.floor(Math.random() * 6);
+  const pv = Math.random() < .14 ? 1 : 0, gem = Math.random() < .08 ? 1 : 0;
+  const items = [];
+  if (Math.random() < .35) {
+    const types = CLASS_ITEM_TYPES[cls] || ['armor'];
+    const type = types[Math.floor(Math.random() * types.length)];
+    const item = createGear(type, GEAR_DATA.LEGACY_TIER_LEVEL[pickTier(lvl)] || 12, 'basic');
+    if (item) items.push(item);
+  }
+  return { gold, gem, pv, items };
+}
+// Espelha dropLoot(22,9,1,6) + 3x dropItem(tier4,...) do ramo de chefe --
+// chefe de masmorra sempre da 6 gemas e 3 itens (tier4 legado = lv12,
+// mesma faixa que o cliente sempre usou aqui, independente do nivel real
+// da zona -- comportamento preservado, nao corrigido, ver
+// LEIA-PRIMEIRO.md "Fase 5.2" pro porque).
+function rollDungeonBossLoot(cls) {
+  let gold = 0; for (let i = 0; i < 22; i++) gold += 1 + Math.floor(Math.random() * 9);
+  const items = [];
+  const types = CLASS_ITEM_TYPES[cls] || ['armor'];
+  for (let i = 0; i < 3; i++) {
+    const type = types[Math.floor(Math.random() * types.length)];
+    const item = createGear(type, 12, 'basic');
+    if (item) items.push(item);
+  }
+  return { gold, gem: 6, pv: 1, items };
+}
+
 // Espelha a maquina de estados de progressao de P.quest: os ~15 checkpoints
 // "if(P.quest===N)" dentro de killMob/killSkeleton/killWolf/killSwamp/
 // killCaster/killSky/killVulcao/killLorde no cliente. So estagios IMPARES
@@ -197,6 +273,13 @@ const QUEST_COUNTER_CAP = { kills: 999999 };
 // tambem pelo PUT de personagem pra saber quais campos travar depois que o
 // personagem ja tem progresso real (ver isTracked em handleCharacters).
 const QUEST_GATE_FIELDS = ['kills', 'gk', 'ks', 'kw', 'kp', 'kt', 'ki', 'kv'];
+// Fase 5.2: campos com valor economico real que o PUT generico de
+// personagem NUNCA mais aceita do cliente pra um personagem que ja existe
+// no banco -- so mudam por operacao server-side dedicada (handleShop,
+// handleChest, handleQuest, creditKillReward, dungeon). gunlock e os
+// chestN entram aqui pela mesma razao (desbloqueio de portal so por
+// buy_portal; abertura de bau de campo so por handleChest).
+const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7'];
 function advanceQuestOnKill(save, type, boss, lvl) {
   const q = save.quest, changed = {};
   const bump = (field, need, next) => {
@@ -282,6 +365,18 @@ const CHEST_REWARDS = {
   chestOpen6: {field:'chest6', gold:200, tier:5},
   chestOpen7: {field:'chest7', gold:250, tier:5},
 };
+// Compartilhado por qualquer fonte de loot de equipamento (bau de campo,
+// bau/chefe de masmorra): equipa direto se o slot tiver vazio e o nivel
+// bater (mesma regra de giveItem() no cliente), senao vai pra mochila se
+// houver espaco. Nunca perde o item nem sobrescreve algo ja equipado.
+function grantItem(save, lvl, item) {
+  if (!item) return null;
+  const slot = typeSlot(item.type), canEquip = !save.eq[slot] && (!item.req || lvl >= item.req);
+  if (canEquip) save.eq[slot] = item;
+  else if (save.bag.length < 24) save.bag.push(item);
+  else return null;
+  return item;
+}
 // `tier` aqui e o campo legado de CHEST_REWARDS (4 ou 5) -- convertido pra lv
 // real via LEGACY_TIER_LEVEL, rarity sempre 'basic' (drop de raridade melhor
 // fica pra Fase 5.3, ver LEIA-PRIMEIRO.md). uid novo garantido por createGear.
@@ -289,13 +384,7 @@ function rollChestItem(save, lvl, tier) {
   const types = CLASS_ITEM_TYPES[save.cls] || ['armor'];
   const type = types[Math.floor(Math.random() * types.length)];
   const lv = GEAR_DATA.LEGACY_TIER_LEVEL[tier] || 12;
-  const item = createGear(type, lv, 'basic');
-  if (!item) return null;
-  const slot = typeSlot(type), canEquip = !save.eq[slot] && (!item.req || lvl >= item.req);
-  if (canEquip) save.eq[slot] = item;
-  else if (save.bag.length < 24) save.bag.push(item);
-  else return null;
-  return item;
+  return grantItem(save, lvl, createGear(type, lv, 'basic'));
 }
 
 // shopSold e efemero por personagem (lista de recompra), como party --
@@ -334,6 +423,27 @@ const CLASS_SKILLS = {
   mago: ['fireball','frost','barrier'], arqueiro: ['multi','evade','pierce'],
 };
 const DAMAGE_SKILLS = new Set(['spin','dash','roots','thorns','fireball','frost','multi','pierce']);
+
+// Save inicial de um personagem novo, definido pelo servidor (Fase 5.2) --
+// espelha os defaults reais do objeto P no cliente (index.html): ouro 10,
+// 3 pocoes de vida, 2 de mana, arma Nv1 Basica da classe ja equipada, tudo
+// mais zerado. Usado no POST /api/characters (grava isso direto no banco
+// na criacao) -- personagem online novo nunca mais depende do que o
+// primeiro PUT do cliente reivindica pra nascer com ouro/item/progresso
+// (ver handleCharacters: a partir desta fase TODO PUT trava campos
+// economicos no que o servidor ja tem, sem excecao pro "primeiro save").
+function startingSave(cls, name) {
+  const weapon = (CLASS_ITEM_TYPES[cls] || CLASS_ITEM_TYPES.guerreiro)[0];
+  const skills = CLASS_SKILLS[cls] || CLASS_SKILLS.guerreiro;
+  const raw = {
+    cls, gold: 10, gem: 0, pv: 3, pa: 2, quest: 0,
+    map: 'vila', name, bar: [], gunlock: {}, skSeen: {},
+    sk: Object.fromEntries(skills.map(id => [id, 1])),
+    bag: [], eq: { sword: createGear(weapon, 1, 'basic') },
+    chat: [],
+  };
+  return sanitizeSave(raw, 1);
+}
 function skillDamageMul(id, r) {
   switch (id) {
     case 'spin': return 1.4 + .3 * (r - 1);
@@ -347,7 +457,15 @@ function skillDamageMul(id, r) {
     default: return 0;
   }
 }
-function clampAtk(v) { return Math.max(0, Math.min(35, Number(v) || 0)); }
+// Teto solto pro atk que o cliente reivindica em cada golpe (msg.atk) --
+// nao prova o valor (o servidor ainda nao deriva ATK real do equipamento,
+// ver LEIA-PRIMEIRO.md "Fase 5.2" pro que falta), so evita o caso obvio de
+// um cliente adulterado mandando um numero absurdo. 35 (valor pre-Fase-5.1)
+// ja ficou defasado: arma Nv40 basica sozinha soma ~55 depois do
+// multiplicador de classe (42*1.3), +joia Nv40 (17) = ~72 hoje so com
+// equipamento Basico; Lendario (unico ainda nao vendido/dropado, 1.35x)
+// chegaria a ~97. 120 cobre os dois com folga sem abrir vantagem real.
+function clampAtk(v) { return Math.max(0, Math.min(120, Number(v) || 0)); }
 function baseDmgOf(cls, lvl) { const c = CLASS_DMG[cls] || CLASS_DMG.guerreiro; return c.dmg0 + c.dmgL * (lvl - 1); }
 function buffMulOf(p) { return 1 + ((p.buffUntil && Date.now() < p.buffUntil) ? (p.buffAtk || 0) : 0); }
 function skBaseOf(p, atk) { return (baseDmgOf(p.cls, p.lvl) + clampAtk(atk) + 2) * buffMulOf(p); }
@@ -596,13 +714,17 @@ function bearer(req) {
   return match ? match[1] : '';
 }
 
-async function resolveUser(req) {
-  const token = bearer(req);
+// Extraido de resolveUser() (Fase 5.2) pra ser reusavel fora de um request
+// HTTP -- o WebSocket agora autentica o 'join' com o MESMO token de sessao
+// usado pelas rotas REST (ver handleJoin), entao precisa da mesma validacao
+// sem depender de um objeto `req`.
+async function resolveUserByToken(token) {
   if (!token) return null;
   const rows = await supabase('sessions', {query:`?select=expires_at,users(id,username)&token=eq.${tokenHash(token)}&expires_at=gt.${encodeURIComponent(new Date().toISOString())}&limit=1`});
   const row = rows[0], user = Array.isArray(row?.users) ? row.users[0] : row?.users;
   return user ? {id: user.id, username: user.username, expiresAt: row.expires_at} : null;
 }
+async function resolveUser(req) { return resolveUserByToken(bearer(req)); }
 
 async function handleAuth(req, res, pathname) {
   if (!pathname.startsWith('/api/auth/')) return false;
@@ -672,7 +794,7 @@ async function handleCharacters(req, res, pathname) {
       if (name.length < 2) { json(res,400,{error:'Nome do personagem inválido'}); return true; }
       let rows;
       try {
-        rows = await supabase('characters', {method:'POST', body:{user_id:user.id, slot, name, cls, lvl:1, map:'vila', save:{}}, prefer:'return=representation'});
+        rows = await supabase('characters', {method:'POST', body:{user_id:user.id, slot, name, cls, lvl:1, map:'vila', save:startingSave(cls, name)}, prefer:'return=representation'});
       } catch (e) {
         if (e.status === 409) { json(res,409,{error:'Espaço ou nome já em uso'}); return true; }
         throw e;
@@ -683,39 +805,40 @@ async function handleCharacters(req, res, pathname) {
     const idMatch = CHAR_ID_RE.exec(pathname);
     if (idMatch && req.method === 'PUT') {
       const id = idMatch[1];
-      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}&limit=1`});
-      const current = rows0[0];
       const input = await readJson(req);
-      let lvl = Math.max(1, Math.min(99, Number(input.lvl) || 1));
-      const save = sanitizeSave(input.save, lvl);
-      // "Personagem ja rastreado" (teve progresso real nalgum PUT ou credito
-      // anterior): trava lvl/xp/quest/contadores-de-missao no que o servidor
-      // ja tem, nunca aceita do que o cliente manda daqui pra frente -- daqui
-      // em diante so avancam pelos dois caminhos validados (handleQuest,
-      // creditKillReward), nunca pelo PUT generico. So o PRIMEIRO PUT com
-      // progresso real (personagem recem-criado, save ainda vazio -- inclusive
-      // promover um personagem local antigo pra nuvem pela 1a vez) continua
-      // confiando no que o cliente manda, como sempre foi.
-      //
-      // Ouro/gema NAO entram nessa trava, de proposito: loot de masmorra
-      // (fora do escopo do roster -- mazeGen nao e deterministico) ainda
-      // credita ouro/gema local mesmo com conta online (dropLoot/dropExtra
-      // so sao suprimidos pra abate de MAPA DE CAMPO, s.dun continua
-      // gerando item de chao normalmente). Travar ouro/gema aqui quebraria a
-      // sincronizacao desse ganho legitimo de masmorra pra nuvem.
-      if (current) {
-        const currentSave = sanitizeSave(current.save, current.lvl);
-        const isTracked = current.lvl > 1 || currentSave.quest > 0 || currentSave.xp > 0;
-        if (isTracked) {
+      const result = await withCharLock(id, async () => {
+        const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}&limit=1`});
+        const current = rows0[0];
+        let lvl = Math.max(1, Math.min(99, Number(input.lvl) || 1));
+        const save = sanitizeSave(input.save, lvl);
+        // Fase 5.2: se o personagem ja existe no banco, o PUT generico deixa
+        // de ser fonte de verdade pra QUALQUER campo com valor real --
+        // nivel/xp/missao/contadores, itens (uid) e agora tambem ouro/gema/
+        // consumiveis/chaves/portais/baus (ECONOMY_LOCK_FIELDS). Tudo isso so
+        // muda pelos caminhos validados (handleShop/handleChest/handleQuest/
+        // creditKillReward/dungeon). Sem excecao pro "primeiro PUT": o
+        // personagem ja nasce com o save inicial completo gravado no POST
+        // (ver startingSave()), entao nao ha mais "save vazio" que precise
+        // confiar no cliente pra nascer com ouro/item. Isso tambem fecha,
+        // de proposito, a promocao de personagem local antigo pra nuvem
+        // (import de progresso local): o PUT que o fluxo de importacao
+        // ainda dispara continua funcionando sem erro, mas so nome/classe
+        // pegam -- ouro/itens/nivel locais nunca mais sao aceitos por essa
+        // via. Documentado como decisao consciente (nao um recurso quebrado
+        // por acidente), ver LEIA-PRIMEIRO.md "Fase 5.2".
+        if (current) {
+          const currentSave = sanitizeSave(current.save, current.lvl);
           lvl = current.lvl; save.lvl = lvl; save.xp = currentSave.xp; save.quest = currentSave.quest;
           for (const f of QUEST_GATE_FIELDS) save[f] = currentSave[f];
+          for (const f of ECONOMY_LOCK_FIELDS) save[f] = currentSave[f];
           const locked = lockOwnedItems(save, currentSave);
           save.bag = locked.bag; save.eq = locked.eq;
         }
-      }
-      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}`, body:{lvl, map: save.map, save}, prefer:'return=representation'});
-      if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
-      json(res,200,{character: rows[0]}); return true;
+        const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}`, body:{lvl, map: save.map, save}, prefer:'return=representation'});
+        if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
+        return {status:200, body:{character: rows[0]}};
+      });
+      json(res, result.status, result.body); return true;
     }
 
     if (idMatch && req.method === 'DELETE') {
@@ -847,6 +970,18 @@ async function handleShop(req, res, pathname) {
         else if (save.gunlock[dest]) error = 'Já liberado';
         else if (save.gold < price) error = 'Moedas insuficientes';
         else { save.gold -= price; save.gunlock[dest] = true; }
+      } else if (action === 'use_item') {
+        // Fase 5.2, Parte 4: consumir pv/pa/ap/scr vira intencao server-side
+        // pra personagem online -- o PUT generico nao aceita mais decremento
+        // direto (pv/pa/ap/scr estao em ECONOMY_LOCK_FIELDS). O efeito em si
+        // (curar HP/MP, teleportar pra vila) continua calculado no cliente
+        // (mesma limitacao ja documentada pro HP do jogador, ver Fase 5.2 em
+        // LEIA-PRIMEIRO.md) -- aqui so garante que a CONTAGEM do item nunca
+        // fica negativa nem "usa" um item que nao existe.
+        const key = String(input.key || '');
+        if (!['pv', 'pa', 'ap', 'scr'].includes(key)) error = 'Item inválido';
+        else if ((save[key] || 0) < 1) error = 'Você não tem esse item';
+        else save[key] -= 1;
       } else {
         error = 'Ação inválida';
       }
@@ -948,28 +1083,59 @@ async function handleChest(req, res, pathname) {
 async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, questInfo) {
   if (!p.charId || !p.userId) return;
   try {
-    const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
-    const row = rows0[0]; if (!row) return;
-    let lvl = row.lvl;
-    const save = sanitizeSave(row.save, lvl);
-    const leveled = applyXpGain(save, lvl, xpGain);
-    save.xp = leveled.xp; lvl = leveled.lvl; save.lvl = lvl;
-    for (const f of fields) save[f] = Math.min(999, (save[f] || 0) + 1);
-    const pushed = {};
-    if (loot) {
-      save.gold = Math.min(500000, save.gold + loot.gold);
-      save.gem = Math.min(5000, save.gem + loot.gem);
-      save.pv = Math.min(999, save.pv + loot.pv);
-      save.ap = Math.min(999, save.ap + loot.ap);
-      save.scr = Math.min(999, save.scr + loot.scr);
-      Object.assign(pushed, { gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr });
-    }
-    if (bossChestField && !save[bossChestField]) { save.key = Math.min(999, (save.key || 0) + 1); pushed.key = save.key; }
-    if (questInfo) Object.assign(pushed, advanceQuestOnKill(save, questInfo.type, questInfo.boss, questInfo.lvl));
-    await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
-    send(ws, {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)});
+    await withCharLock(p.charId, async () => {
+      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
+      const row = rows0[0]; if (!row) return;
+      let lvl = row.lvl;
+      const save = sanitizeSave(row.save, lvl);
+      const leveled = applyXpGain(save, lvl, xpGain);
+      save.xp = leveled.xp; lvl = leveled.lvl; save.lvl = lvl;
+      for (const f of fields) save[f] = Math.min(999, (save[f] || 0) + 1);
+      const pushed = {};
+      if (loot) {
+        save.gold = Math.min(500000, save.gold + loot.gold);
+        save.gem = Math.min(5000, save.gem + loot.gem);
+        save.pv = Math.min(999, save.pv + loot.pv);
+        save.ap = Math.min(999, save.ap + loot.ap);
+        save.scr = Math.min(999, save.scr + loot.scr);
+        Object.assign(pushed, { gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr });
+      }
+      if (bossChestField && !save[bossChestField]) { save.key = Math.min(999, (save.key || 0) + 1); pushed.key = save.key; }
+      if (questInfo) Object.assign(pushed, advanceQuestOnKill(save, questInfo.type, questInfo.boss, questInfo.lvl));
+      await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
+      send(ws, {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)});
+    });
   } catch (err) {
     console.error('kill_reward_error', err.message, err.status || '', err.detail || '');
+  }
+}
+// Fase 5.2: recompensa de mob/chefe de MASMORRA -- mesmo padrao de leitura-
+// altera-grava serializado por personagem, mas separado de
+// creditKillReward porque a masmorra (diferente de mapa de campo) concede
+// EQUIPAMENTO direto (grantItem) e nunca concede XP (preserva o
+// comportamento real de killMob(s.dun) no cliente hoje: só ouro/gema/
+// poção/itens, nunca gainXp -- não é uma omissão desta fase, é assim que o
+// jogo já funciona). Manda bag/eq inteiros de volta (não só um delta) pro
+// cliente poder aplicar igual a applyShopResult.
+async function creditDungeonReward(ws, p, { gold = 0, gem = 0, pv = 0, ap = 0, scr = 0, items = [] } = {}) {
+  if (!p.charId || !p.userId) return;
+  try {
+    await withCharLock(p.charId, async () => {
+      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
+      const row = rows0[0]; if (!row) return;
+      const lvl = row.lvl;
+      const save = sanitizeSave(row.save, lvl);
+      save.gold = Math.min(500000, save.gold + gold);
+      save.gem = Math.min(5000, save.gem + gem);
+      save.pv = Math.min(999, save.pv + pv);
+      save.ap = Math.min(999, save.ap + ap);
+      save.scr = Math.min(999, save.scr + scr);
+      for (const item of items) grantItem(save, lvl, item);
+      await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{save}, prefer:'return=minimal'});
+      send(ws, {type:'dungeon_reward', gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr, bag: save.bag, eq: save.eq});
+    });
+  } catch (err) {
+    console.error('dungeon_reward_error', err.message, err.status || '', err.detail || '');
   }
 }
 
@@ -1105,6 +1271,87 @@ function mapState(id) {
   return state;
 }
 
+// ===== Fase 5.2: instancia de masmorra server-side =====
+// Timeout de limpeza: 30min sem nenhum jogador presente OU 2h de vida
+// total, o que vier primeiro (ver dungeonCleanupTick). Numeros escolhidos
+// pra sobrar folga de reconexao (queda de internet, F5 sem querer) sem
+// deixar instancia abandonada consumindo memoria indefinidamente.
+const DUNGEON_IDLE_MS = 30 * 60 * 1000, DUNGEON_MAX_LIFE_MS = 2 * 60 * 60 * 1000;
+// Cria uma instancia NOVA e isolada (mapa proprio, so o dono ve) -- hoje a
+// masmorra e solo (nenhum fluxo real de party dentro dela existia antes
+// desta fase, so o roster global compartilhado por engano, ver
+// LEIA-PRIMEIRO.md), entao so o personagem que entrou fica em `members`.
+// O campo existe assim (Set, nao um unico id) de proposito pra nao
+// precisar mudar a forma de novo quando a masmorra em grupo for
+// implementada numa fase futura.
+function createDungeonInstance(zone, ownerCharId, ownerUserId) {
+  const cfg = DUNGEON_CFG[zone];
+  if (!cfg) return null;
+  const seed = crypto.randomInt(1, 2147483647); // servidor escolhe -- cliente nunca influencia o layout/loot
+  const layout = DUNGEON_GEN.dungeonLayout(seed);
+  const instanceId = crypto.randomBytes(4).toString('hex');
+  const mapId = zone + '_d#' + instanceId;
+  const state = mapState(mapId);
+  Object.assign(state, {
+    isDungeon: true, zone, seed, layout, ownerCharId, ownerUserId,
+    members: new Set([ownerCharId]), bossDefeated: false, bossId: null,
+    createdAt: Date.now(), lastActiveAt: Date.now(),
+  });
+  const rnd = DUNGEON_GEN.mulberry(seed + 1); // stream de RNG proprio do roster, independente da forma do labirinto
+  const { mz, ox, oy, cols, rows } = layout;
+  let idx = 0;
+  for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
+    if ((cx === mz.sx && cy === mz.sy) || (cx === mz.bx && cy === mz.by)) continue;
+    if (rnd() >= .72) continue;
+    const n = 1 + (rnd() < .4 ? 1 : 0);
+    const center = DUNGEON_GEN.cellCenter(cx, cy, ox, oy);
+    for (let k = 0; k < n; k++) {
+      const pick = cfg.trash(rnd);
+      const stats = mobStats(pick.type, pick.lvl, false, pick.k);
+      if (!stats) continue;
+      const jx = center.x + (rnd() - .5) * 70, jy = center.y + (rnd() - .5) * 70;
+      const id = mapId + ':' + (idx++);
+      state.mobs.set(id, {id,maxhp:stats.hp,hp:stats.hp,dead:false,x:jx,y:jy,sx:jx,sy:jy,state:'idle',respawnAt:0,boss:false,type:pick.type,lvl:pick.lvl,k:pick.k,dun:true,wallRects:layout.rects});
+    }
+  }
+  const bp = cfg.boss, bstats = mobStats(bp.type, bp.lvl, true, bp.k), bossHp = bstats ? Math.round(bstats.hp * 3) : 1000;
+  const bossId = mapId + ':boss', bc = layout.boss;
+  state.mobs.set(bossId, {id:bossId,maxhp:bossHp,hp:bossHp,dead:false,x:bc.x,y:bc.y,sx:bc.x,sy:bc.y,state:'idle',respawnAt:0,boss:true,type:bp.type,lvl:bp.lvl,k:bp.k,dun:true,wallRects:layout.rects});
+  state.bossId = bossId;
+  return state;
+}
+// Instancias que o personagem (charId) ja possui, por zona -- pra
+// reconexao/revisita reusar a MESMA instancia (mob morto continua morto)
+// em vez de gerar uma nova toda hora que o WS cai e volta.
+const dungeonByOwner = new Map(); // charId -> Map<zone, mapId>
+function ownedDungeonInstance(charId, zone) {
+  const mapId = dungeonByOwner.get(charId)?.get(zone);
+  if (!mapId) return null;
+  const state = maps.get(mapId);
+  return state && state.isDungeon ? state : null;
+}
+function rememberDungeonInstance(charId, zone, mapId) {
+  if (!dungeonByOwner.has(charId)) dungeonByOwner.set(charId, new Map());
+  dungeonByOwner.get(charId).set(zone, mapId);
+}
+// Remove instancias sem ninguem presente ha muito tempo, ou velhas demais
+// mesmo com gente dentro (nao deixa uma instancia viver pra sempre so
+// porque alguem ficou parado la). Roda junto do resto da limpeza
+// periodica do servidor (ver setInterval no fim do arquivo).
+function dungeonCleanupTick() {
+  const now = Date.now();
+  for (const [mapId, state] of maps) {
+    if (!state.isDungeon) continue;
+    const present = playersOnMap(mapId).length;
+    if (present > 0) { state.lastActiveAt = now; continue; }
+    const idleFor = now - state.lastActiveAt, ageFor = now - state.createdAt;
+    if (idleFor > DUNGEON_IDLE_MS || ageFor > DUNGEON_MAX_LIFE_MS) {
+      maps.delete(mapId);
+      const owned = dungeonByOwner.get(state.ownerCharId);
+      if (owned && owned.get(state.zone) === mapId) owned.delete(state.zone);
+    }
+  }
+}
 
 function publicPlayer(player) {
   return {id:player.id,name:player.name,cls:player.cls,map:player.map,x:player.x,y:player.y,dir:player.dir,moving:player.moving,lvl:player.lvl,atkT:player.atkT||0,atkAng:player.atkAng||0};
@@ -1130,38 +1377,143 @@ const server = http.createServer(async (req, res) => {
 });
 
 const wss = new WebSocketServer({ server, path: '/game' });
+// Busca o personagem real (cls/lvl) direto no Supabase pra autenticar o
+// 'join' do WebSocket (Fase 5.2) -- so retorna linha se o charId realmente
+// pertence ao userId ja autenticado por token (mesmo filtro id+user_id que
+// handleCharacters usa). Nunca confia em cls/lvl que o cliente reivindica.
+async function resolveCharacterForWs(userId, charId) {
+  if (!userId || !charId) return null;
+  try {
+    const rows = await supabase('characters', {query:`?select=id,cls,lvl&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
+    return rows[0] || null;
+  } catch { return null; }
+}
+// Conexoes com um 'join' em andamento (aguardando resolveUserByToken/
+// resolveCharacterForWs) -- evita que duas mensagens 'join' na mesma
+// conexao (antes da primeira terminar) disparem autenticacao concorrente
+// e criem dois `p` diferentes pro mesmo socket.
+const joining = new Set();
+// Autentica o 'join': com token de sessao valido, userId vem do banco
+// (nunca do que o cliente manda); com token+charId validos E o charId
+// pertencendo de fato aquele userId, cls/lvl tambem vem do banco --
+// fecha a brecha historica de userId/charId/cls/lvl serem "autoridade
+// do cliente" (Fase 5.2, Parte 1). Sem token (visita anonima/offline),
+// mantem o comportamento de sempre: presenca multiplayer efemera, sem
+// nenhuma operacao economica possivel (todas exigem p.userId+p.charId
+// reais, ver creditKillReward/handleShop/etc).
+async function handleWsJoin(ws, msg) {
+  if (clients.get(ws) || joining.has(ws)) return;
+  joining.add(ws);
+  try {
+    const token = typeof msg.token === 'string' ? msg.token.slice(0, 512) : '';
+    let userId = null, charRow = null;
+    if (token) {
+      // Supabase fora do ar/nao configurado nunca pode derrubar a conexao
+      // WS inteira -- degrada pra visita anonima (mesmo comportamento de
+      // "sem token"), do mesmo jeito que o resto do jogo ja faz sem conta
+      // online configurada.
+      try {
+        const user = await resolveUserByToken(token);
+        if (user) {
+          userId = user.id;
+          const claimedCharId = typeof msg.charId === 'string' && /^[0-9a-fA-F-]{8,36}$/.test(msg.charId) ? msg.charId : null;
+          if (claimedCharId) charRow = await resolveCharacterForWs(userId, claimedCharId);
+        }
+      } catch (err) { console.error('ws_join_auth_error', err.message); userId = null; charRow = null; }
+    }
+    if (clients.get(ws)) return; // ja tratado por outra mensagem enquanto este join aguardava o Supabase
+    const p = {
+      id: crypto.randomUUID(), userId, charId: charRow ? charRow.id : null,
+      name: cleanText(msg.name, 14) || 'Herói',
+      cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : (ALLOWED_CLASS.has(msg.cls) ? msg.cls : 'guerreiro'),
+      lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : Math.max(1, Math.min(99, Number(msg.lvl) || 1)),
+      authed: !!charRow, map: 'vila', x: 720, y: 1258, dir: 0, moving: false, atkT: 0, atkAng: 0,
+    };
+    clients.set(ws, p);
+    if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
+    send(ws, {type:'welcome', id:p.id, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
+    broadcast({type:'player_join', player:publicPlayer(p)}, ws);
+  } finally { joining.delete(ws); }
+}
+// Mesmo limiar de desbloqueio de PORTAL_DESTS[].ok() no cliente
+// (P.quest>=N || P.gunlock[zona]) -- espelhado aqui pra validar a entrada
+// na masmorra no servidor, nunca so pelo botao do cliente estar habilitado.
+const DUNGEON_UNLOCK_QUEST = { floresta: 3, cripta: 7, serra: 11, pantano: 15, torre: 19, ilhas: 23, vulcao: 27 };
+// Fase 5.2, Parte "MAPA/ENTRADA/SAIDA": entrada em masmorra agora e um
+// pedido explicito ao servidor, nunca so o cliente chamando travel('X_d')
+// local. Valida sessao (p.authed), confere o requisito real (quest OU
+// portal comprado, lido do banco -- nunca do que o cliente reivindica) e
+// so entao cria/reusa a instancia e muda p.map pra ela.
+async function handleDungeonEnter(ws, p, msg) {
+  const zone = cleanText(msg.zone, 16);
+  const cfg = DUNGEON_CFG[zone];
+  if (!cfg) { send(ws, {type:'dungeon_error', error:'Masmorra inválida'}); return; }
+  if (!p.authed || !p.userId || !p.charId) { send(ws, {type:'dungeon_error', error:'Entre com uma conta online para acessar masmorras'}); return; }
+  try {
+    const rows = await supabase('characters', {query:`?select=save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
+    const row = rows[0];
+    if (!row) { send(ws, {type:'dungeon_error', error:'Personagem não encontrado'}); return; }
+    const save = sanitizeSave(row.save, p.lvl);
+    const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
+    if (!unlocked) { send(ws, {type:'dungeon_error', error:'Região ainda não liberada'}); return; }
+    let state = ownedDungeonInstance(p.charId, zone);
+    if (!state) {
+      state = createDungeonInstance(zone, p.charId, p.userId);
+      rememberDungeonInstance(p.charId, zone, state.id);
+    }
+    state.lastActiveAt = Date.now();
+    p.map = state.id;
+    const roster = [...state.mobs.values()].map(m => ({id:m.id, type:m.type, lvl:m.lvl, k:m.k, boss:!!m.boss, x:Math.round(m.x), y:Math.round(m.y), maxhp:m.maxhp, hp:m.hp, dead:!!m.dead}));
+    send(ws, {type:'dungeon_state', map:state.id, zone, seed:state.seed, start:state.layout.start, roster, bossDefeated:state.bossDefeated});
+  } catch (err) {
+    console.error('dungeon_enter_error', err.message, err.status || '', err.detail || '');
+    send(ws, {type:'dungeon_error', error:'Não foi possível entrar na masmorra. Tente novamente.'});
+  }
+}
 wss.on('connection', ws => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
-  ws.on('message', raw => {
+  ws.on('message', async raw => {
     if (raw.length > 65536) return ws.close(1009, 'Mensagem grande demais');
     let msg; try { msg = JSON.parse(raw); } catch { return; }
     let p = clients.get(ws);
-    if (msg.type === 'join' && !p) {
-      const userId = typeof msg.userId === 'string' && /^[0-9a-f-]{36}$/i.test(msg.userId) ? msg.userId : null;
-      const charId = typeof msg.charId === 'string' && /^[0-9a-fA-F-]{8,36}$/.test(msg.charId) ? msg.charId : null;
-      p = {id:crypto.randomUUID(),userId,charId,name:cleanText(msg.name,14)||'Herói',cls:ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',map:'vila',x:720,y:1258,dir:0,moving:false,lvl:Math.max(1,Math.min(99,Number(msg.lvl)||1)),atkT:0,atkAng:0};
-      clients.set(ws,p);
-      if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
-      send(ws,{type:'welcome',id:p.id,players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
-      broadcast({type:'player_join',player:publicPlayer(p)},ws);
-      return;
-    }
+    if (msg.type === 'join' && !p) { await handleWsJoin(ws, msg); return; }
     if (!p) return;
     if (msg.type === 'state') {
       const map = cleanText(msg.map,24);
       if (!ALLOWED_MAP.test(map)) return;
+      // Instancia de masmorra (`_d#id`): so pode "continuar" na que o
+      // proprio dungeon_enter ja colocou o personagem (p.map) -- nunca
+      // trocar pra outra instancia, nem pra `_d` sem instancia, so
+      // reportando a posicao. Isso fecha a brecha de mandar
+      // map:"vulcao_d" (ou a instancia de outro personagem) direto por
+      // uma mensagem 'state' sem passar pela validacao de requisito em
+      // handleDungeonEnter.
+      if (DUNGEON_MAP_RE.test(map) && map !== p.map) return;
       const x = Number(msg.x), y = Number(msg.y);
       if (!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>2880||y>2112) return;
       const atkT=Math.max(0,Math.min(.4,Number(msg.atkT)||0)),atkAng=Number(msg.atkAng)||0;
-      Object.assign(p,{map,x,y,dir:Math.max(0,Math.min(3,Number(msg.dir)|0)),moving:!!msg.moving,lvl:Math.max(1,Math.min(99,Number(msg.lvl)||1)),atkT,atkAng:Math.max(-Math.PI*2,Math.min(Math.PI*2,atkAng))});
+      // Personagem autenticado (charId real, ver handleWsJoin): nivel so
+      // muda pelo que o proprio servidor ja sabe (kill_reward/quest/PUT),
+      // nunca pelo que essa mensagem periodica reivindica -- sem isso um
+      // cliente adulterado podia inflar p.lvl e, por tabela, o dano
+      // calculado em resolveAttackDamage (baseDmgOf usa p.lvl).
+      const lvl = p.authed ? p.lvl : Math.max(1,Math.min(99,Number(msg.lvl)||1));
+      Object.assign(p,{map,x,y,dir:Math.max(0,Math.min(3,Number(msg.dir)|0)),moving:!!msg.moving,lvl,atkT,atkAng:Math.max(-Math.PI*2,Math.min(Math.PI*2,atkAng))});
       broadcast({type:'state',player:publicPlayer(p)},ws);
+    } else if (msg.type === 'dungeon_enter') {
+      await handleDungeonEnter(ws, p, msg);
     } else if (msg.type === 'map_join') {
       const map=cleanText(msg.map,24);if(!ALLOWED_MAP.test(map)||map!==p.map)return;
       const state=mapState(map),defs=Array.isArray(msg.mobs)?msg.mobs.slice(0,120):[];
-      const isDungeon=map.endsWith('_d'),baseMap=map.replace(/_d$/,''),manifest=MOB_MANIFEST[baseMap];
-      if(!state.mobs.size){
-        if(!isDungeon&&manifest){
+      const manifest=MOB_MANIFEST[map];
+      // Masmorra (state.isDungeon): roster ja foi gerado inteiro pelo
+      // servidor em handleDungeonEnter/createDungeonInstance no momento da
+      // entrada -- nunca aceita nada de `defs` aqui, so devolve o que ja
+      // existe (map_join de masmorra so serve pra reconciliar apos
+      // reconexao).
+      if(!state.mobs.size&&!state.isDungeon){
+        if(manifest){
           // roster autoritativo: tipo/nivel/contagem vem do manifesto real
           // do mapa (espelha os packs literais de buildFloresta/buildCripta/...
           // em index.html), nunca do que o cliente reivindica -- so id/x/y
@@ -1177,7 +1529,7 @@ wss.on('connection', ws => {
             const ex=Number(d.x)||0,ey=Number(d.y)||0;
             state.mobs.set(id,{id,maxhp,hp:maxhp,dead:!!entry.temp,x:ex,y:ey,sx:ex,sy:ey,state:'idle',respawnAt:0,boss:!!entry.boss,type:entry.type,lvl:entry.lvl,k:entry.k,temp:!!entry.temp});
           });
-        } else if(!isDungeon&&baseMap==='vila'){
+        } else if(map==='vila'){
           // vila (slime): sem array literal pra espelhar sem portar o
           // tilemap inteiro (posicao/nivel vem de amostragem por rejeicao
           // contra blocked()) -- valida so contagem (<=15) e nivel (1..3),
@@ -1190,15 +1542,6 @@ wss.on('connection', ws => {
             if(!stats)continue;
             const sx=Number(d.x)||0,sy=Number(d.y)||0;
             state.mobs.set(id,{id,maxhp:stats.hp,hp:stats.hp,dead:false,x:sx,y:sy,sx,sy,state:'idle',respawnAt:0,boss:false,type:'slime',lvl});
-          }
-        } else {
-          // masmorra (_d): layout aleatorio por instancia (mazeGen + trash
-          // com Math.random()), sem roster fixo pra validar contra -- fica
-          // como estava antes (confia no que o cliente relata), fora do
-          // escopo desta fase (documentado em LEIA-PRIMEIRO.md).
-          for(const d of defs){
-            const id=cleanText(d.id,48),maxhp=Math.max(1,Math.min(1000000,Number(d.maxhp)||1));if(!id)continue;
-            state.mobs.set(id,{id,maxhp,hp:maxhp,dead:false,x:Number(d.x)||0,y:Number(d.y)||0,state:'idle',respawnAt:0,boss:!!d.boss});
           }
         }
       }
@@ -1236,8 +1579,24 @@ wss.on('connection', ws => {
       state.hitGuard.set(mobId,{playerId:p.id,at:now});
       mob.hp=Math.max(0,mob.hp-dmg);
       if(mob.hp<=0){
-        mob.dead=true;mob.respawnAt=Date.now()+(mob.boss?60000:30000);
-        if(mob.type){
+        mob.dead=true;
+        // Mob de masmorra nunca respawna dentro da instancia (mesmo
+        // comportamento de s.respawn=1e9 no cliente) -- so os de mapa de
+        // campo usam o setInterval de respawn (respawnAt truthy).
+        mob.respawnAt=state.isDungeon?0:Date.now()+(mob.boss?60000:30000);
+        if(state.isDungeon){
+          // Masmorra: nunca concede XP (preserva o comportamento real de
+          // killMob(s.dun) hoje -- só ouro/gema/poção/item), chefe só
+          // recompensa uma vez (mob.dead sincrono antes de qualquer await
+          // ja evita reentrancia pro MESMO mob; state.bossDefeated é uma
+          // segunda trava explicita, mais facil de auditar/testar).
+          if(mob.boss&&!state.bossDefeated){
+            state.bossDefeated=true;
+            creditDungeonReward(ws,p,rollDungeonBossLoot(p.cls));
+          }else if(!mob.boss){
+            creditDungeonReward(ws,p,rollDungeonTrashLoot(mob.lvl,p.cls));
+          }
+        }else if(mob.type){
           const stats=mobStats(mob.type,mob.lvl,mob.boss,mob.k);
           if(stats){
             const xpGain=mob.temp?Math.round(stats.xp*.5):stats.xp;
@@ -1293,6 +1652,7 @@ wss.on('connection', ws => {
 setInterval(()=>{
   const now=Date.now();
   for(const state of maps.values())for(const mob of state.mobs.values())if(mob.dead&&mob.respawnAt&&now>=mob.respawnAt){mob.dead=false;mob.hp=mob.maxhp;mob.respawnAt=0;mob.x=Number.isFinite(mob.sx)?mob.sx:(Number(mob.x)||0);mob.y=Number.isFinite(mob.sy)?mob.sy:(Number(mob.y)||0);mob.state='idle';mob.tgt=null;mob.cd=0;mob.ret=0;mob.t=0;mob.hit=false;broadcastMap(state.id,{type:'mob_state',map:state.id,mob,killerId:null})}
+  dungeonCleanupTick();
 },1000).unref();
 
 // ===== Fase 2 (unidade 1): IA de slime no servidor =====
@@ -1320,16 +1680,35 @@ function targetPlayer(mob, present) {
   if (target && mob.state === 'chase') mob.tgt = target[1].id;
   return target;
 }
-const MOB_WORLD_W = 2880, MOB_WORLD_H = 2112, MOB_MAX_STEP = 32;
+const MOB_WORLD_W = 2880, MOB_WORLD_H = 2112, MOB_MAX_STEP = 32, MOB_HALF_W = 14, MOB_HALF_H = 10;
+// So usado por mob de masmorra (mob.wallRects, atribuido na criacao da
+// instancia -- ver createDungeonInstance): AABB contra as paredes reais do
+// labirinto (mesma geometria que o cliente desenha, derivada do mesmo
+// seed via dungeonLayout). Mob de mapa de campo nunca tem wallRects, entao
+// o comportamento de sempre (sem colisao de terreno, limitação já
+// documentada) continua intacto.
+function rectsBlock(rects, x, y, hw, hh) {
+  for (const r of rects) if (x - hw < r.x + r.w && x + hw > r.x && y - hh < r.y + r.h && y + hh > r.y) return true;
+  return false;
+}
 function moveMob(mob, dx, dy) {
   dx = Number(dx); dy = Number(dy);
   if (!Number.isFinite(mob.x) || !Number.isFinite(mob.y) || !Number.isFinite(dx) || !Number.isFinite(dy)) return false;
   const len = Math.hypot(dx, dy), scale = len > MOB_MAX_STEP ? MOB_MAX_STEP / len : 1;
   dx *= scale; dy *= scale;
-  // Camada minima server-side: limites do mundo e aplicacao separada por eixo.
-  // A geometria de paredes ainda vive no cliente e sera compartilhada numa fase propria.
+  // Camada minima server-side pra mapa de campo: limites do mundo e
+  // aplicacao separada por eixo. A geometria de paredes de mapa de campo
+  // ainda vive so no cliente (fora do escopo desta fase, ver
+  // LEIA-PRIMEIRO.md) -- so masmorra (mob.wallRects) tem colisao real.
   const nx = Math.max(0, Math.min(MOB_WORLD_W, mob.x + dx));
   const ny = Math.max(0, Math.min(MOB_WORLD_H, mob.y + dy));
+  if (mob.wallRects) {
+    if (!rectsBlock(mob.wallRects, nx, ny, MOB_HALF_W, MOB_HALF_H)) { mob.x = nx; mob.y = ny; return true; }
+    // desliza pelos eixos separadamente em vez de travar total contra a parede
+    if (!rectsBlock(mob.wallRects, nx, mob.y, MOB_HALF_W, MOB_HALF_H)) mob.x = nx;
+    if (!rectsBlock(mob.wallRects, mob.x, ny, MOB_HALF_W, MOB_HALF_H)) mob.y = ny;
+    return true;
+  }
   mob.x = nx; mob.y = ny;
   return true;
 }
@@ -1984,7 +2363,6 @@ function tickMobAI() {
   mobAiLastTick = now;
   const slices = Math.max(1, Math.ceil(elapsed / .05)), dt = elapsed / slices;
   for (const state of maps.values()) {
-    if (state.id.endsWith('_d')) continue;
     const present = playersOnMap(state.id);
     if (!present.length) continue;
     const moved = [];
@@ -2024,4 +2402,10 @@ if (require.main === module) {
 // Exportado so pra teste unitario puro (sem HTTP/Supabase) das funcoes de
 // item/posse da Fase 5.1 -- nao muda nada em como `node server.js` roda
 // (continua chamando server.listen normalmente via o guard acima).
-module.exports = { sanitizeItem, sanitizeSave, lockOwnedItems, createGear, dedupeByUid, typeSlot, CLASS_ITEM_TYPES, EQ_SLOTS, GEAR_DATA };
+module.exports = {
+  sanitizeItem, sanitizeSave, lockOwnedItems, createGear, dedupeByUid, typeSlot, CLASS_ITEM_TYPES, EQ_SLOTS, GEAR_DATA,
+  // Fase 5.2 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
+  startingSave, ECONOMY_LOCK_FIELDS, createDungeonInstance, dungeonCleanupTick,
+  moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
+  pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
+};

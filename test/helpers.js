@@ -78,4 +78,24 @@ async function joinWs(srv, over) {
   return conn;
 }
 
-module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep };
+// Escreve DIRETO na tabela `characters` do Supabase de TESTE (mesmas
+// SUPABASE_URL/SUPABASE_SECRET_KEY ja herdadas pelo processo filho em
+// startServer -- nunca o Supabase oficial de producao, ver hasSupabase()).
+// So serve pra montar estado de setup que nao tem mais nenhuma rota
+// client-facing legitima pra forjar (ex.: quest/gunlock, travados desde a
+// Fase 5.2 no PUT generico) -- os TESTES em si continuam validando os
+// fluxos reais (dungeon_enter, mob_damage, shop) sem bypass nenhum.
+async function adminPatchCharacter(id, patch) {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const r = await fetch(`${url}/rest/v1/characters?id=eq.${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { apikey: key, Authorization: `Bearer ${key}`, 'content-type': 'application/json', prefer: 'return=representation' },
+    body: JSON.stringify(patch),
+  });
+  const rows = await r.json();
+  if (!r.ok) throw new Error('adminPatchCharacter falhou: ' + JSON.stringify(rows));
+  return rows[0];
+}
+
+module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter };

@@ -376,3 +376,129 @@ Migração acontece **na leitura**, sem migration de banco (não precisa — o i
 ## Próxima fase
 
 Fase 5.2 (dungeon + inventário/economia completamente server-authoritative) é a sugestão natural do roadmap, mas fica pra quando for solicitada — esta fase não deve avançar sozinha pra Enchant, World Boss ou TvT sem essa fundação ser usada em produção primeiro.
+
+# FASE 5.2 — DUNGEON E ECONOMIA SERVER-AUTHORITATIVE
+
+**Motivação:** a Fase 5.1 fechou posse de item no PUT genérico, mas deixou três brechas abertas: (1) o `join` do WebSocket confiava cegamente em `userId`/`charId`/`cls`/`lvl` que o próprio cliente mandava; (2) o PUT genérico só travava `bag`/`eq`, mas `gold`/`gem`/`pv`/`pa`/`ap`/`key`/`scr`/`gunlock`/baús de chefe continuavam aceitando qualquer valor vindo do cliente (e um personagem novo/"primeiro PUT" tinha uma exceção histórica que confiava ainda mais no cliente); (3) mapas `*_d` (masmorra) eram explicitamente excluídos da IA/roster/colisão autoritativos do servidor — o labirinto, os monstros e o loot da masmorra eram gerados e resolvidos 100% no cliente. Esta fase fecha as três.
+
+## Autenticação do WebSocket
+
+`resolveUser(req)` foi dividido em `resolveUserByToken(token)` (puro, sem depender de um `req` HTTP) + `resolveUser(req)`, pra poder reautenticar o mesmo jeito dentro do WS. `join` agora manda `token` (o mesmo token de sessão HTTP) + `charId` opcional. `handleWsJoin`: sem token → visita anônima (mesmo comportamento de sempre, sem nenhuma operação econômica possível). Com token válido → `userId` vem do banco. Com token válido **e** `charId` que realmente pertence àquele `userId` (mesmo filtro `id=eq&user_id=eq` que as rotas REST usam) → `p.cls`/`p.lvl` vêm do personagem real no banco, nunca do que a mensagem `join` reivindica; `p.authed=true` passa a liberar `dungeon_enter` e qualquer operação futura que exija sessão real. `userId` nunca é um campo que o cliente controla — só existe depois de resolvido pelo token. Erro de Supabase durante a resolução (fora do ar, não configurado) nunca derruba a conexão: degrada pra visita anônima, mesmo padrão usado no resto do jogo sem conta online configurada. Reconexão sempre passa de novo por `handleWsJoin` (não existe estado de auth reaproveitado de uma conexão anterior) — cada `join` reautentica do zero.
+
+`state` (posição periódica): personagem autenticado tem `lvl` travado no valor que o próprio servidor já conhece (nunca no que a mensagem `state` reivindica) — fecha a brecha de inflar `p.lvl` pra aumentar dano calculado (`baseDmgOf` usa `p.lvl`). Também bloqueia trocar pra uma instância de masmorra (`_d#id`) diferente da que o próprio `dungeon_enter` colocou o personagem (`p.map`), fechando a brecha de mandar `map:"vulcao_d"` direto numa mensagem `state`.
+
+## Campos bloqueados no PUT genérico (`ECONOMY_LOCK_FIELDS`)
+
+```
+gold, gem, pv, pa, ap, key, scr, gunlock, chest, chest2, chest3, chest4, chest5, chest6, chest7
+```
+
+Sempre que o personagem já existe no banco, o PUT devolve esses 15 campos pro valor **persistido** (`currentSave`), descartando qualquer valor do payload — igual já acontecia com `bag`/`eq` (`lockOwnedItems`) e `QUEST_GATE_FIELDS`/`quest`/`xp` desde a Fase 5.1. **A exceção histórica do "primeiro PUT"/personagem não rastreado (`isTracked`) foi removida por completo.** Antes, um personagem sem progresso real no banco podia ter seu primeiro PUT aceito quase integralmente (mecanismo pensado pra promover personagem local antigo pra nuvem) — incompatível com economia autoritativa, porque um personagem "novo" na nuvem podia nascer com `gold:500000`/equipamento Lendário só mandando isso no primeiro PUT. Isso deixou de ser necessário porque `POST /api/characters` agora sempre grava `save:startingSave(cls,name)` — um save inicial **completo e real** (`gold:10, pv:3, pa:2, gem:0`, arma Nv1 básica da classe já equipada, `gunlock:{}`, `bag:[]`) — não existe mais "save vazio" que precise confiar no cliente pra nascer com algo. O PUT de importação de personagem local antigo continua funcionando sem erro (não quebra o fluxo existente), mas só `name`/`cls` sobrevivem — ouro/itens/nível/progresso local **nunca mais** são aceitos por essa via. Se import de personagem local legítimo for necessário no futuro, precisa de uma estratégia própria (migração administrativa/one-time autorizado) — não reabrir essa exceção no PUT genérico.
+
+## Operações de inventário/consumíveis server-authoritative
+
+`handleShop` (por UID, todas persistem imediato, sem depender do PUT debounado): `buy_gear`, `buy_stack`, `equip_item`, `unequip_item`, `sell_item`, `buyback`, `skill_reset`, `sell_gem`, `buy_portal` — já existiam desde a Fase 3/5.1. Novidade desta fase: **`use_item`** — consumir `pv`/`pa`/`ap`/`scr` virou uma intenção server-side (`{action:'use_item', key:'pv'}`); servidor confere quantidade real (rejeita se `<1` ou se `key` não é um dos 4 válidos) e decrementa no save persistido. O efeito em si (curar HP/MP, teleportar) continua calculado no cliente (não mudou o "sentir" do jogo), mas a contagem real do consumível agora é sempre a do servidor — o cliente manda a intenção em paralelo (fire-and-forget) sem depender da resposta pra continuar a jogabilidade local instantânea.
+
+Chaves de baú de chefe de campo (`key`) continuam seguindo o fluxo já existente desde a Fase 1 (`handleChest`, chefe derrota → `chest*` vira disponível → abrir consome `key` e gera loot) — sem mudança nesta fase, só migrou pra dentro de `ECONOMY_LOCK_FIELDS` (não podia mais ser setado via PUT bruto).
+
+## Concorrência (`withCharLock`)
+
+Mutex em memória por `characterId` (`Map` de filas de Promise), já existia desde a Fase 5.1 pra `handleShop`/`handleChest`. Nesta fase, **`PUT /api/characters/:id` e `creditKillReward` também passaram a rodar dentro de `withCharLock`** — antes eram os dois únicos caminhos que liam/gravavam save sem serialização, risco real de corrida com abates/compras simultâneas. `creditDungeonReward` (nova, ver abaixo) também é `withCharLock`-wrapped. **Limitação documentada, sem mudança:** só protege dentro desta instância Node — Render roda uma única instância hoje (`novo-rpg`); se um dia rodar múltiplas instâncias simultâneas, precisaria de lock real no banco (transação Postgres/`SELECT FOR UPDATE`), não implementado porque não é necessário na topologia atual.
+
+## Masmorra server-authoritative
+
+### `game-data/dungeon-generation.js` (novo, compartilhado)
+
+Módulo puro (sem DOM/canvas), `require()` pelo servidor e `<script>` pelo cliente (mesmo padrão de `gear-data.js`). Contém `mulberry(seed)` (PRNG determinístico), `mazeGen(cols,rows,seed)` (labirinto perfeito por DFS + BFS pra achar a sala mais distante, que vira a sala do chefe — **idêntico byte-a-byte** ao `mazeGen` que já existia só no cliente, só extraído), `dungeonWallRects()` (paredes em retângulos de colisão, espelha o desenho do cliente), `dungeonLayout(seed)` (empacota tudo). Cliente e servidor usam a mesma matemática — nunca duas implementações que podem divergir.
+
+### Seed e instância
+
+`DungeonInstance` (conceitual, vive só em `maps.get(id)`, **nunca persistido no Supabase** — runtime de masmorra é 100% memória): `id` (`zona_d#<8hex>`), `zone`, `seed` (`crypto.randomInt`, escolhido pelo servidor — cliente nunca escolhe seed), `layout` (maze+paredes+posições de início/chefe), `ownerCharId`/`ownerUserId`, `mobs` (roster completo), `bossDefeated`, `createdAt`/`lastActiveAt`. Reaproveita a infraestrutura genérica já existente de mapas (`maps`, `mapState`, `broadcastMap`, `tickMobAI`) dando a cada instância uma chave de mapa própria — zero engine paralela nova.
+
+### Entrada (`dungeon_enter` → `handleDungeonEnter`)
+
+Pedido explícito ao servidor (`{type:'dungeon_enter', zone}`), nunca mais o cliente só chamando `travel('X_d')` local. Exige `p.authed` (sessão real, ver Autenticação acima). Valida a zona contra `DUNGEON_CFG`. Valida o requisito de desbloqueio **lendo o save real no banco** (`save.quest >= DUNGEON_UNLOCK_QUEST[zone] || save.gunlock[zone]` — mesmo limiar que já existia pro portal de campo, nunca confia no botão do cliente estar habilitado). Reusa a instância já existente do personagem pra aquela zona (`ownedDungeonInstance`) ou cria uma nova. Responde `dungeon_state` com `{map, zone, seed, start, roster, bossDefeated}` — o roster já vem completo (id/tipo/nível/hp/maxhp/posição/boss), o cliente só renderiza.
+
+### Roster e IA
+
+Gerado inteiro dentro de `createDungeonInstance` a partir de um stream de RNG independente (`mulberry(seed+1)`), iterando a grade 7×5 (72% de chance de spawn por célula, exceto início/chefe), usando os MESMOS `DUNGEON_CFG`/`mobStats` que decidiam o roster no cliente (probabilidades portadas 1:1). HP/tipo/nível do mob **nunca** vêm do cliente. Chefe tem `3×` o HP normal (preserva a dificuldade que o design antigo já tinha). `tickMobAI()` perdeu a exclusão `if (state.id.endsWith('_d')) continue` — mob de masmorra agora roda pela mesma IA (`MOB_AI_STEP`/`moveMob`/`targetPlayer`) que mob de campo, sem engine de combate paralela.
+
+### Colisão
+
+`moveMob()` ganhou suporte a `mob.wallRects` (attachado no spawn, = `state.layout.rects`): tenta mover livre, se colidir tenta cada eixo separado (slide ao longo da parede) via `rectsBlock()` (AABB). Mob sem `wallRects` (todo mob de campo) mantém o comportamento de sempre (sem colisão de terreno) — limitação pré-existente **não** estendida nesta fase, foco ficou só em masmorra.
+
+### Dano e morte
+
+Jogador→mob continua usando `resolveAttackDamage` (cálculo já server-side desde a Fase 2, sem mudança). `mob.hp<=0` só é confirmado dentro do handler `mob_damage`, de forma síncrona (sem nenhum `await` antes de marcar `mob.dead=true`) — o event loop de um único processo Node garante que duas mensagens de dano pro mesmo mob nunca são processadas concorrentemente de verdade, mesmo que cheguem quase juntas (a segunda sempre vê `mob.dead===true` e retorna sem efeito). Chefe tem uma segunda trava explícita (`state.bossDefeated`), mais fácil de auditar/testar isoladamente. Mob de masmorra nunca respawna sozinho (`respawnAt=0`).
+
+### Loot (chefe/comum) e "baú"
+
+`creditDungeonReward(ws,p,{gold,gem,pv,ap,scr,items})` — nova, `withCharLock`-wrapped, aplica os deltas + `grantItem` (equipa se der, senão mochila) e manda `dungeon_reward` com o save completo (não delta). **Nunca concede XP** (achado direto no código do cliente: `killMob(s.dun)` original já não dava XP em masmorra — comportamento preservado, não inventado). `rollDungeonTrashLoot`/`rollDungeonBossLoot` portam as mesmas fórmulas/probabilidades que existiam no cliente (`pickTier`, ouro, chance de `pv`/`gem`/item) — **todo item gerado usa `rarity:'basic'`** (Raro/Épico/Lendário continuam fora do escopo, ver abaixo). Lendo o código do cliente, descobrimos que **o "baú" de masmorra sempre foi cosmético**: a recompensa real sempre saiu direto da morte do chefe (`killMob`), o baú só abria visualmente (`.open=true`) sem chave nem ação separada — implementado exatamente assim aqui (sem inventar um fluxo de "abrir baú com chave" que a masmorra nunca teve). Chave (`key`) de baú de **chefe de campo** é um mecanismo diferente e não mudou (ver seção de inventário acima).
+
+### Limpeza de instância
+
+`dungeonCleanupTick()` (chamado a cada 1s, junto do tick de respawn já existente) remove do `maps`/`dungeonByOwner` qualquer instância com **30min sem ninguém presente** (`DUNGEON_IDLE_MS`) ou **2h de vida total** (`DUNGEON_MAX_LIFE_MS`), o que vier primeiro. Reconexão dentro desses limites reencontra a mesma instância (mesmo seed/roster/`bossDefeated`) via `ownedDungeonInstance`.
+
+### Party
+
+Preservado exatamente como estava: masmorra hoje é solo (cada personagem tem sua própria instância, `ownedDungeonInstance` é chaveado por `charId`). Nenhuma infraestrutura cooperativa nova foi inventada — não fazia parte do design atual. World Boss em party é Fase 5.6, fora do escopo aqui.
+
+## ATK server-side (Parte 9, parcial)
+
+`clampAtk` (teto usado por `resolveAttackDamage`/`skBaseOf`) estava desatualizado em `35` — teto real pra atk legítimo Nv40 Básico (Fase 5.1) é ~72-80. Corrigido pra `120` (folga real acima do máximo legítimo, mas ainda limita claramente um valor absurdo tipo `9999`). **Limitação documentada, não resolvida nesta fase:** o servidor ainda não deriva ATK a partir do equipamento real (`p.atk` continua vindo do que o cliente reporta em `mob_damage`/`player_damage`, só *limitado* pelo teto, não recalculado do zero a partir de `save.eq`). Fazer isso direito exigiria o servidor ter acesso rápido ao equipamento real por conexão (cache por personagem ou leitura no banco por golpe) — julgado fora do escopo desta fase (dungeon + economia), registrado aqui como bloqueador claro pra uma fase futura de combate 100% server-derivado.
+
+## HP do jogador (Parte 9, limitação registrada)
+
+**Não resolvido nesta fase, de propósito** (evitar reescrita de todo o combate PvP/campo sem necessidade): HP/defesa/morte do jogador (`hurtPlayer()`) continuam parcialmente client-side mesmo dentro da masmorra — `mob_hit` manda o dano bruto calculado no servidor, mas a mitigação final e o `pv` do jogador são aplicados no cliente. Não declaramos "masmorra 100% server-authoritative em combate" por causa disso — é uma lacuna real e conhecida, registrada como bloqueador pra uma fase futura, não uma lacuna escondida.
+
+## Offline vs. online
+
+Modo offline (sem conta) preservado sem nenhuma mudança de comportamento — continua usando toda a lógica local de sempre (inclusive geração de masmorra local, loot local). A fronteira é clara: **todo o server-authoritative desta fase só existe pra conexão com `p.authed===true`** (token+charId reais validados no `join`). Progresso offline nunca é carregado numa sessão online de um jeito que sobrescreva a economia autoritativa — o PUT genérico (única porta de entrada de save local→nuvem) trava justamente os campos econômicos (ver acima), então mesmo que alguém tente sincronizar um save local adulterado, só `name`/`cls` sobrevivem pra um personagem que já existe no banco.
+
+## Fallback
+
+Nenhum fallback local foi adicionado para conta online (dungeon/economia): se `dungeon_enter`/`use_item`/qualquer ação de `handleShop` falhar pra um personagem autenticado, o cliente recebe erro (`dungeon_error`/`{error}` da API) e pode tentar de novo — não existe caminho que calcule a recompensa localmente e siga em frente pra uma conta online.
+
+## Matriz de mutação econômica
+
+| Campo | Quem aumenta | Quem diminui | Endpoint/evento | Server-authoritative? |
+|---|---|---|---|---|
+| `gold` | `creditKillReward`, `creditDungeonReward`, `sell_item`, `buyback`(estorna preço pago), `sell_gem` | `buy_gear`, `buy_stack`, `buy_portal`, `skill_reset` | `handleShop` (HTTP), `mob_damage`→WS (campo e masmorra) | **Sim** |
+| `gem` | `creditKillReward`, `creditDungeonReward` (loot de chefe/comum) | `sell_gem` | `handleShop`, `mob_damage`→WS | **Sim** |
+| `bag`/`eq` (itens, por uid) | `buy_gear`, `unequip_item`, `buyback`, `creditDungeonReward`(`grantItem`), `handleChest`(`rollChestItem`) | `sell_item`, `equip_item` (move, não remove) | `handleShop`, `handleChest`, `mob_damage`→WS | **Sim** (uid único, `lockOwnedItems`+`dedupeByUid` no PUT) |
+| `pv`/`pa` (poções) | `buy_stack`, `creditDungeonReward` | `use_item` | `handleShop` | **Sim** |
+| `ap` | `creditDungeonReward` (masmorra) | `use_item` | `handleShop`, `mob_damage`→WS | **Sim** |
+| `key` (chave de baú de campo) | drop de chefe de campo (`creditKillReward`→`BOSS_CHEST_FIELD`) | `handleChest` (abrir baú) | `mob_damage`→WS, `handleChest` | **Sim** |
+| `scr` | (mecanismo pré-existente, sem mudança de origem nesta fase) | `use_item` | `handleShop` | **Sim** |
+| `gunlock[zona]` | `buy_portal` | — (nunca diminui) | `handleShop` | **Sim** |
+| `chest`/`chest2..7` (baú de chefe de campo) | `creditKillReward` (chefe correspondente) | `handleChest` (abre e zera) | `mob_damage`→WS, `handleChest` | **Sim** |
+| `quest`/`xp`/contadores (`kills,gk,ks,kw,kp,kt,ki,kv`) | `advanceQuestOnKill` (dentro de `creditKillReward`), `handleQuest` | — | `mob_damage`→WS, `handleQuest` (HTTP) | **Sim** (travado no PUT desde a Fase 5.1) |
+| `lvl` | `applyXpGain` (dentro de `creditKillReward`) | — | `mob_damage`→WS | **Sim** (travado no PUT desde a Fase 5.2 — `lvl=current.lvl` incondicional) |
+
+**PUT genérico (`handleCharacters`) não é origem de nenhuma linha desta tabela** pra personagem já existente — todo campo listado é sobrescrito pro valor persistido antes de gravar (ver "Campos bloqueados no PUT genérico" acima). Nenhuma outra brecha foi encontrada na auditoria desta fase (confirmado por leitura direta de `server.js` + consulta Graphify pós-mudança, ver relatório final da Fase 5.2).
+
+## O que NÃO entrou nesta fase (de propósito)
+
+- **Raro/Épico/Lendário em monstro/masmorra** — `rollDungeonTrashLoot`/`rollDungeonBossLoot` usam só `rarity:'basic'`. Fase 5.3 liga isso.
+- **Enchant funcional** — inalterado desde a Fase 5.1 (`enchant:0`).
+- **Ferreiro, World Boss, TvT, Guilda, Bestiário, Ranking, página pública, Phantom Players** — inalterados, fora do escopo.
+- **ATK 100% derivado do equipamento real** e **HP/morte do jogador 100% server-side dentro da masmorra** — ver seções acima, registrados como limitação conhecida, não lacuna escondida.
+- **Masmorra cooperativa (multi-jogador na mesma instância)** — preservado solo, infraestrutura de party não foi construída (não fazia parte do design atual).
+
+## Testes adicionados
+
+- `test/dungeon.test.js` (18 testes, sempre roda, sem Supabase) — `createDungeonInstance` (seed único, roster fiel a `mobStats`, chefe 3×hp, `respawnAt=0`, `wallRects` compartilhado, zona inválida, registro em `maps`), `moveMob`/`rectsBlock` (colisão com/sem `wallRects`), `dungeonCleanupTick` (idle vs. recente), `startingSave` (por classe), `ECONOMY_LOCK_FIELDS` (cobertura dos 15 campos), `DUNGEON_UNLOCK_QUEST`, `clampAtk`, `pickTier`, `rollDungeonTrashLoot`/`rollDungeonBossLoot` (sem xp, chefe sempre 3 itens+gem:6), `DUNGEON_GEN.dungeonLayout` (determinismo).
+- `test/economy.test.js` (5 testes, `{skip:!hasSupabase()}`) — save inicial completo no primeiro save; primeiro PUT tentando forjar `gold:500000/gem:5000/pv:999/.../gunlock todo true/chest todo true/item Lendário` não persiste nada disso; mesmo tampering num personagem já existente; campos econômicos continuam travados após uma tentativa de forja; `use_item` rejeita quantidade zero e chave inválida.
+- `test/ws-auth.test.js` (7 testes, `{skip:!hasSupabase()}`) — sem token (anônimo aceita cls/lvl da mensagem, comportamento preservado), token inválido (degrada pra anônimo), charId inexistente, charId de outra conta, token+charId válidos (cls/lvl reais do banco, forjados ignorados), userId forjado na mensagem é ignorado, reconexão reautentica do zero.
+- `test/dungeon-integration.test.js` (7 testes, `{skip:!hasSupabase()}`) — `dungeon_enter` rejeitado sem sessão real/zona inválida/região não liberada; com região liberada devolve seed/roster/chefe gerados pelo servidor; reentrada reusa a mesma instância; abate de mob comum credita via `dungeon_reward` sem xp; **chefe recompensa exatamente 1 vez mesmo com golpes extras logo após a morte**; reconexão após derrotar o chefe mostra `bossDefeated:true`.
+- `test/shop-catalog.test.js` — pequeno fix (não relacionado a conteúdo): leitura de `index.html` agora normaliza `\r\n→\n` antes de comparar substring — `core.autocrlf` deste repo reescreve o arquivo pra CRLF ao trocar de branch, o que já quebrou esse teste uma vez sem nenhum conteúdo ter mudado de verdade.
+
+**Limitação honesta (igual às fases anteriores):** os testes `{skip:!hasSupabase()}` (economy/ws-auth/dungeon-integration/shop/characters, total 70 testes pulados) **não puderam ser executados neste ambiente** — sem `SUPABASE_URL`/`SUPABASE_SECRET_KEY` locais, e não existe um projeto Supabase de TESTE dedicado pra este jogo (só o oficial de produção, "MMORPG 2D V0.22 Online" — nunca usado pra testes destrutivos, conforme instruído). Sintaxe e lógica pura validadas via `node -c server.js` + os 18 testes sempre-ativos de `dungeon.test.js` (que exercitam `createDungeonInstance`/`moveMob`/`dungeonCleanupTick`/`startingSave`/etc. diretamente, sem precisar de HTTP/WS/Supabase). Os testes que precisam de Supabase vão rodar de verdade no GitHub Actions se os secrets estiverem configurados lá, e sempre que alguém rodar `npm test` com Supabase configurado localmente.
+
+## Migração de banco
+
+**Nenhuma migration nova foi necessária ou criada.** Todo o estado desta fase continua vivendo em `characters.save` (jsonb, mesma coluna desde a Fase 4) ou 100% em memória (`DungeonInstance` nunca é persistido — layout/roster/HP de mob de masmorra somem quando a instância expira, por design). As 5 migrations históricas em `supabase/migrations/` não foram tocadas.
+
+## Próxima fase
+
+Fase 5.3 — drops server-side por raridade (Raro/Épico em monstro de campo e masmorra, Lendário em chefe) com balanceamento de chance/nível-de-item/mapa. Fica pra quando for solicitada.
