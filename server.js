@@ -2515,36 +2515,85 @@ async function loadTvtCharacter(userId,charId){
 // de TvT que o EventManager (generico) nao sabe (World Boss nunca precisou
 // disso, party ja e sempre exatamente 4).
 function tvtRegistrationFull(eventId){const entries=eventManager.registrations.get(eventId);return!!entries&&entries.size>=TVT.TVT_MAX_PLAYERS}
+// Fase 5.16 (AI TvT Fill): tamanho final do time (sempre par, sempre
+// pelo menos TVT_MIN_PLAYERS, nunca acima de TVT_MAX_PLAYERS) dado
+// quantos humanos reais foram carregados com sucesso -- nucleo puro,
+// testavel sem Supabase/instancia nenhuma.
+function tvtFillTargetSize(humanCount) {
+  let size = Math.max(TVT.TVT_MIN_PLAYERS, humanCount);
+  if (size % 2 !== 0) size++;
+  return Math.min(size, TVT.TVT_MAX_PLAYERS);
+}
 async function startTvtEvent(event,registrations){
   try{
     const regs=[...registrations.values()].sort((a,b)=>a.registeredAt-b.registeredAt);
-    if(regs.length<TVT.TVT_MIN_PLAYERS){for(const r of regs)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: mínimo de 4 jogadores.'});return}
-    const capped=regs.slice(0,TVT.TVT_MAX_PLAYERS);
-    const usable=capped.length%2===0?capped:capped.slice(0,capped.length-1);
-    const reserve=capped.slice(usable.length);
+    if(!regs.length)return; // ninguem se inscreveu -- nunca gera uma partida so de IA
+    const capped=regs.slice(0,TVT.TVT_MAX_PLAYERS), reserve=regs.slice(TVT.TVT_MAX_PLAYERS);
     for(const r of reserve)sendToWorldBossMember(r,{type:'tvt_reserve',message:'Você ficou como reserva nesta rodada.'});
     const loaded=[];
-    for(const r of usable){
+    for(const r of capped){
       const active=activeCharacterForUser(r.userId);if(!active||active.p.charId!==r.charId)continue;
       try{const data=await loadTvtCharacter(r.userId,r.charId);if(data)loaded.push({userId:r.userId,charId:r.charId,name:data.row.name||data.save.name,cls:data.row.cls,lvl:data.row.lvl,save:data.save,snapshot:data.snapshot,powerScore:TVT.powerScore(data.snapshot,data.eq)});}
       catch(err){console.error('tvt_load_error',r.charId,err.message)}
     }
-    if(loaded.length<TVT.TVT_MIN_PLAYERS){for(const r of usable)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: mínimo de 4 jogadores.'});return}
-    const evenLoaded=loaded.length%2===0?loaded:loaded.slice(0,loaded.length-1);
+    if(!loaded.length){for(const r of capped)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: nenhum jogador disponível.'});return}
+    // Fase 5.16 (AI TvT Fill): reservas humanas ja tratadas acima, ANTES
+    // de qualquer IA existir -- prioridade humana real, nao so um
+    // comentario. So preenche com IA a quantidade que falta pra fechar
+    // um time par com pelo menos TVT_MIN_PLAYERS -- nunca reduz humanos
+    // reais pra caber num numero par (o corte por imparidade de antes
+    // foi removido: agora a IA fecha a diferenca em vez de descartar um
+    // humano que se inscreveu). Nivel da IA = media dos humanos reais
+    // carregados, pra ficar equilibrado (nem fraco nem forte demais).
+    const targetSize=tvtFillTargetSize(loaded.length);
+    const aiNeeded=Math.max(0,targetSize-loaded.length);
+    const aiMembers=[];
+    if(aiNeeded>0){
+      const avgLvl=Math.round(loaded.reduce((s,m)=>s+m.lvl,0)/loaded.length)||20;
+      for(let i=0;i<aiNeeded;i++){
+        const cls=AI_CLASS_POOL[Math.floor(Math.random()*AI_CLASS_POOL.length)];
+        const aiSave=buildAiSave(cls,avgLvl);
+        const name=AI_NAME_POOL[Math.floor(Math.random()*AI_NAME_POOL.length)]+Math.floor(10+Math.random()*90);
+        const snapshot=WORLD_BOSS.combatSnapshot({userId:null,charId:null,name,cls,lvl:avgLvl,save:aiSave});
+        const charId='ai_'+crypto.randomBytes(4).toString('hex');
+        aiMembers.push({userId:null,charId,name:snapshot.name,cls,lvl:avgLvl,save:aiSave,snapshot,powerScore:TVT.powerScore(snapshot,aiSave.eq),kind:'ai'});
+      }
+    }
+    const evenLoaded=[...loaded,...aiMembers];
     const teams=TVT.balanceTvtTeams(evenLoaded);
+    if(!teams){for(const r of capped)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: não foi possível formar times.'});return}
     const byCharId=new Map(evenLoaded.map(m=>[m.charId,m]));
     const members=[];
-    for(const team of TVT.TVT_TEAM_IDS)for(const charId of teams[team]){const m=byCharId.get(charId);members.push({userId:m.userId,charId:m.charId,name:m.name,cls:m.cls,lvl:m.lvl,team,snapshot:m.snapshot});}
+    for(const team of TVT.TVT_TEAM_IDS)for(const charId of teams[team]){const m=byCharId.get(charId);members.push({userId:m.userId,charId:m.charId,name:m.name,cls:m.cls,lvl:m.lvl,team,snapshot:m.snapshot,kind:m.kind});}
     const instance=TVT.createTvtInstance({eventId:event.id,members});
     tvtInstances.set(instance.mapId,instance);
     const state=mapState(instance.mapId);state.isTvt=true;state.tvt=instance;
     for(const member of instance.players.values()){
+      if(member.kind==='ai'){
+        // Fase 5.16: spawna a entidade de IA de verdade (runtime) ja no
+        // slot atribuido -- nunca uma conta persistente, nunca aparece
+        // em reserva humana nenhuma.
+        if(aiEntities.size>=AI_MAX_POPULATION)continue;
+        const personality=AI_PERSONALITY_KINDS[Math.floor(Math.random()*AI_PERSONALITY_KINDS.length)];
+        const entity={
+          id:member.charId,kind:'ai',name:member.name,cls:member.cls,lvl:member.lvl,map:instance.mapId,
+          x:member.x,y:member.y,dir:0,moving:false,atkT:0,atkAng:0,
+          hp:member.hp,maxHp:member.maxHp,dead:false,respawnAt:0,
+          combat:member.snapshot,basicCdUntil:0,buffUntil:0,pendingSkill:{},lastDamageAt:0,evadeUntil:0,shieldUntil:0,shield:0,
+          fsm:'tvt',fsmUntil:0,targetMobId:null,homeZone:AI_FIELD_ZONES[0],
+          personality,profile:aiPersonalityProfile(personality),slot:{kind:'tvt',instanceId:instance.mapId,team:member.team},
+          tvtTargetId:null,tvtEngageAt:0,createdAt:Date.now(),
+        };
+        aiEntities.set(entity.id,entity);
+        broadcast({type:'player_join',player:aiPublicPlayer(entity)});
+        continue;
+      }
       const active=activeCharacterForUser(member.userId);if(!active)continue;
       instance.previousLocations.set(member.charId,{map:active.p.map,x:active.p.x,y:active.p.y});
       tvtByChar.set(member.charId,instance.mapId);
       for(const[ws,p]of clients)if(p.userId===member.userId&&p.charId===member.charId){p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{type:'tvt_enter',mapId:instance.mapId,team:member.team,spawn:{x:member.x,y:member.y},scoreLimit:instance.scoreLimit,expiresAt:instance.expiresAt});}
     }
-    console.log('tvt_instance_start',instance.id,instance.mapId,[...instance.players.values()].map(p=>p.team+':'+p.charId).join(','));
+    console.log('tvt_instance_start',instance.id,instance.mapId,[...instance.players.values()].map(p=>p.team+':'+p.charId+(p.kind==='ai'?'(ia)':'')).join(','));
   }catch(err){console.error('tvt_start_error',event.id,err.message)}
 }
 function tvtPublicSync(instance){broadcastMap(instance.mapId,TVT.publicTvtState(instance))}
@@ -2552,6 +2601,7 @@ async function grantTvtRewards(instance){
   if(instance.rewardsGranted)return;instance.rewardsGranted=true;
   const now=Date.now();
   for(const member of instance.players.values()){
+    if(member.kind==='ai')continue; // Fase 5.16, REGRA ABSOLUTA: IA nunca recebe recompensa/XP/rank_stats de TvT
     if(!TVT.isTvtEligible(member,instance,now))continue;
     try{
       await withCharLock(member.charId,async()=>{
@@ -2582,6 +2632,11 @@ function finishTvtInstance(instance,reason,winner){
       send(ws,{type:'tvt_exit',reason,winner:instance.winner,score:instance.score,outcome:TVT.outcomeForTeam(member.team,instance.winner),map:p.map,x:p.x,y:p.y});
     }
     tvtByChar.delete(member.charId);
+    // Fase 5.16: qualquer IA que preencheu esta partida e removida de
+    // vez quando ela acaba -- nunca fica presa apontando pra um TvT que
+    // ja terminou (limpeza rigorosa, sem leak, mesmo espirito da limpeza
+    // de masmorra).
+    if(member.kind==='ai')aiDespawnEntity(member.charId);
   }
   maps.delete(instance.mapId);tvtInstances.delete(instance.mapId);
   console.log('tvt_instance_end',instance.id,reason,instance.winner||'draw');
@@ -2664,7 +2719,7 @@ function buildDungeonInstance(zone, members) {
   const scale = DUNGEON_GEN.dungeonScaleFor(members.length);
   const memberMap = new Map(members.map(m => [m.charId, {
     userId: m.userId, cls: m.cls || 'guerreiro', online: true, joinedAt: Date.now(),
-    damageDone: 0, lastActivityAt: Date.now(),
+    damageDone: 0, lastActivityAt: Date.now(), kind: m.kind || 'human', // Fase 5.16: marca membro de IA (dungeonHandleMobDeath usa pra nunca creditar)
   }]));
   Object.assign(state, {
     // ownerCharId/ownerUserId preservados (primeiro membro real) -- usados
@@ -3114,15 +3169,49 @@ async function formDungeonGroup(zone, group) {
     parties.set(code, {ownerId: validMembers[0].userId, members: membersMap});
     for (const m of validMembers) memberParty.set(m.userId, code);
   }
-  const state = buildDungeonInstance(zone, validMembers);
+  // Fase 5.16 (AI Dungeon Fill): so preenche com IA se ALGUEM do grupo
+  // original pediu allowAiFill -- humanos sempre resolvidos e validados
+  // primeiro (acima), IA so ocupa a vaga que sobrar ate 4, classe
+  // consciente (prioriza uma classe que o grupo ainda nao tem). IA nunca
+  // vira membro persistente de Party nenhuma -- so entra em
+  // state.members (memoria, da instancia), nunca em parties/memberParty.
+  const anyAllowAiFill = group.some(([, e]) => e.allowAiFill);
+  const aiFillMembers = [];
+  if (anyAllowAiFill && validMembers.length < DUNGEON_QUEUE_PREFERRED_SIZE) {
+    const [lo, hi] = aiZoneLevelRange(zone);
+    const slots = DUNGEON_QUEUE_PREFERRED_SIZE - validMembers.length;
+    for (let i = 0; i < slots && aiEntities.size < AI_MAX_POPULATION; i++) {
+      const haveClasses = new Set([...validMembers.map(m => m.cls), ...aiFillMembers.map(m => m.cls)]);
+      const cls = AI_CLASS_POOL.find(c => !haveClasses.has(c)) || AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
+      const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
+      aiFillMembers.push({charId:'ai_' + crypto.randomBytes(4).toString('hex'), userId:null, cls, lvl, kind:'ai'});
+    }
+  }
+  const state = buildDungeonInstance(zone, [...validMembers, ...aiFillMembers]);
   if (!state) return;
+  for (const m of aiFillMembers) {
+    const aiName = AI_NAME_POOL[Math.floor(Math.random() * AI_NAME_POOL.length)] + Math.floor(10 + Math.random() * 90);
+    const combat = buildAiCombat(m.cls, m.lvl, aiName);
+    const entity = {
+      id:m.charId, kind:'ai', name:combat.name, cls:m.cls, lvl:m.lvl, map:state.id,
+      x:state.layout.start.x, y:state.layout.start.y, dir:0, moving:false, atkT:0, atkAng:0,
+      hp:combat.maxHp, maxHp:combat.maxHp, dead:false, respawnAt:0,
+      combat, basicCdUntil:0, buffUntil:0, pendingSkill:{}, lastDamageAt:0, evadeUntil:0, shieldUntil:0, shield:0,
+      fsm:'idle', fsmUntil:0, targetMobId:null, homeZone:AI_FIELD_ZONES.includes(zone) ? zone : AI_FIELD_ZONES[0],
+      personality:AI_PERSONALITY_KINDS[Math.floor(Math.random() * AI_PERSONALITY_KINDS.length)],
+      profile:null, slot:{kind:'dungeon', instanceId:state.id}, createdAt:Date.now(),
+    };
+    entity.profile = aiPersonalityProfile(entity.personality);
+    aiEntities.set(entity.id, entity);
+    broadcast({type:'player_join', player:aiPublicPlayer(entity)});
+  }
   for (const m of validMembers) {
     rememberDungeonInstance(m.charId, zone, state.id);
     const memberWs = wsForChar(m.charId);
     if (memberWs) {
       const memberP = clients.get(memberWs); if (memberP) memberP.map = state.id;
-      send(memberWs, {type:'dungeon_queue_matched', zone, size:validMembers.length});
-      sendDungeonStateTo(memberWs, state, validMembers.length > 1 ? {party:true} : undefined);
+      send(memberWs, {type:'dungeon_queue_matched', zone, size:validMembers.length + aiFillMembers.length});
+      sendDungeonStateTo(memberWs, state, (validMembers.length + aiFillMembers.length) > 1 ? {party:true} : undefined);
     }
   }
 }
@@ -3425,9 +3514,60 @@ function aiStep(ai, now) {
     case 'combat': aiDoCombat(ai, now); return;
     case 'retreat': aiDoRetreat(ai, now); return;
     case 'rest': aiDoRest(ai, now); return;
-    case 'party': case 'queue': case 'dungeon': case 'tvt': return; // Fase 5.16 Tier 2 -- controlado por formDungeonGroup/TvT fill, nao pelo FSM de campo
+    // Fase 5.16 Tier 2: 'dungeon' reusa o MESMO idle/hunt/combat de
+    // campo (state.mobs de uma instancia de masmorra e um mapState()
+    // igual qualquer outro -- a maquina generica ja funciona la sem
+    // nenhuma mudanca). 'tvt' tem seu proprio handler (alvo e jogador
+    // inimigo, nunca mob). 'party'/'queue' sao marcadores transitorios
+    // curtos (preenchimento em andamento), nunca um estado "de trabalho"
+    // continuo -- nunca deveriam ser observados por mais de um tick.
+    case 'dungeon': aiDoIdle(ai, now); return;
+    case 'tvt': aiDoTvt(ai, now); return;
+    case 'party': case 'queue': return;
     default: aiDoIdle(ai, now); return;
   }
+}
+// Fase 5.16 Tier 2: IA preenchendo TvT -- alvo e o jogador inimigo mais
+// proximo ainda vivo (nunca um mob), ataque via TVT.resolveTvtIntent, a
+// MESMA funcao autoritativa que resolve o dano de um jogador humano
+// (cooldown/alcance/formula identicos -- nunca um bypass de cooldown,
+// nunca dano oculto). instance.players e sempre a fonte de verdade de
+// posicao/HP -- ai.x/ai.y/ai.hp sao so um espelho pra broadcast.
+// PROIBICOES EXPLICITAS DE TRAPACA cumpridas por construcao: sem
+// wallhack (so mira quem esta em instance.players, nunca informacao
+// fora do que o proprio TVT.resolveTvtIntent ja exigiria de um
+// jogador real); sem mira instantanea (precisa se mover ate o alcance,
+// nunca teleporta); sem bypass de cooldown (skillCd é o mesmo campo
+// que resolveTvtIntent aplica pra humano); sem bonus escondido (usa o
+// mesmo snapshot/formula de dano). Latencia de reacao simulada:
+// ai.tvtEngageAt atrasa 200-600ms o primeiro ataque contra um alvo
+// recem-adquirido, nunca ataca no mesmo instante que avista alguem.
+function aiDoTvt(ai, now) {
+  const instance = ai.slot && tvtInstances.get(ai.slot.instanceId);
+  if (!instance || instance.state !== 'active') return;
+  const tp = instance.players.get(ai.id);
+  if (!tp) return;
+  ai.hp = tp.hp; ai.maxHp = tp.maxHp; ai.x = tp.x; ai.y = tp.y; ai.dead = tp.dead;
+  if (tp.dead) return; // respawn de TvT e o mesmo dos humanos (TVT.tickTvtRespawns), nunca um respawn paralelo aqui
+  let nearest = null, bestD = Infinity;
+  for (const [charId, other] of instance.players) {
+    if (charId === ai.id || other.team === tp.team || other.dead) continue;
+    const d = Math.hypot(other.x - tp.x, other.y - tp.y);
+    if (d < bestD) { bestD = d; nearest = other; }
+  }
+  if (!nearest) return;
+  if (ai.tvtTargetId !== nearest.charId) { ai.tvtTargetId = nearest.charId; ai.tvtEngageAt = now + 200 + Math.floor(Math.random() * 400); }
+  if (now < ai.tvtEngageAt) return;
+  const range = attackRangeFor(ai, 'basic');
+  if (bestD > range) {
+    const dx = nearest.x - tp.x, dy = nearest.y - tp.y, dist = Math.hypot(dx, dy) || 1, step = Math.min(dist, AI_MOVE_SPEED);
+    tp.x = Math.max(0, Math.min(TVT.TVT_ARENA.w, tp.x + dx / dist * step));
+    tp.y = Math.max(0, Math.min(TVT.TVT_ARENA.h, tp.y + dy / dist * step));
+    ai.x = tp.x; ai.y = tp.y; ai.moving = true;
+    return;
+  }
+  ai.moving = false;
+  TVT.resolveTvtIntent(instance, ai.id, {skill:'basic', targetId:nearest.charId}, now, secureRandom);
 }
 // Roda junto do resto do tick de 1s (setInterval perto do fim do
 // arquivo) -- nunca um setInterval novo por entidade (zero timer pra
@@ -3438,7 +3578,7 @@ function aiTick() {
   aiPopulationTick();
   for (const ai of [...aiEntities.values()]) {
     aiStep(ai, now);
-    if (!ai.slot) broadcast({type:'state', player:aiPublicPlayer(ai)});
+    broadcast({type:'state', player:aiPublicPlayer(ai)});
   }
 }
 // IA presente num mapa tambem conta pra IA de monstro de campo mirar
@@ -4548,7 +4688,8 @@ module.exports = {
   // Fase 5.16 -- Aventureiros IA (nucleo puro + runtime em memoria, nunca Supabase):
   aiEntities, aiSpawnEntity, aiDespawnEntity, aiPopulationTick, aiStep, aiTick,
   aiPublicPlayer, aiPresentOnMap, buildAiSave, buildAiCombat, aiZoneLevelRange,
-  aiPersonalityProfile, aiSpawnAnchor, dungeonHandleMobDeath, aiDoCombat, aiDoIdle, aiDoHunt,
+  aiPersonalityProfile, aiSpawnAnchor, dungeonHandleMobDeath, aiDoCombat, aiDoIdle, aiDoHunt, aiDoTvt,
+  formDungeonGroup, tvtFillTargetSize,
   AI_MAX_POPULATION, AI_FIELD_ZONES, AI_CLASS_POOL, aiEnabled,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,

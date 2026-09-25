@@ -152,15 +152,18 @@ function tvtMapId(eventId) { return `tvt#${shortTvtId(eventId)}`; }
 function freshStatuses() {
   return { rootUntil: 0, slowUntil: 0, barrierUntil: 0, barrierAmt: 0, evadeUntil: 0, warcryUntil: 0, warcryAtkMul: 0, warcryDefBonus: 0, thornsUntil: 0, thornsTickAt: 0, thornsMul: 0, thornsOwner: null };
 }
-// members: [{userId,charId,name,cls,lvl,team,snapshot,eq}] -- snapshot e eq
-// já resolvidos por quem chama (server.js, a partir do Supabase real).
+// members: [{userId,charId,name,cls,lvl,team,snapshot,eq,kind?}] -- snapshot
+// e eq ja resolvidos por quem chama (server.js, a partir do Supabase real
+// pra humano, ou de um snapshot simulado pra preenchimento por IA --
+// Fase 5.16). kind:'ai' e preservado no player pra quem credita
+// recompensa (server.js) nunca confundir um membro de IA com humano.
 function createTvtInstance({ eventId, members, now = Date.now() }) {
   const mapId = tvtMapId(eventId), players = new Map();
   const redCount = members.filter(m => m.team === 'red').length, blueCount = members.filter(m => m.team === 'blue').length;
   for (const m of members) {
     const spawn = TVT_SPAWN[m.team];
     players.set(m.charId, {
-      userId: m.userId, charId: m.charId, name: m.name, cls: m.cls, lvl: m.lvl, team: m.team, snapshot: m.snapshot,
+      userId: m.userId, charId: m.charId, name: m.name, cls: m.cls, lvl: m.lvl, team: m.team, snapshot: m.snapshot, kind: m.kind || 'human',
       hp: m.snapshot.maxHp, maxHp: m.snapshot.maxHp, dead: false, respawnAt: 0, protectedUntil: now + TVT_SPAWN_PROTECTION_MS,
       online: true, x: spawn.x, y: spawn.y, lastAttackAt: 0, skillCd: {}, statuses: freshStatuses(),
       kills: 0, legitKills: 0, deaths: 0, damageDone: 0, healDone: 0, lastActivityAt: now, respawnGrantedAt: now, rewarded: false,
@@ -366,7 +369,7 @@ function publicTvtState(instance, now = Date.now()) {
     players: [...instance.players.values()].map(p => ({
       charId: p.charId, name: p.name, cls: p.cls, team: p.team, hp: p.hp, maxHp: p.maxHp,
       dead: p.dead, respawnAt: p.respawnAt, online: p.online, kills: p.kills, deaths: p.deaths,
-      protected: p.protectedUntil > now,
+      protected: p.protectedUntil > now, kind: p.kind || 'human',
     })),
   };
 }
