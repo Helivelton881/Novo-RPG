@@ -36,6 +36,11 @@
   .pill.ban{background:#3a1a1a;color:var(--danger)}
   .pill.mute{background:#3a3315;color:var(--warn)}
   .pill.on{background:#153a20;color:var(--ok)}
+  .pill.off{background:#3a3315;color:var(--warn)}
+  .pill.cap{background:#3a1a1a;color:var(--danger)}
+  .section{margin:0 0 18px}
+  .section h3{margin:0 0 10px}
+  .notice{padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--panel2);color:var(--muted);margin-bottom:14px}
   .row{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
   .row input{padding:8px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text)}
   select{padding:8px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text)}
@@ -67,7 +72,7 @@
 // Fase 5.14: painel admin isolado do jogo (index.html) -- reusa o MESMO
 // login/token de sessao (/api/auth/login), nunca um cargo guardado em
 // localStorage: toda tela busca o estado real do servidor a cada acao.
-let TOKEN = null, ME = null, TAB = 'dashboard';
+let TOKEN = null, ME = null, TAB = 'dashboard', LIVING_TIMER = null;
 
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';clearTimeout(toast._t);toast._t=setTimeout(()=>t.style.display='none',3000)}
 
@@ -101,7 +106,7 @@ async function doLogin(){
     err.textContent = e.message.includes('restrito') ? 'Esta conta não tem cargo administrativo.' : e.message;
   }
 }
-function doLogout(){ TOKEN=null; ME=null; document.getElementById('app').style.display='none'; document.getElementById('login').style.display='block'; }
+function doLogout(){ clearInterval(LIVING_TIMER);LIVING_TIMER=null;TOKEN=null; ME=null; document.getElementById('app').style.display='none'; document.getElementById('login').style.display='block'; }
 
 const TABS = [
   {id:'dashboard', label:'Painel', perm:'view_dashboard'},
@@ -109,6 +114,7 @@ const TABS = [
   {id:'economy', label:'Economia', perm:'view_economy'},
   {id:'guilds', label:'Guildas', perm:'view_guilds'},
   {id:'events', label:'Eventos', perm:'view_events'},
+  {id:'living', label:'Living World', perm:'view_living_world'},
   {id:'news', label:'Notícias', perm:'manage_news'},
   {id:'roles', label:'Cargos', perm:'manage_roles'},
   {id:'audit', label:'Auditoria', perm:'view_security_log'},
@@ -120,6 +126,7 @@ function renderNav(){
   nav.querySelectorAll('button').forEach(b => b.onclick = () => openTab(b.dataset.tab));
 }
 async function openTab(id){
+  clearInterval(LIVING_TIMER);LIVING_TIMER=null;
   TAB = id;
   renderNav();
   const main = document.getElementById('main');
@@ -130,6 +137,7 @@ async function openTab(id){
     if (id === 'economy') return renderEconomy(main);
     if (id === 'guilds') return renderGuilds(main);
     if (id === 'events') return renderEvents(main);
+    if (id === 'living') { await renderLivingWorld(main);LIVING_TIMER=setInterval(()=>{if(TAB==='living'&&!['INPUT','SELECT','BUTTON'].includes(document.activeElement?.tagName))renderLivingWorld(main,true).catch(()=>{});},5000);return; }
     if (id === 'news') return renderNews(main);
     if (id === 'roles') return renderRoles(main);
     if (id === 'audit') return renderAudit(main);
@@ -149,7 +157,7 @@ async function renderDashboard(main){
     </div>
     <h3>Atividade recente</h3>
     <table><thead><tr><th>Ação</th><th>Motivo</th><th>Quando</th></tr></thead><tbody>
-    ${d.recentAudit.map(a => `<tr><td>${a.action}</td><td class="muted">${a.reason||'—'}</td><td class="muted">${new Date(a.created_at).toLocaleString('pt-BR')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Nenhuma ação registrada ainda.</td></tr>'}
+    ${(d.recentAudit||[]).map(a => `<tr><td>${a.action}</td><td class="muted">${a.reason||'—'}</td><td class="muted">${new Date(a.created_at).toLocaleString('pt-BR')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">Nenhuma ação registrada ainda.</td></tr>'}
     </tbody></table>`;
 }
 
@@ -202,6 +210,33 @@ async function renderEvents(main){
   ${e.upcoming.map(x=>`<tr><td>${x.label||x.type}</td><td class="muted">${x.type}</td><td class="muted">${new Date(x.startAt||Date.now()).toLocaleString('pt-BR')}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">Nenhum evento agendado.</td></tr>'}
   </tbody></table>`;
 }
+async function renderLivingWorld(main,refresh){
+  const d=await api('/api/admin/living-world'),manage=(ME.permissions||[]).includes('manage_living_world');
+  if(refresh&&TAB!=='living')return;
+  const maps=Object.entries(d.perMap||{}),states=Object.entries(d.fsmStates||{});
+  main.innerHTML=`<div class="section"><h2 style="margin-top:0">Living World</h2>
+    <div class="notice">Pausar afeta somente novos spawns automáticos de campo. IAs existentes continuam ativas; Dungeon e TvT seguem seus controles próprios.</div>
+    <div class="cards">
+      <div class="card"><div class="n"><span class="pill ${d.spawnEnabled?'on':'off'}">${d.spawnEnabled?'ATIVO':'PAUSADO'}</span></div><div class="l">População automática de campo</div></div>
+      <div class="card"><div class="n">${d.humanOnline}</div><div class="l">Humanos online</div></div>
+      <div class="card"><div class="n">${d.field.count} / ${d.field.cap} ${d.field.capReached?'<span class="pill cap">cap atingido</span>':''}</div><div class="l">IA de campo</div></div>
+      <div class="card"><div class="n">${d.instances.dungeon}</div><div class="l">IA em Dungeon</div></div>
+      <div class="card"><div class="n">${d.instances.tvt}</div><div class="l">IA em TvT</div></div>
+      <div class="card"><div class="n">${d.totalAi}</div><div class="l">Total IA (campo + instanciada)</div></div>
+    </div></div>
+    <div class="section"><h3>Distribuição</h3><div class="cards">${maps.map(([map,n])=>`<div class="card"><div class="n">${n}</div><div class="l">${map}</div></div>`).join('')}<div class="card"><div class="n">${d.instances.dungeon}</div><div class="l">Dungeon</div></div><div class="card"><div class="n">${d.instances.tvt}</div><div class="l">TvT</div></div></div></div>
+    ${manage?`<div class="section"><h3>Controles operacionais</h3>
+      <div class="row"><button class="btn danger" onclick="livingAction('pause')">Pausar novos spawns</button><button class="btn ok" onclick="livingAction('resume')">Retomar spawns</button></div>
+      <div class="row"><label>Limite de campo <input id="lwCap" type="number" min="0" max="${d.hardLimits.fieldWorldCap}" value="${d.field.cap}"></label><label>Limite por mapa <input id="lwMapCap" type="number" min="0" max="${d.hardLimits.perMapCap}" value="${d.field.perMapCap}"></label></div>
+      <div class="row"><label><input id="lwField" type="checkbox" ${d.configuredFieldSpawnEnabled?'checked':''}> Field AI</label><label><input id="lwDungeon" type="checkbox" ${d.dungeonFillEnabled?'checked':''}> Dungeon AI Fill</label><label><input id="lwTvt" type="checkbox" ${d.tvtFillEnabled?'checked':''}> TvT AI Fill</label></div>
+      <div class="row"><button class="btn" onclick="saveLivingSettings()">Salvar limites e toggles</button><button class="btn ghost" onclick="livingAction('rebalance')">Rebalancear população</button><button class="btn danger" onclick="despawnAllField()">Despawnar IA de campo</button></div></div>`:''}
+    <div class="section"><h3>Estados FSM</h3><p class="muted">${states.map(([s,n])=>`${s}: ${n}`).join(' · ')||'Nenhuma IA ativa.'}</p></div>
+    <div class="section"><h3>Entidades IA</h3><table><thead><tr><th>Nome</th><th>Classe / Nível</th><th>Mapa</th><th>FSM / HP</th><th>Tipo</th><th>runtimeId</th>${manage?'<th>Ação</th>':''}</tr></thead><tbody>${(d.entities||[]).map(x=>`<tr><td>${x.name}</td><td>${x.cls} / ${x.lvl}</td><td>${x.map}</td><td>${x.fsm} · ${Math.max(0,Math.ceil(x.hp))}/${Math.ceil(x.maxHp)}</td><td><span class="pill ${x.type==='FIELD'?'on':'off'}">${x.type}</span></td><td class="muted" title="${x.runtimeId}">${x.runtimeId.slice(0,12)}…</td>${manage?`<td>${x.canDespawn?`<button class="btn danger" onclick="despawnLivingAi('${x.runtimeId}')">Despawn</button>`:'—'}</td>`:''}</tr>`).join('')||`<tr><td colspan="${manage?7:6}" class="muted">Nenhuma IA ativa.</td></tr>`}</tbody></table></div>`;
+}
+async function livingAction(action){try{await api('/api/admin/living-world/'+action,{method:'POST',body:'{}'});toast('Controle aplicado');await renderLivingWorld(document.getElementById('main'));}catch(e){toast(e.message)}}
+async function saveLivingSettings(){try{await api('/api/admin/living-world/settings',{method:'POST',body:JSON.stringify({fieldWorldCap:Number(document.getElementById('lwCap').value),perMapCap:Number(document.getElementById('lwMapCap').value),fieldSpawnEnabled:document.getElementById('lwField').checked,dungeonFillEnabled:document.getElementById('lwDungeon').checked,tvtFillEnabled:document.getElementById('lwTvt').checked})});toast('Configuração persistida');await renderLivingWorld(document.getElementById('main'));}catch(e){toast(e.message)}}
+async function despawnAllField(){if(!confirm('Remover todas as IAs de campo que estejam fora de combate? Dungeon, TvT e instâncias não serão afetadas.'))return;await livingAction('despawn-field')}
+async function despawnLivingAi(id){if(!confirm('Despawnar esta IA de campo?'))return;try{await api('/api/admin/living-world/ai/'+encodeURIComponent(id)+'/despawn',{method:'POST',body:'{}'});toast('IA removida');await renderLivingWorld(document.getElementById('main'));}catch(e){toast(e.message)}}
 async function renderNews(main){
   const n = await api('/api/public/news');
   main.innerHTML = `<div class="row" style="flex-direction:column;align-items:stretch;max-width:520px">

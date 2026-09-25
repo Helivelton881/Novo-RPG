@@ -1686,3 +1686,25 @@ Os dois foram verificados com um script reproduzindo exatamente o cenário do re
 ## Validação final (após todas as correções)
 
 `node -c` limpo em `server.js`/`game-data/tvt.js`/`game-data/dungeon-generation.js`. Suite completa estável em múltiplas execuções consecutivas: **530 testes / 355 passando / 0 falhando / 175 pulados** (os pulados continuam exigindo Supabase de teste real, nenhum contado como passado).
+
+# FASE 5.16.1 — LIVING WORLD ADMIN CONTROL
+
+Esta fase adiciona uma camada operacional à implementação existente da Fase 5.16; não cria uma segunda IA e não persiste Aventureiros IA. A única persistência nova é o singleton `living_world_settings`, carregado no boot com timeout de 3 segundos e defaults seguros (`field=true`, `dungeon=true`, `tvt=true`, cap de campo 10, cap por mapa 4). Falha do Supabase gera apenas warning sanitizado e nunca impede o servidor de subir. Escritas são serializadas no processo e fazem upsert atômico do singleton.
+
+## RBAC e APIs
+
+`support` e `moderator` recebem apenas `view_living_world`; `admin` e `owner` também recebem `manage_living_world`. O painel usa `GET /api/admin/living-world`; pause, resume, settings, rebalance, despawn de campo e despawn individual usam rotas POST sob `/api/admin/living-world`. Todas as decisões são refeitas no servidor: role nunca vem do cliente, runtimeId é validado contra a entidade ativa, e caps são inteiros validados contra `FIELD_AI_HARD_MAX=40` e `PER_MAP_HARD_MAX=10`.
+
+Toda mutação grava `admin_audit_log` (`living_world_pause`, `living_world_resume`, `living_world_set_limits`, `living_world_rebalance`, `living_world_despawn_field`, `living_world_despawn_ai`). Metadata é limitada a caps, quantidade afetada, zona e runtimeId e ainda passa pelo sanitizador global que remove password/token/session/service role.
+
+## Semântica e controles
+
+Pause desliga somente novos spawns automáticos de campo; não congela FSM, combate ou entidades existentes. Dungeon AI Fill e TvT AI Fill têm toggles persistentes próprios e continuam ativos durante pause de campo. `fieldWorldCap` e `perMapCap` contam apenas IA FIELD; Dungeon/TvT podem ultrapassar o teto ambiental e humanos continuam tendo prioridade.
+
+Reduzir o cap não mata combate: cada population tick remove gradualmente no máximo uma IA FIELD segura (`idle`, `wander` ou `rest`) até o novo limite. Rebalance converge as IAs FIELD seguras das zonas mais cheias para as menos cheias por despawn+respawn; nunca teleporta combate e nunca toca Party, Dungeon, TvT ou instância ativa. O despawn global também remove somente IA FIELD segura; a ação individual só aparece e só é aceita para esse mesmo tipo.
+
+## Painel, testes e limitações
+
+A aba **Living World** em `admin.html` atualiza aproximadamente a cada 5 segundos e mostra humanos, campo/cap, Dungeon, TvT, total, mapas, FSM e a tabela runtime (nome, classe, nível, mapa, HP, tipo e ID abreviado). Alterações ficam ocultas para cargos read-only e o botão de despawn em massa exige confirmação visual.
+
+`test/living-world-admin.test.js` cobre matriz RBAC, defaults/hard limits, migration/RLS, pause/resume, caps global e por mapa, toggles independentes, isolamento de Dungeon/TvT em despawn/rebalance, status, auditoria e ausência de caminhos de economia. A serialização é por processo Node; uma futura escala horizontal com múltiplas instâncias exigiria lock/transação no banco. Rebalance converge numa chamada, mas somente com entidades seguras; uma IA em combate fica onde está até sair de combate.

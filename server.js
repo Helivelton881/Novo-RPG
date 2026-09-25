@@ -1550,10 +1550,10 @@ async function handleParty(req, res, pathname) {
 // centralizada: cada rota do painel checa uma permissao nomeada, nunca
 // compara `role==='admin'` espalhado pelo codigo.
 const ADMIN_PERMS = Object.freeze({
-  owner:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','manage_roles','view_guilds','view_events','view_security_log','manage_news'],
-  admin:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','view_guilds','view_events','view_security_log','manage_news'],
-  moderator: ['view_dashboard','search_players','kick','mute','ban','unban','view_guilds','view_events'],
-  support:   ['view_dashboard','search_players','view_guilds','view_events'],
+  owner:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','manage_roles','view_guilds','view_events','view_security_log','manage_news','view_living_world','manage_living_world'],
+  admin:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','view_guilds','view_events','view_security_log','manage_news','view_living_world','manage_living_world'],
+  moderator: ['view_dashboard','search_players','kick','mute','ban','unban','view_guilds','view_events','view_living_world'],
+  support:   ['view_dashboard','search_players','view_guilds','view_events','view_living_world'],
 });
 function adminHasPerm(role, perm) { return !!(ADMIN_PERMS[role] || []).includes(perm); }
 // Hierarquia de cargo (corrigido apos revisao pre-merge, achado real):
@@ -1667,13 +1667,61 @@ async function handleAdmin(req, res, pathname) {
       }); return true;
     }
     if (pathname === '/api/admin/ai' && req.method === 'GET') {
-      if (!adminHasPerm(admin.role,'view_dashboard')) { json(res,403,{error:'Sem permissão'}); return true; }
-      const byZone = {};
-      for (const ai of aiEntities.values()) byZone[ai.map] = (byZone[ai.map] || 0) + 1;
-      json(res,200,{
-        total: aiEntities.size, maxPopulation: AI_MAX_POPULATION, byZone,
-        entities: [...aiEntities.values()].map(ai => ({id:ai.id, kind:'ai', name:ai.name, cls:ai.cls, lvl:ai.lvl, map:ai.map, fsm:ai.fsm, hp:ai.hp, maxHp:ai.maxHp, dead:ai.dead, slot:ai.slot})),
-      }); return true;
+      if (!adminHasPerm(admin.role,'view_living_world')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const status=livingWorldStatus();
+      json(res,200,{total:status.totalAi,maxPopulation:status.field.cap,byZone:status.perMap,entities:status.entities});return true;
+    }
+
+    if (pathname === '/api/admin/living-world' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_living_world')) { json(res,403,{error:'Sem permissão'}); return true; }
+      json(res,200,livingWorldStatus());return true;
+    }
+    if (pathname === '/api/admin/living-world/pause' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_living_world')) { json(res,403,{error:'Sem permissão'}); return true; }
+      await persistLivingWorldConfig(admin.id,{fieldSpawnEnabled:false});
+      await writeAdminAudit(admin.id,'living_world_pause');
+      json(res,200,livingWorldStatus());return true;
+    }
+    if (pathname === '/api/admin/living-world/resume' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_living_world')) { json(res,403,{error:'Sem permissão'}); return true; }
+      await persistLivingWorldConfig(admin.id,{fieldSpawnEnabled:true});
+      await writeAdminAudit(admin.id,'living_world_resume');
+      json(res,200,livingWorldStatus());return true;
+    }
+    if (pathname === '/api/admin/living-world/settings' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_living_world')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input=await readJson(req),changes={};
+      for(const [key,max] of [['fieldWorldCap',FIELD_AI_HARD_MAX],['perMapCap',PER_MAP_HARD_MAX]]){
+        if(input[key]!==undefined){const n=Number(input[key]);if(!Number.isInteger(n)||n<0||n>max){json(res,400,{error:`${key} deve ser inteiro entre 0 e ${max}`});return true;}changes[key]=n;}
+      }
+      for(const key of ['fieldSpawnEnabled','dungeonFillEnabled','tvtFillEnabled']){
+        if(input[key]!==undefined){if(typeof input[key]!=='boolean'){json(res,400,{error:`${key} deve ser booleano`});return true;}changes[key]=input[key];}
+      }
+      if(!Object.keys(changes).length){json(res,400,{error:'Nenhuma configuração válida informada'});return true;}
+      const old={...livingWorldConfig},next=await persistLivingWorldConfig(admin.id,changes);
+      await writeAdminAudit(admin.id,'living_world_set_limits',{metadata:{oldCap:old.fieldWorldCap,newCap:next.fieldWorldCap,oldPerMapCap:old.perMapCap,newPerMapCap:next.perMapCap}});
+      json(res,200,livingWorldStatus());return true;
+    }
+    if (pathname === '/api/admin/living-world/rebalance' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_living_world')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const affectedCount=rebalanceFieldAi();
+      await writeAdminAudit(admin.id,'living_world_rebalance',{metadata:{affectedCount}});
+      json(res,200,{...livingWorldStatus(),affectedCount});return true;
+    }
+    if (pathname === '/api/admin/living-world/despawn-field' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_living_world')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const affectedCount=despawnFieldAi({all:true});
+      await writeAdminAudit(admin.id,'living_world_despawn_field',{metadata:{affectedCount}});
+      json(res,200,{...livingWorldStatus(),affectedCount});return true;
+    }
+    const livingDespawnMatch=pathname.match(/^\/api\/admin\/living-world\/ai\/([^/]+)\/despawn$/);
+    if (livingDespawnMatch && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_living_world')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const runtimeId=cleanText(decodeURIComponent(livingDespawnMatch[1]),64),ai=aiEntities.get(runtimeId);
+      if(!isSafeFieldAi(ai)){json(res,409,{error:'Somente IA de campo fora de combate pode ser removida'});return true;}
+      const affectedCount=despawnFieldAi({runtimeId});
+      await writeAdminAudit(admin.id,'living_world_despawn_ai',{metadata:{affectedCount,runtimeId,zone:ai.map}});
+      json(res,200,{...livingWorldStatus(),affectedCount});return true;
     }
 
     if (pathname === '/api/admin/players' && req.method === 'GET') {
@@ -2586,6 +2634,8 @@ function tvtFillTargetSize(humanCount) {
   if (size % 2 !== 0) size++;
   return Math.min(size, TVT.TVT_MAX_PLAYERS);
 }
+function tvtAiFillTargetSize(humanCount){return livingWorldConfig.tvtFillEnabled?tvtFillTargetSize(humanCount):humanCount;}
+function dungeonAiFillEnabled(){return livingWorldConfig.dungeonFillEnabled;}
 async function startTvtEvent(event,registrations){
   try{
     const regs=[...registrations.values()].sort((a,b)=>a.registeredAt-b.registeredAt);
@@ -2607,7 +2657,7 @@ async function startTvtEvent(event,registrations){
     // foi removido: agora a IA fecha a diferenca em vez de descartar um
     // humano que se inscreveu). Nivel da IA = media dos humanos reais
     // carregados, pra ficar equilibrado (nem fraco nem forte demais).
-    const targetSize=tvtFillTargetSize(loaded.length);
+    const targetSize=tvtAiFillTargetSize(loaded.length);
     const aiNeeded=Math.max(0,targetSize-loaded.length);
     const aiMembers=[];
     if(aiNeeded>0){
@@ -3269,7 +3319,7 @@ async function formDungeonGroup(zone, group) {
   // state.members (memoria, da instancia), nunca em parties/memberParty.
   const anyAllowAiFill = group.some(([, e]) => e.allowAiFill);
   const aiFillMembers = [];
-  if (anyAllowAiFill && validMembers.length < DUNGEON_QUEUE_PREFERRED_SIZE) {
+  if (dungeonAiFillEnabled() && anyAllowAiFill && validMembers.length < DUNGEON_QUEUE_PREFERRED_SIZE) {
     const [lo, hi] = aiZoneLevelRange(zone);
     // NUNCA respeita AI_MAX_POPULATION aqui (bug corrigido apos revisao
     // pre-merge): em producao, a IA de campo ambiental fica permanentemente
@@ -3368,11 +3418,41 @@ function dungeonQueueTick() {
 // sempre ZERO por construcao, nunca uma checagem condicional que possa
 // ser esquecida em algum caminho.
 const AI_TICK_MS = 1000; // reusa o tick de 1s ja existente -- dentro de 500-1000ms
-const AI_MAX_POPULATION = 10; // teto conservador de partida (ver limitacoes -- benchmark real de carga nao foi possivel nesta sessao)
+const AI_MAX_POPULATION = 10; // compatibilidade/export legado; runtime usa livingWorldConfig.fieldWorldCap
+const FIELD_AI_HARD_MAX = 40, PER_MAP_HARD_MAX = 10;
+const LIVING_WORLD_DEFAULTS = Object.freeze({fieldSpawnEnabled:true,dungeonFillEnabled:true,tvtFillEnabled:true,fieldWorldCap:10,perMapCap:4});
+const livingWorldConfig = Object.seal({...LIVING_WORLD_DEFAULTS});
+let livingWorldConfigLock = Promise.resolve();
+function normalizeLivingWorldSettings(raw={}) {
+  const int=(v,d,max)=>Number.isInteger(Number(v))&&Number(v)>=0&&Number(v)<=max?Number(v):d;
+  return {
+    fieldSpawnEnabled:typeof raw.fieldSpawnEnabled==='boolean'?raw.fieldSpawnEnabled:typeof raw.field_spawn_enabled==='boolean'?raw.field_spawn_enabled:LIVING_WORLD_DEFAULTS.fieldSpawnEnabled,
+    dungeonFillEnabled:typeof raw.dungeonFillEnabled==='boolean'?raw.dungeonFillEnabled:typeof raw.dungeon_fill_enabled==='boolean'?raw.dungeon_fill_enabled:LIVING_WORLD_DEFAULTS.dungeonFillEnabled,
+    tvtFillEnabled:typeof raw.tvtFillEnabled==='boolean'?raw.tvtFillEnabled:typeof raw.tvt_fill_enabled==='boolean'?raw.tvt_fill_enabled:LIVING_WORLD_DEFAULTS.tvtFillEnabled,
+    fieldWorldCap:int(raw.fieldWorldCap??raw.field_world_cap,LIVING_WORLD_DEFAULTS.fieldWorldCap,FIELD_AI_HARD_MAX),
+    perMapCap:int(raw.perMapCap??raw.per_map_cap,LIVING_WORLD_DEFAULTS.perMapCap,PER_MAP_HARD_MAX),
+  };
+}
+function applyLivingWorldConfig(raw) { Object.assign(livingWorldConfig,normalizeLivingWorldSettings(raw));return livingWorldConfig; }
+async function loadLivingWorldConfig() {
+  let timeout;
+  try {
+    const failFast=new Promise((_,reject)=>{timeout=setTimeout(()=>reject(new Error('LIVING_WORLD_CONFIG_TIMEOUT')),3000);timeout.unref();});
+    const rows=await Promise.race([supabase('living_world_settings',{query:'?select=field_spawn_enabled,dungeon_fill_enabled,tvt_fill_enabled,field_world_cap,per_map_cap&id=eq.1&limit=1'}),failFast]);
+    applyLivingWorldConfig(rows[0]||LIVING_WORLD_DEFAULTS);
+  }
+  catch(err){Object.assign(livingWorldConfig,LIVING_WORLD_DEFAULTS);console.warn('living_world_config_load_warning',err.message==='SUPABASE_NOT_CONFIGURED'?'not_configured':'unavailable');}
+  finally{if(timeout)clearTimeout(timeout);}
+  return livingWorldConfig;
+}
+function persistLivingWorldConfig(actorUserId,changes) {
+  const run=async()=>{const next=normalizeLivingWorldSettings({...livingWorldConfig,...changes});const rows=await supabase('living_world_settings',{method:'POST',query:'?on_conflict=id',body:{id:1,field_spawn_enabled:next.fieldSpawnEnabled,dungeon_fill_enabled:next.dungeonFillEnabled,tvt_fill_enabled:next.tvtFillEnabled,field_world_cap:next.fieldWorldCap,per_map_cap:next.perMapCap,updated_at:new Date().toISOString(),updated_by:actorUserId||null},prefer:'resolution=merge-duplicates,return=representation'});applyLivingWorldConfig(rows[0]||next);return{...livingWorldConfig};};
+  livingWorldConfigLock=livingWorldConfigLock.then(run,run);return livingWorldConfigLock;
+}
 // Ligado por padrao (mundo vivo de verdade em producao) -- so
 // aiPopulationTick() (spawn automatico em background) e afetado; criar
-// uma IA manualmente (aiSpawnEntity direto, usado pelos testes puros e
-// por um futuro preenchimento de fila/TvT) nunca depende desta flag.
+// uma IA manualmente (aiSpawnEntity direto, usado pelos testes puros de
+// campo) nunca depende desta flag. Dungeon/TvT têm criadores próprios.
 // test/helpers.js desliga explicitamente (AI_ENABLED=0) em todo
 // servidor de teste -- nenhuma suite depende de atores nao controlados
 // aparecendo sozinhos no mapa compartilhado de um teste.
@@ -3429,6 +3509,25 @@ function buildAiCombat(cls, lvl, name) {
   return WORLD_BOSS.combatSnapshot({userId:null, charId:null, name, cls, lvl, save:buildAiSave(cls, lvl)});
 }
 const aiEntities = new Map(); // aiId -> entity (runtime-only, nunca Supabase)
+function fieldAiEntities(){return[...aiEntities.values()].filter(ai=>!ai.slot&&AI_FIELD_ZONES.includes(ai.map));}
+function instanceAiCounts(){let dungeon=0,tvt=0;for(const ai of aiEntities.values()){if(ai.slot?.kind==='dungeon')dungeon++;else if(ai.slot?.kind==='tvt')tvt++;}return{dungeon,tvt};}
+function fieldAiCounts(){const counts=Object.fromEntries(AI_FIELD_ZONES.map(z=>[z,0]));for(const ai of fieldAiEntities())counts[ai.map]++;return counts;}
+function isSafeFieldAi(ai){return!!ai&&!ai.slot&&AI_FIELD_ZONES.includes(ai.map)&&['idle','wander','rest'].includes(ai.fsm)&&!ai.dead;}
+function aiRuntimeType(ai){return ai.slot?.kind==='dungeon'?'DUNGEON':ai.slot?.kind==='tvt'?'TVT':'FIELD';}
+function livingWorldStatus(){
+  const field=fieldAiEntities(),instances=instanceAiCounts(),perMap=fieldAiCounts(),fsmStates={};
+  for(const ai of aiEntities.values())fsmStates[ai.fsm]=(fsmStates[ai.fsm]||0)+1;
+  const humanOnline=new Set([...clients.values()].filter(p=>p.authed).map(p=>p.userId)).size;
+  return {
+    spawnEnabled:aiEnabled()&&livingWorldConfig.fieldSpawnEnabled,
+    configuredFieldSpawnEnabled:livingWorldConfig.fieldSpawnEnabled,
+    dungeonFillEnabled:livingWorldConfig.dungeonFillEnabled,tvtFillEnabled:livingWorldConfig.tvtFillEnabled,
+    field:{count:field.length,cap:livingWorldConfig.fieldWorldCap,perMapCap:livingWorldConfig.perMapCap,capReached:field.length>=livingWorldConfig.fieldWorldCap},
+    instances,totalAi:aiEntities.size,humanOnline,worldPopulation:humanOnline+aiEntities.size,perMap,fsmStates,
+    hardLimits:{fieldWorldCap:FIELD_AI_HARD_MAX,perMapCap:PER_MAP_HARD_MAX},
+    entities:[...aiEntities.values()].map(ai=>({id:ai.id,runtimeId:ai.id,kind:'ai',name:ai.name,cls:ai.cls,lvl:ai.lvl,map:ai.map,fsm:ai.fsm,hp:ai.hp,maxHp:ai.maxHp,dead:ai.dead,slot:ai.slot,type:aiRuntimeType(ai),canDespawn:isSafeFieldAi(ai)})),
+  };
+}
 function aiPublicPlayer(ai) {
   // Mesmo formato de publicPlayer() -- reusa 100% do pipeline de
   // renderizacao ja existente no cliente pra outros jogadores (nenhum
@@ -3446,7 +3545,9 @@ function aiSpawnAnchor(zone) {
   return {x:MOB_WORLD_W * (.3 + Math.random() * .4), y:MOB_WORLD_H * (.3 + Math.random() * .4)};
 }
 function aiSpawnEntity(zone) {
-  if (aiEntities.size >= AI_MAX_POPULATION) return null;
+  if (!AI_FIELD_ZONES.includes(zone)) return null;
+  const field=fieldAiEntities(),counts=fieldAiCounts();
+  if(field.length>=livingWorldConfig.fieldWorldCap||counts[zone]>=livingWorldConfig.perMapCap)return null;
   const cls = AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
   const [lo, hi] = aiZoneLevelRange(zone);
   const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
@@ -3473,13 +3574,37 @@ function aiDespawnEntity(id) {
   aiEntities.delete(id);
   broadcast({type:'player_leave', id});
 }
+function despawnFieldAi({runtimeId=null,all=false}={}){
+  const candidates=fieldAiEntities().filter(ai=>isSafeFieldAi(ai)&&(runtimeId?ai.id===runtimeId:true));
+  const selected=runtimeId?candidates.slice(0,1):all?candidates:candidates.slice(0,1);
+  for(const ai of selected)aiDespawnEntity(ai.id);return selected.length;
+}
+function rebalanceFieldAi(){
+  let affected=0;
+  const maxMoves=fieldAiEntities().length;
+  while(affected<maxMoves){
+    const counts=fieldAiCounts();
+    const low=AI_FIELD_ZONES.reduce((a,z)=>counts[z]<counts[a]?z:a,AI_FIELD_ZONES[0]);
+    const high=AI_FIELD_ZONES.reduce((a,z)=>counts[z]>counts[a]?z:a,AI_FIELD_ZONES[0]);
+    if(counts[high]-counts[low]<=1||counts[low]>=livingWorldConfig.perMapCap)break;
+    const candidate=fieldAiEntities().find(ai=>ai.map===high&&isSafeFieldAi(ai));if(!candidate)break;
+    aiDespawnEntity(candidate.id);
+    if(!aiSpawnEntity(low))break;
+    affected++;
+  }
+  return affected;
+}
 // Distribuicao: sempre povoa a zona MENOS povoada primeiro -- nunca
 // concentra toda a populacao de IA numa unica zona.
 function aiPopulationTick() {
-  if (!aiEnabled() || aiEntities.size >= AI_MAX_POPULATION) return;
-  const counts = Object.fromEntries(AI_FIELD_ZONES.map(z => [z, 0]));
-  for (const ai of aiEntities.values()) if (counts[ai.map] != null) counts[ai.map]++;
-  const zone = AI_FIELD_ZONES.reduce((min, z) => counts[z] < counts[min] ? z : min, AI_FIELD_ZONES[0]);
+  if(!aiEnabled())return;
+  const field=fieldAiEntities(),counts=fieldAiCounts();
+  if(field.length>livingWorldConfig.fieldWorldCap){despawnFieldAi();return;}
+  const overMap=AI_FIELD_ZONES.find(z=>counts[z]>livingWorldConfig.perMapCap);
+  if(overMap){const candidate=field.find(ai=>ai.map===overMap&&isSafeFieldAi(ai));if(candidate)aiDespawnEntity(candidate.id);return;}
+  if(!livingWorldConfig.fieldSpawnEnabled||field.length>=livingWorldConfig.fieldWorldCap)return;
+  const eligible=AI_FIELD_ZONES.filter(z=>counts[z]<livingWorldConfig.perMapCap);if(!eligible.length)return;
+  const zone = eligible.reduce((min, z) => counts[z] < counts[min] ? z : min, eligible[0]);
   aiSpawnEntity(zone);
 }
 function aiTransition(ai, next, now, extra) { ai.fsm = next; ai.fsmUntil = 0; if (extra) Object.assign(ai, extra); }
@@ -4789,7 +4914,7 @@ setInterval(() => {
 }, 30000).unref();
 
 if (require.main === module) {
-  server.listen(PORT, '0.0.0.0', () => console.log(`MMORPG Online em http://localhost:${PORT}`));
+  loadLivingWorldConfig().finally(()=>server.listen(PORT,'0.0.0.0',()=>console.log(`MMORPG Online em http://localhost:${PORT}`)));
 }
 // Exportado so pra teste unitario puro (sem HTTP/Supabase) das funcoes de
 // item/posse da Fase 5.1 -- nao muda nada em como `node server.js` roda
@@ -4812,8 +4937,11 @@ module.exports = {
   aiEntities, aiSpawnEntity, aiDespawnEntity, aiPopulationTick, aiStep, aiTick,
   aiPublicPlayer, aiPresentOnMap, buildAiSave, buildAiCombat, aiZoneLevelRange,
   aiPersonalityProfile, aiSpawnAnchor, dungeonHandleMobDeath, aiDoCombat, aiDoIdle, aiDoHunt, aiDoTvt,
-  formDungeonGroup, tvtFillTargetSize,
+  formDungeonGroup, tvtFillTargetSize, tvtAiFillTargetSize, dungeonAiFillEnabled,
   AI_MAX_POPULATION, AI_FIELD_ZONES, AI_CLASS_POOL, aiEnabled,
+  FIELD_AI_HARD_MAX, PER_MAP_HARD_MAX, LIVING_WORLD_DEFAULTS, livingWorldConfig,
+  normalizeLivingWorldSettings, applyLivingWorldConfig, loadLivingWorldConfig, persistLivingWorldConfig,
+  fieldAiEntities, fieldAiCounts, instanceAiCounts, isSafeFieldAi, despawnFieldAi, rebalanceFieldAi, livingWorldStatus,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):

@@ -56,7 +56,7 @@ test('aiSpawnEntity/aiDespawnEntity: entra e sai do Map, nunca deixa rastro', ()
 });
 test('aiSpawnEntity: nunca passa do teto de populacao (AI_MAX_POPULATION)', () => {
   S.aiEntities.clear();
-  for (let i = 0; i < S.AI_MAX_POPULATION + 5; i++) S.aiSpawnEntity('floresta');
+  for (let i = 0; i < S.AI_MAX_POPULATION + 5; i++) S.aiSpawnEntity(S.AI_FIELD_ZONES[i % S.AI_FIELD_ZONES.length]);
   assert.equal(S.aiEntities.size, S.AI_MAX_POPULATION);
   S.aiEntities.clear();
 });
