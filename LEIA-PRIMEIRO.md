@@ -1413,3 +1413,75 @@ Os 11 testes puros rodam de verdade nesta sessão e passam — cobrem exaustivam
 - **Sem persistência entre sessões** — sair do jogo remove a entrada da fila como qualquer desconexão (com a mesma tolerância de 20s); não existe "voltar pra fila de onde parei" depois de fechar a aba de propósito.
 - **`allowAiFill` e `soloOptIn` preparados mas sem UI dedicada pra ligar/desligar** — o cliente atual nunca manda `allowAiFill` (fica sempre `false`) nem `soloOptIn` (fica sempre `false`, então o fallback solo nunca dispara na prática hoje); os campos existem no protocolo servidor-cliente exatamente como pedido ("flag allowAiFill preparada, IA não spawna ainda"), prontos pra Fase 5.16 ligar preenchimento por IA e pra uma fase futura de UI adicionar as opções, sem precisar mexer no núcleo da fila de novo.
 - **Nenhuma migração de banco** — toda a fila é em memória; nada foi persistido no Supabase.
+
+# FASE 5.14 — ADMIN + OBSERVABILIDADE
+
+**Escopo**: painel administrativo separado (`/admin`, `admin.html`) com RBAC de 4 níveis, moderação persistente e auditada (kick/mute/ban/unban), visão somente-leitura de economia/guildas/eventos, e um log de segurança com lista explícita do que nunca é gravado.
+
+## Banco de dados: auditado antes de qualquer migração
+
+Antes de escrever qualquer SQL, o schema real do Supabase do projeto (`MMORPG 2D V0.22 Online`, o único projeto `ACTIVE_HEALTHY`, com dados reais — 10 usuários, 10 personagens) foi lido via `list_tables`: `users`, `characters`, `sessions`, `friends`, `guilds`/`guild_members`/`guild_invites`, `character_bestiary`, `character_rank_stats`, `market_listings`/`market_transactions`/`market_claims`. Nenhuma das tabelas candidatas (`admin_roles`, `moderation_actions`, `player_bans`, `player_mutes`, `admin_audit_log`) existia — confirmando que a migração é 100% nova, nunca um conflito com algo já lá.
+
+**Decisão registrada com o usuário**: como é o banco de produção real (não um projeto de teste), foi oferecida a opção de criar uma branch de desenvolvimento do Supabase antes de aplicar qualquer coisa (custo: $0.01344/hora) — o usuário optou por aplicar direto na produção, confiando que a migração é puramente aditiva (só `CREATE TABLE`, nenhuma tabela existente alterada). A migração foi aplicada com `apply_migration` (não um arquivo SQL só documentado — rodou de verdade no projeto real) e os Advisors de Segurança/Performance foram executados logo em seguida, como exigido.
+
+## Schema (100% aditivo)
+
+4 tabelas novas, nenhuma tabela existente tocada — `moderation_actions` foi **deliberadamente fundida** em `admin_audit_log` (toda ação de moderação já é uma entrada de auditoria; não fazia sentido manter duas tabelas espelhadas para a mesma informação):
+- `admin_roles(user_id PK, role, granted_by, granted_at)` — `role` restrito por `check` a `owner`/`admin`/`moderator`/`support`.
+- `player_bans(id, user_id, reason, banned_by, created_at, expires_at NULL=permanente, revoked_at, revoked_by)`.
+- `player_mutes` — mesma forma de `player_bans`, para chat.
+- `admin_audit_log(id, actor_user_id, action, target_user_id, target_character_id, reason, metadata jsonb, created_at)` — toda ação administrativa (kick/mute/ban/unban/concessão de cargo) grava uma linha aqui.
+
+RLS habilitado em todas, **sem nenhuma policy** para `anon`/`authenticated` — exatamente o mesmo padrão já usado nas 12 tabelas pré-existentes (confirmado pelo Advisor: a mesma checagem informativa `rls_enabled_no_policy` já existia pras 12 tabelas antigas, não é uma novidade desta fase). Só o backend, autenticado com a service-role key (que ignora RLS por padrão no Supabase), lê/escreve — nunca o cliente direto. O Performance Advisor sinalizou 6 foreign keys sem índice de cobertura (`granted_by`/`banned_by`/`revoked_by`/`muted_by`/`revoked_by`/`target_character_id`) — corrigido numa segunda migração pequena, só nas tabelas novas desta fase (índices em tabelas pré-existentes que o Advisor também sinalizou, como `friends.friend_id`, ficaram de fora por estarem fora do escopo desta fase).
+
+## RBAC: matriz de permissão centralizada, nunca `role==='admin'` espalhado
+
+`ADMIN_PERMS` (`server.js`) mapeia cada um dos 4 cargos pra uma lista de permissões nomeadas (`view_dashboard`, `search_players`, `kick`, `mute`, `ban`, `unban`, `view_economy`, `manage_roles`, `view_guilds`, `view_events`, `view_security_log`) — toda rota do painel checa `adminHasPerm(role, 'permissão_nomeada')`, nunca uma comparação direta de string espalhada pelo código. `support` é somente-leitura (dashboard/busca/guildas/eventos); `moderator` ganha kick/mute/ban/unban; `admin` ganha tudo do moderator mais visão de economia e log de segurança; só `owner` tem `manage_roles` (conceder/revogar qualquer cargo, incluindo outros admins).
+
+## Auth: sempre server-side, nunca localStorage
+
+`resolveAdmin(req)` reusa o **mesmo** token Bearer de sessão de sempre (`resolveUser`, Fase 1) e faz uma leitura fresca de `admin_roles` a **cada requisição** — o cargo nunca é guardado no cliente nem cacheado em memória entre requisições. `admin.html` guarda só o token de sessão (o mesmo que qualquer login do jogo emite) — não existe "senha de admin" separada; quem tem uma conta com uma linha em `admin_roles` vê o painel, quem não tem recebe 403 (`Acesso restrito`) em toda rota `/api/admin/*`.
+
+## Moderação: persistente, auditada, aplicada em login E no WebSocket
+
+Ban é checado em **dois** pontos, como pedido explicitamente: `/api/auth/login` (rejeita a emissão de uma sessão nova pra conta banida, com o motivo e a data de expiração se houver) e dentro de `handleWsJoin` (cobre quem já tinha uma sessão válida emitida **antes** do ban — nunca degrada pra "visitante anônimo", fecha a conexão de verdade com o código `4003` e uma mensagem `banned` explícita). Banir uma conta **já conectada** força a desconexão imediata (`kickUserSockets`, reusado por kick e ban) — nunca espera a próxima reconexão pra começar a valer. Mute é checado no join (`p.muted`) e reforçado **em tempo real** pra quem já está conectado (`/api/admin/mute` varre `accountSockets` e liga o flag na conexão viva na hora, sem exigir reconexão) — os dois handlers de chat (`chat` e `guild_chat`) recusam com uma mensagem `muted` em vez de propagar a mensagem. `unban`/`unmute` marcam `revoked_at`/`revoked_by` (histórico nunca é apagado, só desativado) e, no caso do mute, também desligam o flag em tempo real.
+
+## Prazo: calculado na leitura, nunca um job apagando histórico
+
+Ban/mute com `expires_at` vencido continua com `revoked_at is null` no banco pra sempre (nunca reescrito nem apagado) — `activeAmong` (núcleo puro, testado exaustivamente) decide na hora da leitura se uma linha ainda vale (`!revoked_at && (!expires_at || expires_at > agora)`), tanto pro gate de login/WS quanto pro contador do dashboard. Histórico completo fica sempre disponível via `/api/admin/audit`, nunca truncado.
+
+## Cargos: proteção contra travar o painel sozinho
+
+`/api/admin/roles/revoke` recusa remover o **último** `owner` restante (checagem explícita antes de deletar) — sem essa trava, um único erro de clique zeraria `admin_roles` inteiro e ninguém mais conseguiria conceder cargo nenhum, exigindo acesso direto ao banco pra recuperar.
+
+## Economia: somente leitura, de propósito
+
+`/api/admin/economy` soma `gold`/`gem` de todas as `characters.save` reais e conta anúncios ativos/transações do Mercado — **nenhuma ação corretiva foi implementada** (dar/tirar ouro, cancelar transação à força) nesta fase, de propósito: o pedido é explícito que o painel nunca vire um "console de cheat". Se uma ação corretiva pontual for pedida numa fase futura, ela merece seu próprio fluxo auditado com motivo obrigatório e confirmação — não uma rota genérica de "editar economia".
+
+## Log de segurança: lista explícita do que é gravado e do que NUNCA é
+
+`admin_audit_log` grava `action` (kick/ban/unban/mute/unmute/role_grant/role_revoke), quem fez, alvo, motivo e uma `metadata` jsonb livre (ex.: prazo do ban, quantos sockets foram fechados). `sanitizeAuditMetadata` (núcleo puro, testado) filtra qualquer chave cujo nome contenha `password`, `token`, `service_role` ou `session` antes de gravar — mesmo que uma chamada futura passasse um desses campos por engano dentro de `metadata`, ele nunca chegaria no banco.
+
+## Cliente: `admin.html` (separado do jogo)
+
+Página isolada em `/admin` (servida pelo mesmo `server.js`, mapeada especificamente pra `admin.html` — nunca dentro de `index.html`/do canvas do jogo). Login reusa `/api/auth/login`; depois de autenticar, busca `/api/admin/me` pra saber cargo/permissões e monta a navegação só com as abas que o cargo realmente tem acesso (Painel, Jogadores, Economia, Guildas, Eventos, Cargos, Auditoria). Busca de jogador por nome de personagem com ações inline (kick/mute/ban/desmutar/desbanir) quando o cargo permite.
+
+## Bootstrap do primeiro owner
+
+`admin_roles` nasceu vazia — não existe nenhuma rota que crie o primeiro `owner` sozinha (seria um jeito de qualquer conta se auto-promover). O primeiro `owner` precisa ser inserido manualmente uma única vez (SQL direto no projeto, `insert into public.admin_roles (user_id, role) values ('<uuid da conta>', 'owner');`) — depois disso, essa conta usa o próprio painel (`/api/admin/roles`) pra conceder os demais cargos normalmente.
+
+## Testes
+
+`test/admin.test.js` (novo arquivo): **11 testes puros** (sempre rodam, sem Supabase) cobrindo a matriz de permissão inteira (cada cargo x cada permissão relevante), a sanitização de metadata (nunca deixa passar password/token/service_role/session) e o cálculo de ban/mute ativo (permanente ativo, prazo vencido nunca ativo, prazo futuro ativo, revogado sempre inativo, lista vazia nunca quebra) — mais **9 testes de integração real via HTTP/WebSocket** (`{skip:!hasSupabase()}`, mesma convenção do resto da suite): sem cargo nenhum é 403 em tudo; `support` vê dashboard/busca mas 403 em ban/economia/cargos; ban derruba quem está conectado na hora e bloqueia login novo; unban restaura o login; mute bloqueia chat em tempo real sem precisar reconectar; kick derruba uma conexão ativa; `owner` concede `moderator` a outra conta que passa a poder kickar mas não gerenciar cargos; nunca remove o último owner; toda ação de ban gera uma entrada de auditoria sem nenhum campo sensível.
+
+## Verificação
+
+Os 11 testes puros rodam de verdade e passam. Os 9 testes de integração foram escritos pra exercitar o fluxo HTTP/WS completo (login real, join real, chat real) mas **não puderam ser executados aqui**: rodá-los exigiria configurar `SUPABASE_URL`/`SUPABASE_SECRET_KEY` apontando pro projeto real (o único disponível — não existe um projeto de teste separado) e cada teste cria contas reais descartáveis (`newAccount`) e insere linhas reais em `admin_roles`/`player_bans`/`player_mutes` — a mesma convenção que todo outro teste `{skip:!hasSupabase()}` deste repositório segue ("projeto de TESTE, nunca o oficial") teria sido violada rodando contra o único projeto disponível. A correção foi verificada por revisão estática cuidadosa de cada rota (guard de permissão em toda rota, mute/ban aplicados em tempo real via `accountSockets`, prazo calculado só na leitura) e comparação direta com os padrões já comprovados do resto do código (`resolveUser`, `activeCharacterSockets`, `kickUserSockets` espelhando o fechamento de socket já usado por `session_replaced`). **Recomenda-se rodar `npm test` com `SUPABASE_URL`/`SUPABASE_SECRET_KEY` de um projeto de TESTE de verdade antes do próximo merge**, junto com os pendentes das Fases 5.13.1/5.13.2.
+
+## Limitações conhecidas
+
+- **Sem ação corretiva de economia** — de propósito, ver "Economia" acima.
+- **Sem UI de duração de ban/mute no painel** (usa `prompt()` simples pro motivo, sem campo de prazo) — o protocolo servidor (`durationMs`) já aceita prazo, só a UI ainda não expõe um seletor; ban/mute via painel hoje sempre saem permanentes a menos que a API seja chamada diretamente com `durationMs`.
+- **Bootstrap do primeiro owner é manual** (SQL direto), ver acima — decisão deliberada pra nunca existir uma rota de auto-promoção.
+- **9 testes de integração não executados nesta sessão** — ver "Verificação" acima.
+- **Nenhuma métrica de observabilidade além do dashboard básico** (online agora, bans/mutes ativos, atividade recente) — latência/erro-rate/uptime não fazem parte desta fase; o pedido de "métricas leves de observabilidade" foi interpretado como o dashboard administrativo em si, não um sistema de monitoramento de infraestrutura separado.
