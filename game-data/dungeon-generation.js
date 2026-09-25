@@ -1,31 +1,30 @@
 // Fase 5.2 — geracao de masmorra compartilhada entre server.js (require,
 // Node/CommonJS) e index.html (<script src>, expoe window.DUNGEON_GEN).
 //
-// So a FORMA do labirinto (mazeGen) e o RNG (mulberry) moram aqui -- e
-// matematica pura, sem DOM/canvas, entao da pra compartilhar sem risco.
-// Decoracao visual (props/paredes desenhadas) continua 100% no cliente
-// (buildMasmorra em index.html), sem mudanca -- nao afeta jogo/economia,
-// so estetica, e reconstruir esse desenho inteiro fora do cliente seria
-// modularizacao alem do necessario pra esta fase.
+// So a FORMA da masmorra (paredes/salas/corredores) e o RNG (mulberry)
+// moram aqui -- e matematica pura, sem DOM/canvas, entao da pra
+// compartilhar sem risco. Decoracao visual (props/sprites desenhados)
+// continua 100% no cliente (buildMasmorra em index.html), sem mudanca --
+// nao afeta jogo/economia, so estetica.
 //
-// O servidor usa mazeGen() (mesma funcao, mesma saida) pra saber onde
-// ficam as paredes de verdade (colisao de IA de monstro) -- ver
-// dungeonWallRects() abaixo, que espelha a MESMA matematica de bloqueio
-// que buildMasmorra() usa pra desenhar/colidir no cliente (server.js
-// "espelha" varias coisas do cliente do mesmo jeito ha varias fases,
-// ver mobStats/GEAR_DATA/CLASS_DMG -- mesmo padrao aqui).
+// O servidor usa o MESMO layout (mesmos rects de parede) pra saber onde
+// ficam as paredes de verdade (colisao de IA de monstro) que o cliente
+// usa pra desenhar/colidir -- nunca duas fontes que podem divergir.
+//
+// Fase 5.13 -- DUNGEON MAP V2: o labirinto procedural (mazeGen, grade 7x5
+// por seed) foi SUBSTITUIDO por um layout FIXO, desenhado a mao (entrada
+// -> 6 salas nomeadas -> saida, ligadas por corredores). mazeGen()
+// continua exportada (nao removida -- nenhum outro sistema depende dela
+// hoje, mas remover uma funcao pura sem necessidade seria alem do escopo
+// desta fase), mas dungeonLayout() NAO A CHAMA MAIS. Motivo documentado
+// em LEIA-PRIMEIRO.md "FASE 5.13": o layout precisou ser desenhado pra
+// caber dentro do teto global de mundo (MW=60 x MH=44 tiles / 2880x2112px
+// em index.html, o MESMO teto que o anti-teleport do servidor already
+// usa pra QUALQUER mapa) -- nao e um numero novo, e o limite que ja
+// existia, so nunca binding pra masmorra antes (o labirinto 7x5 antigo
+// cabia com folga).
 'use strict';
 
-// Tudo dentro de um IIFE de proposito: este arquivo e carregado como
-// <script> classico (nao module) em index.html, junto com gear-data.js e
-// o script principal -- top-level let/const de scripts classicos
-// distintos compartilham o MESMO escopo lexico global da pagina. Sem o
-// IIFE, nomes daqui (T, MASMORRA_CELL, MASMORRA_PASS, MASMORRA_WALL,
-// mazeGen, etc.) colidem com os mesmos nomes ja declarados no script
-// principal de index.html ("Identifier 'X' has already been declared" --
-// achado real rodando o servidor de verdade, quebrava a pagina inteira).
-// Node (require) ja isola cada arquivo automaticamente, entao o IIFE nao
-// muda nada la, so fecha a brecha do lado do browser.
 (function () {
 
 function mulberry(a) {
@@ -37,11 +36,8 @@ function mulberry(a) {
   };
 }
 
-// Identico ao mazeGen() de index.html -- gera um labirinto perfeito
-// (DFS recursivo por pilha) de cols x rows, entrada no canto inferior
-// esquerdo (sx,sy), e acha por BFS a sala mais distante da entrada (a
-// sala do chefe, bx/by). Determinístico: mesmo seed = mesmo labirinto,
-// sempre (sem isso a Fase 5.2 nao consegue provar layout server-side).
+// Preservada por compatibilidade (matematica pura, sem custo mante-la) --
+// nao e mais chamada por dungeonLayout() desde a Fase 5.13.
 function mazeGen(cols, rows, seed) {
   const rnd = mulberry(seed), cell = () => ({ v: false, N: false, S: false, E: false, W: false });
   const g = Array.from({ length: rows }, () => Array.from({ length: cols }, cell));
@@ -64,54 +60,131 @@ function mazeGen(cols, rows, seed) {
   return { g, sx, sy, bx: far[0], by: far[1], dist };
 }
 
-const T = 48, MASMORRA_CELL = 7, MASMORRA_PASS = 3, MASMORRA_WALL = 1;
-// Mesmo layout de todas as 7 masmorras hoje (buildMasmorra em index.html):
-// grade 7x5, offset fixo (ox=3,oy=4). Preservado exatamente -- nao e um
-// numero mágico novo, é o mesmo hardcode que o cliente já usa.
-const DUNGEON_COLS = 7, DUNGEON_ROWS = 5, DUNGEON_OX = 3, DUNGEON_OY = 4;
+const T = 48, WALL = 1;
 
-// Espelha o loop de paredes de buildMasmorra() (index.html) em retangulos
-// puros {x,y,w,h} em pixels de mundo, pra o servidor checar colisao de IA
-// sem precisar de canvas/DOM. Cliente continua desenhando/colidindo do
-// jeito que sempre desenhou (inalterado) -- isto é só a cópia server-side
-// da mesma matemática, não uma extração/remoção do código do cliente.
-function dungeonWallRects(mz, cols, rows, ox, oy) {
-  const C = MASMORRA_CELL, half = (C - MASMORRA_PASS) / 2, rects = [];
-  const push = (x, y, w, h) => rects.push({ x, y, w, h });
-  for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
-    const rx0 = ox + cx * C, ry0 = oy + cy * C, rx1 = rx0 + C, ry1 = ry0 + C;
-    const c = mz.g[cy][cx];
-    if (!c.N) push(rx0 * T, ry0 * T - MASMORRA_WALL * T, C * T, MASMORRA_WALL * T);
-    else { push(rx0 * T, ry0 * T - MASMORRA_WALL * T, half * T, MASMORRA_WALL * T); push((rx0 + half + MASMORRA_PASS) * T, ry0 * T - MASMORRA_WALL * T, half * T, MASMORRA_WALL * T); }
-    if (!c.S) push(rx0 * T, ry1 * T, C * T, MASMORRA_WALL * T);
-    else { push(rx0 * T, ry1 * T, half * T, MASMORRA_WALL * T); push((rx0 + half + MASMORRA_PASS) * T, ry1 * T, half * T, MASMORRA_WALL * T); }
-    if (!c.W) push(rx0 * T - MASMORRA_WALL * T, ry0 * T, MASMORRA_WALL * T, C * T);
-    else { push(rx0 * T - MASMORRA_WALL * T, ry0 * T, MASMORRA_WALL * T, half * T); push(rx0 * T - MASMORRA_WALL * T, (ry0 + half + MASMORRA_PASS) * T, MASMORRA_WALL * T, half * T); }
-    if (!c.E) push(rx1 * T, ry0 * T, MASMORRA_WALL * T, C * T);
-    else { push(rx1 * T, ry0 * T, MASMORRA_WALL * T, half * T); push(rx1 * T, (ry0 + half + MASMORRA_PASS) * T, MASMORRA_WALL * T, half * T); }
+// ===== Fase 5.13: Dungeon Map V2 -- layout fixo (Ruinas Antigas) =====
+// Sequencia unica, linear, sem ramificacoes: ENTRADA -> SALA1 -> CORR1 ->
+// SALA2 -> (cotovelo) -> SALA3 -> SALA4 -> SALA5 -> (folga) -> CHECKPOINT
+// -> CORRFINAL -> BOSS -> SAIDA. Coordenadas em TILES (x,y = canto
+// superior-esquerdo, w/h = largura/altura incluindo a propria parede).
+// Dimensoes ligeiramente reduzidas em relacao a proposta original pra
+// caber no teto global de mundo (60x44 tiles) -- ver LEIA-PRIMEIRO.md.
+const DUNGEON_ROOMS_V2 = {
+  entrada:    { x:3,  y:4,  w:10, h:8  },
+  sala1:      { x:13, y:3,  w:14, h:10 },
+  corr1:      { x:27, y:6,  w:8,  h:3  },
+  sala2:      { x:35, y:3,  w:16, h:10 },
+  corr2v:     { x:41, y:13, w:3,  h:3  },
+  sala3:      { x:37, y:16, w:12, h:10 },
+  sala4:      { x:19, y:15, w:18, h:12 },
+  sala5:      { x:5,  y:16, w:14, h:10 },
+  gap23:      { x:10, y:26, w:3,  h:4  },
+  checkpoint: { x:7,  y:30, w:10, h:8  },
+  corrfinal:  { x:17, y:32, w:8,  h:4  },
+  boss:       { x:25, y:28, w:20, h:12 },
+  saida:      { x:45, y:30, w:10, h:8  },
+};
+// [idA, ladoDeSaidaEmA, idB, larguraDaPassagem(tiles)]
+const DUNGEON_CONNECTIONS_V2 = [
+  ['entrada','E','sala1',5],
+  ['sala1','E','corr1',3],
+  ['corr1','E','sala2',3],
+  ['sala2','S','corr2v',3],
+  ['corr2v','S','sala3',3],
+  ['sala3','W','sala4',5],
+  ['sala4','W','sala5',5],
+  ['sala5','S','gap23',3],
+  ['gap23','S','checkpoint',3],
+  ['checkpoint','E','corrfinal',4],
+  ['corrfinal','E','boss',6],
+  ['boss','E','saida',6],
+];
+// Salas que recebem monstros comuns (nunca entrada/corredores/checkpoint/
+// saida -- checkpoint e area segura de proposito, o resto e so passagem).
+const DUNGEON_MOB_ROOMS_V2 = ['sala1', 'sala2', 'sala3', 'sala4', 'sala5'];
+
+function wallSegments(rangeFrom, rangeTo, openings) {
+  let segments = [[rangeFrom, rangeTo]];
+  for (const [a, b] of openings) {
+    const next = [];
+    for (const [s, e] of segments) {
+      if (b <= s || a >= e) { next.push([s, e]); continue; }
+      if (a > s) next.push([s, a]);
+      if (b < e) next.push([b, e]);
+    }
+    segments = next;
   }
-  return rects;
+  return segments.filter(([s, e]) => e - s > 0.01);
 }
 
-// Coordenadas de mundo (pixels) do centro de uma celula (cx,cy) da grade,
-// mesma formula de cxw/cyw em buildMasmorra().
-function cellCenter(cx, cy, ox, oy) {
-  const C = MASMORRA_CELL;
-  return { x: (ox + cx * C + C / 2) * T, y: (oy + cy * C + C / 2) * T };
+// Constroi os rects de parede (com vaos/portas exatamente nas conexoes)
+// a partir de DUNGEON_ROOMS_V2/DUNGEON_CONNECTIONS_V2 -- roda uma vez
+// (cacheado), mesma saida sempre (layout fixo, sem seed).
+let _cachedFixedLayout = null;
+function buildFixedDungeonLayout() {
+  if (_cachedFixedLayout) return _cachedFixedLayout;
+  const rooms = DUNGEON_ROOMS_V2;
+  const openingsByRoomSide = {};
+  const addOpening = (id, side, from, to) => { const key = id + side; (openingsByRoomSide[key] = openingsByRoomSide[key] || []).push([from, to]); };
+  for (const [idA, sideA, idB, pass] of DUNGEON_CONNECTIONS_V2) {
+    const A = rooms[idA], B = rooms[idB], opposite = { N: 'S', S: 'N', E: 'W', W: 'E' }[sideA];
+    if (sideA === 'E' || sideA === 'W') {
+      const from0 = Math.max(A.y, B.y), to0 = Math.min(A.y + A.h, B.y + B.h), len = to0 - from0;
+      if (len <= 0) continue;
+      const p = Math.min(pass, len), from = from0 + (len - p) / 2, to = from + p;
+      addOpening(idA, sideA, from, to); addOpening(idB, opposite, from, to);
+    } else {
+      const from0 = Math.max(A.x, B.x), to0 = Math.min(A.x + A.w, B.x + B.w), len = to0 - from0;
+      if (len <= 0) continue;
+      const p = Math.min(pass, len), from = from0 + (len - p) / 2, to = from + p;
+      addOpening(idA, sideA, from, to); addOpening(idB, opposite, from, to);
+    }
+  }
+  const rects = [];
+  const push = (x, y, w, h) => { if (w > 0.01 && h > 0.01) rects.push({ x: Math.round(x * T), y: Math.round(y * T), w: Math.round(w * T), h: Math.round(h * T) }); };
+  for (const id of Object.keys(rooms)) {
+    const r = rooms[id];
+    for (const [s, e] of wallSegments(r.x, r.x + r.w, openingsByRoomSide[id + 'N'] || [])) push(s, r.y - WALL, e - s, WALL);
+    for (const [s, e] of wallSegments(r.x, r.x + r.w, openingsByRoomSide[id + 'S'] || [])) push(s, r.y + r.h, e - s, WALL);
+    for (const [s, e] of wallSegments(r.y, r.y + r.h, openingsByRoomSide[id + 'W'] || [])) push(r.x - WALL, s, WALL, e - s);
+    for (const [s, e] of wallSegments(r.y, r.y + r.h, openingsByRoomSide[id + 'E'] || [])) push(r.x + r.w, s, WALL, e - s);
+  }
+  const entrada = rooms.entrada, boss = rooms.boss, saida = rooms.saida;
+  const start = { x: Math.round((entrada.x + entrada.w / 2) * T), y: Math.round((entrada.y + entrada.h * 0.62) * T) };
+  const bossCenter = { x: Math.round((boss.x + boss.w / 2) * T), y: Math.round((boss.y + boss.h / 2) * T) };
+  const exitPoint = { x: Math.round((saida.x + saida.w / 2) * T), y: Math.round((saida.y + saida.h * 0.4) * T) };
+  _cachedFixedLayout = { rects, start, boss: bossCenter, exitPoint, rooms, mobRooms: DUNGEON_MOB_ROOMS_V2 };
+  return _cachedFixedLayout;
 }
 
-// Gera o layout completo de uma instancia de masmorra a partir so do seed
-// -- mesma saida sempre pro mesmo seed (server e cliente concordam sem
-// trocar geometria pela rede, so o seed).
+// Coordenadas de mundo (pixels) do centro de uma sala nomeada, em tiles.
+function roomCenter(room) {
+  return { x: (room.x + room.w / 2) * T, y: (room.y + room.h / 2) * T };
+}
+// Ponto aleatorio dentro da area caminhavel de uma sala (encolhida pela
+// espessura da parede + uma margem extra, pra nunca nascer colado nela).
+function roomRandomPoint(room, rnd, marginTiles) {
+  const m = (marginTiles == null ? 1.5 : marginTiles);
+  const x0 = (room.x + m) * T, x1 = (room.x + room.w - m) * T;
+  const y0 = (room.y + m) * T, y1 = (room.y + room.h - m) * T;
+  return { x: x0 + rnd() * Math.max(0, x1 - x0), y: y0 + rnd() * Math.max(0, y1 - y0) };
+}
+
+// Gera o layout completo de uma instancia de masmorra. `seed` fica na
+// assinatura por compatibilidade de chamada (o roster de monstros ainda
+// usa seu proprio stream de RNG derivado do seed, mulberry(seed+1),
+// independente da geometria) -- mas a partir da Fase 5.13 a GEOMETRIA em
+// si e sempre a mesma (layout fixo), nunca procedural.
 function dungeonLayout(seed) {
-  const mz = mazeGen(DUNGEON_COLS, DUNGEON_ROWS, seed);
-  const rects = dungeonWallRects(mz, DUNGEON_COLS, DUNGEON_ROWS, DUNGEON_OX, DUNGEON_OY);
-  const start = cellCenter(mz.sx, mz.sy, DUNGEON_OX, DUNGEON_OY);
-  const boss = cellCenter(mz.bx, mz.by, DUNGEON_OX, DUNGEON_OY);
-  return { mz, rects, start, boss, cols: DUNGEON_COLS, rows: DUNGEON_ROWS, ox: DUNGEON_OX, oy: DUNGEON_OY, cellPx: MASMORRA_CELL * T };
+  return buildFixedDungeonLayout();
 }
 
-const DUNGEON_GEN_DATA = { mulberry, mazeGen, dungeonWallRects, cellCenter, dungeonLayout, T, MASMORRA_CELL, MASMORRA_PASS, MASMORRA_WALL, DUNGEON_COLS, DUNGEON_ROWS, DUNGEON_OX, DUNGEON_OY };
+const DUNGEON_GEN_DATA = {
+  mulberry, mazeGen, cellCenter: undefined, dungeonLayout, T, WALL,
+  DUNGEON_ROOMS_V2, DUNGEON_CONNECTIONS_V2, DUNGEON_MOB_ROOMS_V2,
+  roomCenter, roomRandomPoint,
+};
+delete DUNGEON_GEN_DATA.cellCenter; // nunca existiu de verdade no V2 (era so da grade antiga); nao exportar undefined
 if (typeof module !== 'undefined' && module.exports) module.exports = DUNGEON_GEN_DATA;
 else if (typeof window !== 'undefined') window.DUNGEON_GEN = DUNGEON_GEN_DATA;
 
