@@ -6353,6 +6353,20 @@ function applyDungeonState(m){
   buildMasmorra(zoneId,m.seed,m.roster);
   const w=worlds[zoneId+'_d'];w.netMap=m.map;
   setWorld(w);
+  // Fase 5.16.3 (causa raiz do "personagem preso"): nenhum travel/entrada
+  // de masmorra chamava resize() -- na maioria dos casos cw/ch/vw/vh
+  // ficavam bons o bastante (verificado numericamente com a geometria
+  // real da masmorra: spawn nunca cai dentro de parede, camera nunca
+  // corta o jogador pra fora em viewports tipicos). Mas se o tamanho real
+  // do canvas tivesse mudado desde o ultimo resize (chrome do navegador
+  // mobile recolhendo, reflow durante o fade de transicao) e nenhum
+  // evento 'resize' tivesse disparado a tempo, camX/camY/vw/vh ficavam
+  // presos em valores de ANTES de entrar na masmorra ate o jogador mexer
+  // manualmente na configuracao de zoom (que ja chamava resize() sozinho
+  // -- e foi exatamente o que "consertava" o problema). Forcar resize()
+  // aqui, sempre, garante viewport fresco no exato momento em que o
+  // jogador passa a existir dentro da masmorra.
+  resize();
   P.x=m.start?m.start.x:w.start.x;P.y=m.start?m.start.y:w.start.y;P.dir=3;P.inv=1.2;P.kbx=P.kby=0;
   drops.length=0;floaters.length=0;waves.length=0;locName='';
   clearTarget();
