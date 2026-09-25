@@ -130,3 +130,44 @@ test('reconexao: nova conexao com o mesmo token reautentica do zero (nao reusa i
   assert.equal(join.player.lvl, 11);
   obs.close(); conn2.close();
 });
+
+// Hotfix 5.12.1: quando a MESMA conta+personagem entra em dois aparelhos ao
+// mesmo tempo (sem fechar o primeiro antes), o servidor precisa expulsar o
+// socket antigo -- essa parte ja era coberta pelo comportamento existente
+// (activeCharacterSockets em handleWsJoin), mas nunca tinha um teste
+// explicito. O bug real do hotfix era 100% client-side (index.html
+// reconectava sozinho depois do close 4001, criando um loop de "roubo" de
+// sessao entre as duas abas) -- isso foi verificado ao vivo no navegador
+// (mensagem session_replaced recebida, flag terminal setada, running
+// parado, NET.onclose confirmado NAO reagendando reconexao), documentado
+// em LEIA-PRIMEIRO.md. Este teste cobre a metade server-side que É
+// automatizável: A conectado, B conecta com o MESMO token+charId SEM A
+// fechar antes -- A precisa receber session_replaced e ser fechado com o
+// codigo 4001, B precisa continuar valido.
+test('session_replaced: segunda conexao com o mesmo token+charId expulsa a primeira (4001), sem fechar a segunda', { skip: !hasSupabase() }, async () => {
+  const acc = await newCharAccount('mago', 9);
+
+  const connA = await wsConnect(srv);
+  let closeCode = null, closeReason = null;
+  connA.ws.on('close', (code, reason) => { closeCode = code; closeReason = String(reason); });
+  connA.ws.send(JSON.stringify({ type: 'join', name: 'AparelhoA', cls: 'guerreiro', lvl: 1, token: acc.token, charId: acc.id }));
+  await waitFor(connA.msgs, m => m.type === 'welcome', 3000);
+
+  // B entra com o MESMO token+charId -- A ainda esta aberto, nao foi fechado.
+  const connB = await wsConnect(srv);
+  connB.ws.send(JSON.stringify({ type: 'join', name: 'AparelhoB', cls: 'guerreiro', lvl: 1, token: acc.token, charId: acc.id }));
+  await waitFor(connB.msgs, m => m.type === 'welcome', 3000);
+
+  // A deveria ter recebido session_replaced e sido fechado com 4001.
+  await waitFor(connA.msgs, m => m.type === 'session_replaced', 3000);
+  await new Promise(resolve => { const check = () => closeCode !== null ? resolve() : setTimeout(check, 25); check(); });
+  assert.equal(closeCode, 4001);
+  assert.match(closeReason, /Sess[aã]o substitu[ií]da/);
+
+  // B continua valido: consegue mandar/receber normalmente (event_status -> event_state).
+  connB.ws.send(JSON.stringify({ type: 'event_status' }));
+  const state = await waitFor(connB.msgs, m => m.type === 'event_state', 3000);
+  assert.ok(state, 'B deveria continuar respondendo normalmente depois de A ser expulso');
+
+  connB.close();
+});
