@@ -2307,6 +2307,13 @@ const DUNGEON_IDLE_MS = 30 * 60 * 1000, DUNGEON_MAX_LIFE_MS = 2 * 60 * 60 * 1000
 // O campo existe assim (Set, nao um unico id) de proposito pra nao
 // precisar mudar a forma de novo quando a masmorra em grupo for
 // implementada numa fase futura.
+// Fase 5.13: distribuicao de monstros por sala nomeada do layout fixo
+// (game-data/dungeon-generation.js DUNGEON_MOB_ROOMS_V2) -- [minimo,maximo]
+// de mobs comuns por sala, sorteado por instancia via o mesmo stream
+// mulberry(seed+1) de sempre. Sala5 ("elite/guarda") usa 2 mobs comuns em
+// vez de inventar um tier de elite novo (fora do escopo desta fase, que e
+// so mapa/colisao/posicionamento -- ver LEIA-PRIMEIRO.md "Fase 5.13").
+const DUNGEON_ROOM_MOB_COUNTS = { sala1: [2, 3], sala2: [4, 6], sala3: [3, 4], sala4: [5, 7], sala5: [2, 2] };
 function createDungeonInstance(zone, ownerCharId, ownerUserId) {
   const cfg = DUNGEON_CFG[zone];
   if (!cfg) return null;
@@ -2320,21 +2327,24 @@ function createDungeonInstance(zone, ownerCharId, ownerUserId) {
     members: new Set([ownerCharId]), bossDefeated: false, bossId: null,
     createdAt: Date.now(), lastActiveAt: Date.now(),
   });
-  const rnd = DUNGEON_GEN.mulberry(seed + 1); // stream de RNG proprio do roster, independente da forma do labirinto
-  const { mz, ox, oy, cols, rows } = layout;
+  // Fase 5.13: roster distribuido por SALA NOMEADA (layout fixo), nao
+  // mais por chance-por-celula de uma grade uniforme -- mesma fonte de
+  // tipo/nivel por mob (cfg.trash via mobStats), so a distribuicao
+  // espacial mudou. rnd() continua o mesmo stream mulberry(seed+1),
+  // determinístico por instancia.
+  const rnd = DUNGEON_GEN.mulberry(seed + 1);
   let idx = 0;
-  for (let cy = 0; cy < rows; cy++) for (let cx = 0; cx < cols; cx++) {
-    if ((cx === mz.sx && cy === mz.sy) || (cx === mz.bx && cy === mz.by)) continue;
-    if (rnd() >= .72) continue;
-    const n = 1 + (rnd() < .4 ? 1 : 0);
-    const center = DUNGEON_GEN.cellCenter(cx, cy, ox, oy);
+  for (const roomId of layout.mobRooms) {
+    const room = layout.rooms[roomId];
+    const [lo, hi] = DUNGEON_ROOM_MOB_COUNTS[roomId] || [1, 1];
+    const n = lo + Math.floor(rnd() * (hi - lo + 1));
     for (let k = 0; k < n; k++) {
       const pick = cfg.trash(rnd);
       const stats = mobStats(pick.type, pick.lvl, false, pick.k);
       if (!stats) continue;
-      const jx = center.x + (rnd() - .5) * 70, jy = center.y + (rnd() - .5) * 70;
+      const pt = DUNGEON_GEN.roomRandomPoint(room, rnd);
       const id = mapId + ':' + (idx++);
-      state.mobs.set(id, {id,maxhp:stats.hp,hp:stats.hp,dead:false,x:jx,y:jy,sx:jx,sy:jy,state:'idle',respawnAt:0,boss:false,type:pick.type,lvl:pick.lvl,k:pick.k,dun:true,wallRects:layout.rects});
+      state.mobs.set(id, {id,maxhp:stats.hp,hp:stats.hp,dead:false,x:pt.x,y:pt.y,sx:pt.x,sy:pt.y,state:'idle',respawnAt:0,boss:false,type:pick.type,lvl:pick.lvl,k:pick.k,dun:true,wallRects:layout.rects});
     }
   }
   const bp = cfg.boss, bstats = mobStats(bp.type, bp.lvl, true, bp.k), bossHp = bstats ? Math.round(bstats.hp * 3) : 1000;
@@ -3574,6 +3584,8 @@ module.exports = {
   startingSave, ECONOMY_LOCK_FIELDS, createDungeonInstance, dungeonCleanupTick,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
+  // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):
+  DUNGEON_ROOM_MOB_COUNTS,
   // Fase 5.3 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   grantItem, gearLevelForMob, rollGearDrop, applyGearDrops, GEAR_DROP_RATES, DROP_TYPES_BY_CLASS,
   // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):

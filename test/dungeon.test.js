@@ -141,9 +141,119 @@ test('rollDungeonTrashLoot/rollDungeonBossLoot: nunca incluem XP (masmorra nao c
   for (const it of boss.items) assert.equal(it.rarity, 'legendary');
 });
 
-test('DUNGEON_GEN.dungeonLayout: determinístico (mesmo seed = mesmo layout, seeds diferentes tendem a diferir)', () => {
+test('DUNGEON_GEN.dungeonLayout: determinístico (mesmo seed = mesmo layout; Fase 5.13: qualquer seed = mesmo layout, mapa agora e fixo)', () => {
   const a = S.DUNGEON_GEN.dungeonLayout(777);
   const b = S.DUNGEON_GEN.dungeonLayout(777);
   assert.deepEqual(a.start, b.start);
   assert.equal(a.rects.length, b.rects.length);
+});
+
+// ===== Fase 5.13 -- DUNGEON MAP V2: layout fixo (mapa/colisao/spawn) =====
+// A logica da masmorra (roster, combate, loot, reward, boss AI, anti-
+// teleport, Bestiario, Party) NAO mudou -- so o mapa. Testes abaixo
+// cobrem exatamente o que mudou: geometria fixa, bounding box dentro do
+// teto global do mundo, conectividade real (toda porta e caminhavel),
+// nada nasce dentro de parede, e a distribuicao de mobs por sala nomeada.
+
+test('DUNGEON_GEN.dungeonLayout: layout e sempre o MESMO independente do seed (fixo, nao procedural)', () => {
+  const seeds = [1, 777, 999999, 2147483646];
+  const layouts = seeds.map(s => S.DUNGEON_GEN.dungeonLayout(s));
+  for (let i = 1; i < layouts.length; i++) {
+    assert.deepEqual(layouts[i].start, layouts[0].start);
+    assert.deepEqual(layouts[i].boss, layouts[0].boss);
+    assert.deepEqual(layouts[i].exitPoint, layouts[0].exitPoint);
+    assert.equal(layouts[i].rects.length, layouts[0].rects.length);
+  }
+});
+
+test('DUNGEON_GEN: bounding box do layout cabe no teto global do mundo (60x44 tiles / 2880x2112px, o mesmo limite do anti-teleport)', () => {
+  const layout = S.DUNGEON_GEN.dungeonLayout(1);
+  let maxX = 0, maxY = 0;
+  for (const r of layout.rects) { maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); }
+  assert.ok(maxX <= 2880, `largura ${maxX}px excede o teto global de 2880px`);
+  assert.ok(maxY <= 2112, `altura ${maxY}px excede o teto global de 2112px`);
+});
+
+test('DUNGEON_GEN: nenhuma sala/corredor se sobrepoe a outro', () => {
+  const rooms = S.DUNGEON_GEN.DUNGEON_ROOMS_V2;
+  const ids = Object.keys(rooms);
+  const overlap = (a, b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
+    assert.equal(overlap(rooms[ids[i]], rooms[ids[j]]), false, `${ids[i]} e ${ids[j]} nao deveriam se sobrepor`);
+  }
+});
+
+test('DUNGEON_GEN: toda sala nomeada tem pelo menos uma porta (nenhuma sala isolada)', () => {
+  const layout = S.DUNGEON_GEN.dungeonLayout(1);
+  const ids = Object.keys(S.DUNGEON_GEN.DUNGEON_ROOMS_V2);
+  const touching = new Set();
+  for (const [a, , b] of S.DUNGEON_GEN.DUNGEON_CONNECTIONS_V2) { touching.add(a); touching.add(b); }
+  for (const id of ids) assert.ok(touching.has(id), `${id} nunca aparece em nenhuma conexao`);
+});
+
+test('DUNGEON_GEN: sequencia de conexoes forma um unico caminho linear entrada->saida (sem ramificacao/ciclo)', () => {
+  // cada sala aparece no maximo 2 vezes no total de conexoes (uma vez como
+  // origem, uma vez como destino) -- exceto entrada (so origem) e saida
+  // (so destino), que aparecem 1 vez. Isso confirma "linear, sem maze".
+  const conns = S.DUNGEON_GEN.DUNGEON_CONNECTIONS_V2;
+  const count = {};
+  for (const [a, , b] of conns) { count[a] = (count[a] || 0) + 1; count[b] = (count[b] || 0) + 1; }
+  for (const id of Object.keys(S.DUNGEON_GEN.DUNGEON_ROOMS_V2)) {
+    const expected = (id === 'entrada' || id === 'saida') ? 1 : 2;
+    assert.equal(count[id], expected, `${id} deveria aparecer ${expected}x nas conexoes (achado ${count[id]})`);
+  }
+});
+
+test('DUNGEON_GEN: start/boss/exitPoint nunca caem dentro de um rect de parede', () => {
+  const layout = S.DUNGEON_GEN.dungeonLayout(1);
+  const insideAnyWall = (pt) => layout.rects.some(r => pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h);
+  assert.equal(insideAnyWall(layout.start), false, 'spawn do jogador nao pode nascer dentro de parede');
+  assert.equal(insideAnyWall(layout.boss), false, 'chefe nao pode nascer dentro de parede');
+  assert.equal(insideAnyWall(layout.exitPoint), false, 'portal de saida nao pode ficar dentro de parede');
+});
+
+test('DUNGEON_GEN: o ponto medio de cada conexao (porta) e caminhavel (nao coberto por nenhum rect de parede)', () => {
+  const layout = S.DUNGEON_GEN.dungeonLayout(1), rooms = S.DUNGEON_GEN.DUNGEON_ROOMS_V2, T = S.DUNGEON_GEN.T;
+  const insideAnyWall = (pt) => layout.rects.some(r => pt.x > r.x && pt.x < r.x + r.w && pt.y > r.y && pt.y < r.y + r.h);
+  for (const [a, , b] of S.DUNGEON_GEN.DUNGEON_CONNECTIONS_V2) {
+    const A = rooms[a], B = rooms[b];
+    const midX = (Math.max(A.x, B.x) + Math.min(A.x + A.w, B.x + B.w)) / 2 * T;
+    const midY = (Math.max(A.y, B.y) + Math.min(A.y + A.h, B.y + B.h)) / 2 * T;
+    assert.equal(insideAnyWall({ x: midX, y: midY }), false, `porta entre ${a} e ${b} deveria estar aberta`);
+  }
+});
+
+test('createDungeonInstance (Fase 5.13): mobs comuns ficam dentro da sala certa, na quantidade sugerida por sala', () => {
+  const state = S.createDungeonInstance('floresta', 'char-rooms', 'user-rooms');
+  const rooms = S.DUNGEON_GEN.DUNGEON_ROOMS_V2, T = S.DUNGEON_GEN.T;
+  const countByRoom = {};
+  for (const mob of state.mobs.values()) {
+    if (mob.boss) continue;
+    let placed = null;
+    for (const id of state.layout.mobRooms) {
+      const r = rooms[id];
+      if (mob.x >= r.x * T && mob.x <= (r.x + r.w) * T && mob.y >= r.y * T && mob.y <= (r.y + r.h) * T) { placed = id; break; }
+    }
+    assert.ok(placed, `mob comum em (${mob.x},${mob.y}) deveria cair dentro de alguma sala com mob (mobRooms)`);
+    countByRoom[placed] = (countByRoom[placed] || 0) + 1;
+  }
+  for (const id of Object.keys(countByRoom)) {
+    const [lo, hi] = S.DUNGEON_ROOM_MOB_COUNTS[id];
+    assert.ok(countByRoom[id] >= lo && countByRoom[id] <= hi, `${id} tem ${countByRoom[id]} mobs, esperado entre ${lo} e ${hi}`);
+  }
+});
+
+test('createDungeonInstance (Fase 5.13): chefe nasce exatamente no centro da sala boss (layout.boss)', () => {
+  const state = S.createDungeonInstance('cripta', 'char-boss', 'user-boss');
+  const boss = [...state.mobs.values()].find(m => m.boss);
+  assert.ok(boss);
+  assert.equal(boss.x, state.layout.boss.x);
+  assert.equal(boss.y, state.layout.boss.y);
+});
+
+test('createDungeonInstance (Fase 5.13): nenhum mob (comum ou chefe) nasce dentro de um rect de colisao', () => {
+  const state = S.createDungeonInstance('serra', 'char-safe', 'user-safe');
+  for (const mob of state.mobs.values()) {
+    assert.equal(S.rectsBlock(state.layout.rects, mob.x - 4, mob.y - 4, 8, 8), false, `mob ${mob.type} nasceu dentro de uma parede em (${mob.x},${mob.y})`);
+  }
 });

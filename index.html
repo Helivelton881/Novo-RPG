@@ -1077,7 +1077,7 @@ function buildMini(name){
   g.fillStyle=name==='vila'?'#2f6b2c':name==='cripta'?'#2a2733':name==='serra'?'#1f4a35':name==='pantano'?'#22301a':name==='vulcao'?'#1a1512':'#1d4a1d';
   for(const s of statics)if(s.tag==='tree')g.fillRect(Math.round((s.x+s.w/2)/24)-1,Math.round(s.sy/24)-2,3,3);
   g.fillStyle='#8a6bd8';g.fillRect(Math.round(W_.portal.x/24)-1,Math.round(W_.portal.y/24)-2,3,3);
-  if(name==='floresta'||name==='cripta'||name==='serra'||name==='pantano'||name==='torre'||name==='ilhas'||name==='vulcao'){g.fillStyle='#ff5a3a';g.fillRect(Math.round(46*T/24)-2,Math.round(10*T/24)-2,4,4)}
+  if(name==='floresta'||name==='cripta'||name==='serra'||name==='pantano'||name==='torre'||name==='ilhas'||name==='vulcao'){const bc=DUNGEON_GEN.dungeonLayout().boss;g.fillStyle='#ff5a3a';g.fillRect(Math.round(bc.x/24)-2,Math.round(bc.y/24)-2,4,4)}
   if(name==='cripta'){g.fillStyle='#a9a6b8';for(const s of statics)if(s.tag==='tomb')g.fillRect(Math.round((s.x+s.w/2)/24)-1,Math.round(s.sy/24)-2,2,2)}
   return c;
 }
@@ -6022,16 +6022,16 @@ function makeCaveEntrance(){
   b.rect(20,44,4,4,'#2f6b2c');b.rect(34,44,3,3,'#2f6b2c');
   b.outline('#120e0a');return{c:b.canvas(2),ax:56,ay:100};
 }
-// Fase 5.2: mazeGen agora vem de game-data/dungeon-generation.js (a MESMA
-// funcao que o servidor usa pra gerar/validar o layout) -- antes disso
-// existiam duas copias independentes (uma aqui, uma que a Fase 5.2 teria
-// que recriar no servidor); reusar a mesma fonte evita elas divergirem.
-const mazeGen = DUNGEON_GEN.mazeGen;
+// Fase 5.13: o labirinto procedural (mazeGen) foi substituido por um
+// layout fixo (DUNGEON_GEN.dungeonLayout(), sem depender mais de seed
+// pra geometria) -- mazeGen() continua exportada em dungeon-generation.js
+// por nao valer a pena remover uma funcao pura sem necessidade, mas
+// buildMasmorra() nao a chama mais. Ver LEIA-PRIMEIRO.md "Fase 5.13".
 function paintRect(tx0,ty0,tx1,ty1,k){
   const X0=tx0*T,Y0=ty0*T,X1=tx1*T,Y1=ty1*T;
   for(let cy=Math.max(0,Math.floor(Y0/2));cy<=Math.min(CHn-1,Math.floor(Y1/2));cy++)for(let cx=Math.max(0,Math.floor(X0/2));cx<=Math.min(CWn-1,Math.floor(X1/2));cx++)kind[cy*CWn+cx]=k;
 }
-const MASMORRA_CELL=7,MASMORRA_PASS=3,MASMORRA_WALL=1;
+const MASMORRA_WALL=1;
 const DUN_CACHE={};
 function dunSprite(col,row,scale=.5){
   if(!DUN_IMG)return null;
@@ -6042,29 +6042,94 @@ function dunSprite(col,row,scale=.5){
   g.drawImage(DUN_IMG,col*sw+pad,row*sh+pad,sw-pad*2,sh-pad*2,0,0,c.width,c.height);
   return DUN_CACHE[key]={c,ax:c.width/2,ay:c.height-5};
 }
-function decorateMasmorra(w,mz,cxw,cyw,pr,theme){
+// Fase 5.13: decoracao 100% baseada nas SALAS NOMEADAS do layout fixo
+// (nao mais por celula de uma grade uniforme). Puramente cosmetico --
+// nunca adiciona colisao alem de pequenos blocos ja usados pelos props
+// espalhados (mesmo padrao de sempre), e nunca bloqueia o caminho
+// principal entre as portas de cada sala (props ficam perto das bordas,
+// nunca no centro do vao de passagem).
+const DUNGEON_THEME_PROPS={
+  floresta:[[4,6],[5,6],[2,6]],cripta:[[0,6],[1,6],[2,6]],
+  serra:[[0,5],[1,5],[2,6]],pantano:[[6,6],[7,6],[5,7]],
+  torre:[[6,4],[6,7],[5,7]],ilhas:[[5,4],[6,7],[5,7]],
+  vulcao:[[3,4],[4,4],[3,6]]
+};
+function dunProp(theme,pr){const arr=DUNGEON_THEME_PROPS[theme]||DUNGEON_THEME_PROPS.cripta;const p=arr[Math.floor(pr()*arr.length)];return dunSprite(p[0],p[1],.34)}
+function scatterProps(room,theme,pr,count){
+  for(let n=0;n<count;n++){
+    const pt=DUNGEON_GEN.roomRandomPoint(room,pr,2.2);
+    addStatic(dunProp(theme,pr),pt.x,pt.y,'dunprop');addBlock(pt.x-16,pt.y-10,32,10);
+  }
+}
+function placeColumn(x,y){addStatic(dunSprite(0,1,.5),x,y,'dunwall');addBlock(x-14,y-14,28,20)}
+function placeTorch(x,y){addStatic(dunSprite(0,7,.42),x,y,'dunprop')}
+function decorateMasmorra(w,rooms,theme,pr){
   if(!DUN_IMG)return;
-  const wall=[dunSprite(0,1,.48),dunSprite(1,1,.48),dunSprite(6,1,.48)];
-  const themeProps={
-    floresta:[[4,6],[5,6],[1,7],[2,7],[3,7]],cripta:[[0,6],[1,6],[2,6],[6,7],[7,7]],
-    serra:[[5,4],[7,4],[0,5],[1,5],[5,7]],pantano:[[4,6],[5,6],[6,6],[7,6],[5,7]],
-    torre:[[6,4],[7,4],[5,7],[6,7],[7,7]],ilhas:[[5,4],[6,4],[7,4],[6,7]],
-    vulcao:[[2,4],[3,4],[4,4],[0,7],[7,5]]
-  };
-  const props=themeProps[theme]||themeProps.cripta;
-  for(let cy=0;cy<mz.g.length;cy++)for(let cx=0;cx<mz.g[cy].length;cx++){
-    const room=mz.g[cy][cx],x=cxw(cx),y=cyw(cy),ww=MASMORRA_CELL*T*.43,hh=MASMORRA_CELL*T*.39;
-    if(!room.N){const s=wall[(cx+cy)%wall.length];addStatic(s,x,y-hh,'dunwall')}
-    if(!room.W){const s=wall[(cx+cy+1)%wall.length];addStatic(s,x-ww,y-8,'dunwall')}
-    if(!room.E){const s=wall[(cx+cy+2)%wall.length];addStatic(s,x+ww,y-8,'dunwall')}
-    const count=1+(pr()<.42?1:0);
-    for(let n=0;n<count;n++){
-      const p=props[Math.floor(pr()*props.length)],s=dunSprite(p[0],p[1],.34);
-      const px=x+(pr()<.5?-1:1)*(105+pr()*28),py=y+(pr()-.5)*115;
-      addStatic(s,px,py,'dunprop');addBlock(px-16,py-12,32,12);
+  const c=id=>DUNGEON_GEN.roomCenter(rooms[id]);
+  // Sala 1 - Recepcao: 1-2 colunas perto das bordas (nunca no vao central)
+  {const r=rooms.sala1,ct=c('sala1');placeColumn(r.x*T+40,ct.y);if(pr()<.7)placeColumn((r.x+r.w)*T-40,ct.y);scatterProps(r,theme,pr,2)}
+  // Sala 2 - Combate inicial: ate 2 obstaculos pequenos, fora do eixo principal
+  {const r=rooms.sala2;scatterProps(r,theme,pr,2)}
+  // Sala 3 - Camara lateral: objeto decorativo central (banner), visual fechado
+  {const r=rooms.sala3,ct=c('sala3');addStatic(dunSprite(6,7,.4),ct.x,ct.y,'dunprop');scatterProps(r,theme,pr,2)}
+  // Sala 4 - Central: 4 colunas nos CANTOS INTERNOS (nao no centro exato)
+  {const r=rooms.sala4,pad=48;
+    placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
+    placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad);
+    scatterProps(r,theme,pr,3)}
+  // Sala 5 - Elite/Guarda: layout simetrico, visual de pre-boss (tochas nas laterais)
+  {const r=rooms.sala5,ct=c('sala5');placeTorch(r.x*T+30,ct.y);placeTorch((r.x+r.w)*T-30,ct.y)}
+  // Checkpoint: sem inimigos, runa/simbolo central (cristal), iluminacao propria
+  {const ct=c('checkpoint');addStatic(dunSprite(5,4,.4),ct.x,ct.y,'dunprop')}
+  // Corredor final: 2 tochas grandes na entrada da arena
+  {const r=rooms.corrfinal;placeTorch(r.x*T+10,(r.y+r.h/2)*T);placeTorch((r.x+r.w)*T-10,(r.y+r.h/2)*T)}
+  // Arena do chefe: 4 pilares proximos as extremidades, arena limpa no meio
+  {const r=rooms.boss,pad=56;
+    placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
+    placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
+  // Tochas na entrada (2, como pedido)
+  {const r=rooms.entrada;placeTorch(r.x*T+24,(r.y+r.h/2)*T);placeTorch((r.x+r.w)*T-24,(r.y+r.h/2)*T)}
+  statics.sort((a,b)=>a.sy-b.sy);
+}
+// Fase 5.13 -- DUNGEON MAP V2: layout FIXO (game-data/dungeon-generation.js
+// DUNGEON_ROOMS_V2), nao mais um labirinto procedural por seed. `seed`
+// continua chegando do servidor (dungeon_state) mas so alimenta o stream
+// de decoracao cosmetica (pr, abaixo) -- a GEOMETRIA (salas/corredores/
+// colisao) e sempre a mesma, e vem inteira de DUNGEON_GEN.dungeonLayout(),
+// a MESMA fonte que o servidor usa pra colisao de IA (mob.wallRects).
+function buildMasmorra(zoneId,seed,roster){
+  const cfg=MASMORRA_CFG[zoneId],id=zoneId+'_d';
+  const w=newWorld(id);worlds[id]=w;
+  const layout=DUNGEON_GEN.dungeonLayout(seed);
+  const rooms=layout.rooms;
+  w.start={x:layout.start.x,y:layout.start.y};
+  w.portal={x:layout.exitPoint.x,y:layout.exitPoint.y,to:zoneId};
+  setWorld(w);
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for(const rid in rooms){const r=rooms[rid];minX=Math.min(minX,r.x);minY=Math.min(minY,r.y);maxX=Math.max(maxX,r.x+r.w);maxY=Math.max(maxY,r.y+r.h)}
+  paintRect(minX,minY,maxX,maxY,4);
+  for(const rid in rooms){const r=rooms[rid];paintRect(r.x+MASMORRA_WALL,r.y+MASMORRA_WALL,r.x+r.w-MASMORRA_WALL,r.y+r.h-MASMORRA_WALL,3)}
+  // Colisao: EXATAMENTE os mesmos rects que o servidor usa pra IA de
+  // monstro (layout.rects) -- uma unica fonte pra render e colisao,
+  // nunca duas matematicas que podem divergir.
+  for(const r of layout.rects)addBlock(r.x,r.y,r.w,r.h);
+  paintGround(cfg.theme);w.ground=ground;
+  addStatic(SP.portal,w.portal.x,w.portal.y);addBlock(w.portal.x-40,w.portal.y-30,80,30);
+  const pr=mulberry(Number.isFinite(seed)?seed:555+zoneId.length);
+  decorateMasmorra(w,rooms,cfg.theme,pr);
+  if(Array.isArray(roster)){
+    // roster server-autoritativo (Fase 5.2): tipo/nivel/HP/posicao de cada
+    // mob vem inteiro do servidor, nunca sorteado aqui. Fase 5.13: posicao
+    // agora cai dentro da sala nomeada certa (servidor decide qual),
+    // cliente so renderiza.
+    for(const entry of roster){
+      const m=spawnDungeonMob(entry);if(!m)continue;
+      MOBS.push(m);
     }
   }
-  statics.sort((a,b)=>a.sy-b.sy);
+  const bossC=layout.boss;
+  const ch={id:'chest',chest:true,nome:'Baú da Masmorra',x:bossC.x,y:bossC.y+80,open:false};w.chests.push(ch);
+  w.mini=buildMini(cfg.theme);
 }
 const MASMORRA_CFG={
   floresta:{name:'Covil dos Goblins',lv:'Lv 8–12',desc:'Um covil apertado cheio de goblins, terminando na sala do Goblin Brutamontes Ancião.',theme:'floresta',lvlLo:6,lvlHi:9,ok:()=>PORTAL_DESTS.find(d=>d.id==='floresta').ok(),
@@ -6119,51 +6184,6 @@ function spawnDungeonMob(entry){
   if(Number.isFinite(entry.maxhp)){m.maxhp=entry.maxhp;m.hp=Number.isFinite(entry.hp)?entry.hp:entry.maxhp}
   m.dead=!!entry.dead;
   return m;
-}
-// seed/roster vem do servidor (dungeon_state, ver applyDungeonState) --
-// sem eles (chamado por ensureWorld pra pre-cache/dev tools, nunca em
-// sessao online de verdade) cai num seed local so pra nao quebrar, sem
-// nenhum monstro (mundo "vazio" ate a entrada real acontecer pela rede).
-function buildMasmorra(zoneId,seed,roster){
-  const cfg=MASMORRA_CFG[zoneId],id=zoneId+'_d',cols=7,rows=5,C=MASMORRA_CELL;
-  const w=newWorld(id);worlds[id]=w;
-  const usedSeed=Number.isFinite(seed)?seed:9173+zoneId.split('').reduce((a,c)=>a+c.charCodeAt(0),0)*97;
-  const mz=mazeGen(cols,rows,usedSeed);
-  const ox=3,oy=4; // deslocamento em tiles (precisa respeitar MIN_X/MAX_X/MIN_Y/MAX_Y, não só MW/MH)
-  const cxw=(cx)=>(ox+cx*C+C/2)*T,cyw=(cy)=>(oy+cy*C+C/2)*T;
-  w.portal={x:cxw(mz.sx),y:cyw(mz.sy)-2.15*T,to:zoneId};
-  w.start={x:cxw(mz.sx),y:cyw(mz.sy)+2.15*T};
-  setWorld(w);
-  paintRect(ox,oy,ox+cols*C,oy+rows*C,4);
-  for(let cy=0;cy<rows;cy++)for(let cx=0;cx<cols;cx++){
-    const rx0=ox+cx*C,ry0=oy+cy*C,rx1=rx0+C,ry1=ry0+C;
-    paintRect(rx0+MASMORRA_WALL,ry0+MASMORRA_WALL,rx1-MASMORRA_WALL,ry1-MASMORRA_WALL,3);
-    const c=mz.g[cy][cx],half=(C-MASMORRA_PASS)/2;
-    if(!c.N)addBlock(rx0*T,ry0*T-MASMORRA_WALL*T,C*T,MASMORRA_WALL*T);
-    else{addBlock(rx0*T,ry0*T-MASMORRA_WALL*T,half*T,MASMORRA_WALL*T);addBlock((rx0+half+MASMORRA_PASS)*T,ry0*T-MASMORRA_WALL*T,half*T,MASMORRA_WALL*T)}
-    if(!c.S)addBlock(rx0*T,ry1*T,C*T,MASMORRA_WALL*T);
-    else{addBlock(rx0*T,ry1*T,half*T,MASMORRA_WALL*T);addBlock((rx0+half+MASMORRA_PASS)*T,ry1*T,half*T,MASMORRA_WALL*T)}
-    if(!c.W)addBlock(rx0*T-MASMORRA_WALL*T,ry0*T,MASMORRA_WALL*T,C*T);
-    else{addBlock(rx0*T-MASMORRA_WALL*T,ry0*T,MASMORRA_WALL*T,half*T);addBlock(rx0*T-MASMORRA_WALL*T,(ry0+half+MASMORRA_PASS)*T,MASMORRA_WALL*T,half*T)}
-    if(!c.E)addBlock(rx1*T,ry0*T,MASMORRA_WALL*T,C*T);
-    else{addBlock(rx1*T,ry0*T,MASMORRA_WALL*T,half*T);addBlock(rx1*T,(ry0+half+MASMORRA_PASS)*T,MASMORRA_WALL*T,half*T)}
-  }
-  paintGround(cfg.theme);w.ground=ground;
-  addStatic(SP.portal,w.portal.x,w.portal.y);addBlock(w.portal.x-40,w.portal.y-30,80,30);
-  const pr=mulberry(555+zoneId.length);
-  decorateMasmorra(w,mz,cxw,cyw,pr,cfg.theme);
-  let bx=cxw(mz.bx),by=cyw(mz.by);
-  if(Array.isArray(roster)){
-    // roster server-autoritativo (Fase 5.2): tipo/nivel/HP/posicao de cada
-    // mob vem inteiro do servidor, nunca sorteado aqui.
-    for(const entry of roster){
-      const m=spawnDungeonMob(entry);if(!m)continue;
-      MOBS.push(m);
-      if(m.boss){bx=m.x;by=m.y}
-    }
-  }
-  const ch={id:'chest',chest:true,nome:'Baú da Masmorra',x:bx,y:by+MASMORRA_CELL*T*.28,open:false};w.chests.push(ch);
-  w.mini=buildMini(cfg.theme);
 }
 // Fase 5.2: entrada em masmorra agora e um PEDIDO ao servidor (nunca mais
 // travel() local direto) -- valida requisito/nivel/gunlock no banco (ver
