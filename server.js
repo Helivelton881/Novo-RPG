@@ -2984,7 +2984,23 @@ const server = http.createServer(async (req, res) => {
   if (!file.startsWith(ROOT + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
   fs.stat(file, (err, stat) => {
     if (err || !stat.isFile()) { res.writeHead(404); return res.end('Not found'); }
-    res.writeHead(200, {'Content-Type':MIME[path.extname(file).toLowerCase()] || 'application/octet-stream','Cache-Control':'no-cache'});
+    // Fase 5.16.4 (hotfix real de producao): 'no-cache' SOZINHO (sem ETag/
+    // Last-Modified pra revalidar contra) e uma diretiva fraca -- proxies
+    // transparentes de operadora movel (muito comuns em conexoes 4G/5G no
+    // Brasil) rotineiramente servem uma copia em cache mesmo assim, ja que
+    // nao ha nenhum validador pra forcar a revalidacao real. Confirmado ao
+    // vivo: usuario gravou video no celular (rede 5G) mostrando o HUD
+    // antigo ("2 jogadores · 13 IA", rotulo "(IA)") minutos depois do
+    // deploy da correcao -- meu proprio teste no navegador embutido, no
+    // mesmo instante, contra a mesma URL, ja mostrava a versao nova. 'no-
+    // store' e uma diretiva forte (nunca guarda copia nenhuma, em nenhum
+    // cache) -- unico jeito de garantir que TODO cliente sempre recebe o
+    // index.html/admin.html/portal.html mais recente a cada deploy. So um
+    // asset binario real e servido por aqui (tileset-masmorras-
+    // original.png) -- custo de performance de nunca cachea-lo e
+    // irrelevante (buscado uma vez por carregamento de pagina, nunca em
+    // loop).
+    res.writeHead(200, {'Content-Type':MIME[path.extname(file).toLowerCase()] || 'application/octet-stream','Cache-Control':'no-store'});
     fs.createReadStream(file).pipe(res);
   });
 });
