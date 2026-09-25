@@ -3080,17 +3080,16 @@ function exitTvt(m){
 let netProjectileSeq=0;
 const MOB_NET_VISUAL_FIELDS=['t','t0','la','lx','ly','tx','ty','atk','k','heavy','bx','by','enr','face','moving','cmb','guard','al'];
 function netLabel(text,on){const e=$('#net');if(!e)return;e.textContent=text;e.classList.toggle('online',!!on);e.classList.toggle('offline',!on)}
-// Fase 5.16.2 (achado real, confirmado ao vivo em producao): o contador
-// so somava REMOTE.size+1, misturando humanos e Aventureiros IA sem
-// distincao nenhuma (ex.: "11 online" com 1 humano de verdade e 10 IA)
-// -- nunca deveria chamar IA de "jogador". Sempre separa as duas
-// contagens a partir do proprio kind ja presente em cada entrada de
-// REMOTE (population server-authoritative, nunca inferida aqui).
+// Fase 5.16.4 (pedido explicito do usuario): o HUD publico volta a
+// mostrar SO "N online" -- nunca "jogador"/"IA"/"humano"/"fake"/"Living
+// World" na interface do jogo. A distincao humano/IA continua existindo
+// (kind:'ai' nunca sai do runtime/protocolo) e continua visivel no
+// Admin (/api/admin/living-world, /api/admin/dashboard) -- a mudanca e
+// SO na interface publica. Total = jogador local + tudo que REMOTE ja
+// tem (population inteira, server-authoritative, nunca inferida aqui),
+// nunca so o mapa atual.
 function netCountsLabel(){
-  let humans=1, ai=0; // +1 pelo proprio jogador local, que nunca fica dentro de REMOTE
-  const currentMap=netMapId();
-  for(const p of REMOTE.values())if(p.map===currentMap){if(p.kind==='ai')ai++;else humans++}
-  return ai>0 ? (humans+(humans===1?' jogador':' jogadores')+' · '+ai+' IA') : (humans+' online');
+  return (1+REMOTE.size)+' online'; // +1 pelo proprio jogador local, que nunca fica dentro de REMOTE
 }
 function netMobById(id){return MOBS.find(m=>m.netId===id)}
 function netJoinMap(){
@@ -3123,7 +3122,7 @@ function netConnect(){
   // novo no onclose) sempre manda um join novo, reautenticando do zero.
   ws.onopen=()=>{if(NET!==ws)return;netRetry=0;ws.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined,charId:(CUR_CHAR&&CUR_CHAR.id)||undefined,token:authToken()||undefined,clientInstanceId:CLIENT_INSTANCE_ID}))};
   ws.onmessage=e=>{if(NET!==ws)return;let m;try{m=JSON.parse(e.data)}catch(err){return}
-    if(m.type==='welcome'){NET_ID=m.id;NET_SESSION=m.sessionKey||'';if(Number.isFinite(m.hp))P.hp=m.hp;if(Number.isFinite(m.maxHp))P.maxhp=m.maxHp;P.dead=!!m.dead;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel(netCountsLabel(),true);netJoinMap()}
+    if(m.type==='welcome'){NET_ID=m.id;NET_SESSION=m.sessionKey||'';if(Number.isFinite(m.hp))P.hp=m.hp;if(Number.isFinite(m.maxHp))P.maxhp=m.maxHp;P.dead=!!m.dead;REMOTE.clear();for(const p of m.players||[])applyRemoteUpdate(p);netLabel(netCountsLabel(),true);netJoinMap()}
     else if(m.type==='event_state'){EVENT_STATE=m;EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(scrOpen==='events')renderScr()}
     else if(m.type==='event_announcement'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();chatAdd('Sistema',m.message,true);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.message)}
     else if(m.type==='event_registration'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(!m.ok)toast(m.error==='EVENT_UNAVAILABLE'?'Evento ainda não disponível':m.error==='AUTH_REQUIRED'?'Entre com uma conta online para se inscrever':'Não foi possível alterar a inscrição');else toast(m.action==='unregister'?'Inscrição cancelada':m.alreadyRegistered?'Você já está inscrito':'Inscrição realizada')}
@@ -3148,8 +3147,15 @@ function netConnect(){
       if(m.killed&&isMe)toast('Você foi eliminado!');
     }
     else if(m.type==='tvt_heal'){if(m.targetId===(CUR_CHAR&&CUR_CHAR.id)){P.hp=m.hp;floater(P.x,P.y-70,'+'+m.amount,'#7dff9a')}}
-    else if(m.type==='player_join'||m.type==='state'){const p=m.player;if(p&&p.id!==NET_ID){const old=REMOTE.get(p.id);REMOTE.set(p.id,Object.assign(old||{},p));netLabel(netCountsLabel(),true)}}
+    else if(m.type==='player_join'||m.type==='state'){const p=m.player;if(p&&p.id!==NET_ID){applyRemoteUpdate(p);netLabel(netCountsLabel(),true)}}
     else if(m.type==='player_leave'){REMOTE.delete(m.id);netLabel(netCountsLabel(),true)}
+    // Fase 5.16.4: evento explicito de ataque de Aventureiro IA (ver
+    // aiDoCombat) -- dispara a MESMA animacao local que drawRemote ja usa
+    // pra jogador remoto humano (atkT como cronometro regressivo,
+    // decaido localmente em netLockRemote), nunca depende de esperar o
+    // proximo snapshot de posicao pra "ver" o golpe. Dano nunca vem daqui
+    // -- so visual, resolvido no servidor via mob_state/mob_hit de sempre.
+    else if(m.type==='ai_attack'&&m.map===netMapId()){const rp=REMOTE.get(m.id);if(rp){rp.atkT=.3;rp.atkAng=Number(m.angle)||0}}
     else if(m.type==='map_state'&&m.map===netMapId()){for(const u of m.mobs||[])netApplyMob(u,null)}
     else if(m.type==='mob_state'&&m.map===netMapId())netApplyMob(m.mob,m.killerId);
     else if(m.type==='mob_positions'&&m.map===netMapId())for(const u of m.mobs||[]){const x=netMobById(u.id),sx=Number(u.x),sy=Number(u.y);if(x&&!x.dead&&Number.isFinite(sx)&&Number.isFinite(sy)){x.serverX=sx;x.serverY=sy;x.netState=u.state||x.netState;x.state=x.netState;for(const k of MOB_NET_VISUAL_FIELDS)if(Object.prototype.hasOwnProperty.call(u,k)){const v=u[k];if((typeof v==='number'&&Number.isFinite(v))||typeof v==='string'||typeof v==='boolean')x[k]=v}}}
@@ -3287,6 +3293,49 @@ function netPlayerDamage(rp,skill,splash){if(!pvpOn()||!NET||NET.readyState!==1|
 function remotesInMap(){const l=[];for(const p of REMOTE.values())if(p.map===netMapId())l.push(p);return l}
 function netProjectile(p){if(!NET||NET.readyState!==1||!W_)return;p.nid=NET_ID+':p'+(++netProjectileSeq);NET.send(JSON.stringify({type:'projectile',map:netMapId(),id:p.nid,kind:p.kind,x:p.x,y:p.y,vx:p.vx,vy:p.vy,life:p.life,r:p.r,pierce:p.pierce}))}
 function netProjectileEnd(p){if(NET&&NET.readyState===1&&p.nid)NET.send(JSON.stringify({type:'projectile_end',map:netMapId(),id:p.nid,x:p.x,y:p.y,boom:!!p.splash}))}
+// Fase 5.16.4: suavizacao de movimento remoto (Aventureiro IA e jogador
+// humano remoto) -- MESMO padrao ja usado pra mobs (netLockMobs, acima):
+// serverX/serverY guardam a ULTIMA posicao autoritativa que o servidor
+// mandou (nunca usada pra desenhar direto); x/y (o que drawRemote/
+// drawMini/drawBigMap ja leem, sem mudanca neles) viram a posicao de
+// RENDER, suavizada a cada frame. Chegada nova (nunca visto antes) ou
+// salto grande (map change/respawn/teleport/reconnect) sempre SNAPA
+// direto -- so o passo normal intra-mapa interpola. Antes disso, o
+// handler de state/player_join sobrescrevia x/y direto do pacote, e o
+// cliente so recebia um novo x/y por segundo (aiTick roda a cada 1s) --
+// cada chegada de pacote fazia o sprite "pular" ate 85px de uma vez
+// (AI_MOVE_SPEED), parecendo teleporte. Preenchido em applyRemoteUpdate,
+// chamado pelos handlers de welcome/player_join/state (ver netConnect).
+function applyRemoteUpdate(p){
+  const old=REMOTE.get(p.id);
+  const merged=Object.assign({},old,p);
+  merged.serverX=p.x;merged.serverY=p.y;
+  // Fase 5.16.4: nunca corta uma animacao de ataque que ainda esta
+  // tocando localmente (disparada por ai_attack, ver netLockRemote) --
+  // um sync de posicao comum chega a cada ~1s pra IA e sempre traz
+  // atkT:0 (o servidor nunca guarda um "ataque em andamento" pra
+  // Aventureiro, so dispara o evento no instante do golpe). So um atkT
+  // novo e realmente POSITIVO no proprio pacote (caso de jogador remoto
+  // humano, que manda o proprio atkT local a cada state) sobrescreve.
+  if(old&&old.atkT>0&&!(p.atkT>0)){merged.atkT=old.atkT;merged.atkAng=old.atkAng}
+  const hadRenderPos=old&&Number.isFinite(old.x)&&Number.isFinite(old.y);
+  if(hadRenderPos&&Math.hypot(p.x-old.x,p.y-old.y)<=240){merged.x=old.x;merged.y=old.y}
+  // senao (entidade nova ou salto grande): merged.x/y ja veio de p.x/p.y via Object.assign -- snap correto por padrao.
+  REMOTE.set(p.id,merged);
+}
+function netLockRemote(dt){
+  if(!REMOTE.size)return;
+  const k=1-Math.exp(-18*Math.min(.1,Math.max(0,Number(dt)||0)));
+  for(const p of REMOTE.values()){
+    if(Number.isFinite(p.serverX)&&Number.isFinite(p.serverY)){p.x+=(p.serverX-p.x)*k;p.y+=(p.serverY-p.y)*k}
+    // Decaimento local do timer de ataque (drawRemote usa atkT como
+    // "tempo restante do golpe", igual ja fazia pra jogador remoto
+    // humano) -- pra IA, o unico jeito de atkT chegar >0 e o evento
+    // ai_attack abaixo, entao precisa decair aqui mesmo, nunca so
+    // esperar o proximo pacote de rede (que so chega ~1x/s).
+    if(p.atkT>0)p.atkT=Math.max(0,p.atkT-dt);
+  }
+}
 function netLockMobs(dt){
   if(!NET_ID)return;const k=1-Math.exp(-18*Math.min(.1,Math.max(0,Number(dt)||0)));
   for(const m of MOBS){
@@ -3427,6 +3476,7 @@ function update(dt){
   time+=dt;
   netUpdate(dt);
   netLockMobs(dt);
+  netLockRemote(dt);
   if(traveling||uiBusy())return;
   P.pt+=dt;skillUpdate(dt);
   if(P.cd>0)P.cd-=dt;if(P.inv>0)P.inv-=dt;if(P.hurtT>0)P.hurtT-=dt;if(P.atkT>0){P.atkT-=dt;if(!P.hitDone&&P.atkT<.2){P.hitDone=true;doHits()}}
@@ -3635,12 +3685,15 @@ function drawRemote(p){
     ctx.restore();
   }
   ctx.font='700 13px "Pixelify Sans",ui-monospace,monospace';ctx.textAlign='center';ctx.lineWidth=3;ctx.strokeStyle='#15100b';
-  // Fase 5.16: indicador discreto pra Aventureiro IA -- reusa 100% do
-  // mesmo desenho de jogador remoto (nenhum sprite/codigo novo), so a
-  // cor do rotulo e um sufixo "[IA]" mudam. Nunca falsifica o jogador
-  // como humano nem some do rotulo -- transparencia sempre visivel.
+  // Fase 5.16.4 (pedido explicito do usuario): o rotulo acima do
+  // Aventureiro IA nao mostra mais nenhum sufixo identificador -- deveria
+  // parecer um jogador normal. A cor sutil do nome (lilas pra IA, ciano
+  // pra humano) continua igual (nao e texto, nunca foi pedido pra
+  // remover) -- so o rotulo textual mudou. kind:'ai' continua existindo
+  // internamente (runtime/protocolo/Admin), nunca removido -- so a UI
+  // publica parou de expor essa informacao em texto.
   ctx.fillStyle=p.kind==='ai'?'#c9a6ff':'#8ee8ff';
-  const label=p.name+' · Lv '+p.lvl+(p.kind==='ai'?' [IA]':'');ctx.strokeText(label,p.x,p.y-fh-7);ctx.fillText(label,p.x,p.y-fh-7);
+  const label=p.name+' · Lv '+p.lvl;ctx.strokeText(label,p.x,p.y-fh-7);ctx.fillText(label,p.x,p.y-fh-7);
 }
 function drawSlime(s){
   const fw=SPR.slime.fw,fh=SPR.slime.fh,col=Math.floor(s.anim*5)%3,sc=SLIME_STATS[s.lvl].sc;

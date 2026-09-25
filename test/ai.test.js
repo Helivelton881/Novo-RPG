@@ -119,6 +119,43 @@ test('Fase 5.16.2 -- aiSpawnAnchor: ancora perto do centroide dos mobs da zona, 
   S.maps.delete('__ai_test_anchor__');
 });
 
+// Fase 5.16.4 -- bug real de producao (achado medindo o WebSocket bruto
+// ao vivo: apos 60s reais, 22 de 40 IA travadas, TODAS em fsm:'wander',
+// todas a poucos pixels do proprio alvo de wander, congeladas pra
+// sempre). Causa raiz: aiMoveToward devolvia um valor POSITIVO (a
+// distancia restante, 0-4px) no ramo "ja chegou", mas aiDoWander so sai
+// do wander quando o retorno e <=0 -- nunca saia, nunca move de novo
+// (esse ramo tambem nunca atualiza x/y), a IA ficava presa pra sempre.
+test('aiMoveToward: quando ja esta a menos de 4px do alvo, devolve 0 (nunca um residuo positivo) -- contrato "<=0 significa chegou"', () => {
+  const ai = {x: 100, y: 100};
+  const remain = S.aiMoveToward(ai, 102, 101, 85); // ~2.24px de distancia, dentro do raio de chegada
+  assert.ok(remain <= 0, `aiMoveToward deveria devolver <=0 quando ja chegou (achado ${remain})`);
+  assert.equal(ai.moving, false);
+});
+test('aiDoWander: nunca fica preso pra sempre quando a distancia restante cai abaixo de 4px -- sempre transiciona pra idle e continua o ciclo', () => {
+  S.aiEntities.clear();
+  const ai = S.aiSpawnEntity('floresta');
+  ai.fsm = 'wander';
+  // simula exatamente o cenario capturado ao vivo: alvo de wander a poucos
+  // pixels da posicao atual (o "residuo" de uma fiada anterior).
+  ai.wanderTargetX = ai.x + 2; ai.wanderTargetY = ai.y + 1;
+  let now = Date.now();
+  S.aiDoWander(ai, now);
+  assert.equal(ai.fsm, 'idle', 'com o alvo a menos de 4px, aiDoWander deveria transicionar pra idle imediatamente, nunca ficar preso em wander');
+  // roda mais alguns ticks do ciclo completo (idle escolhe novo alvo,
+  // wander anda ate ele) pra confirmar que o ciclo continua vivo, nunca
+  // trava de novo por 30 ticks seguidos (o que capturamos ao vivo em producao).
+  let stuckStreak = 0, lastPos = {x: ai.x, y: ai.y};
+  for (let i = 0; i < 60; i++) {
+    now += 1000;
+    S.aiStep(ai, now);
+    if (ai.x === lastPos.x && ai.y === lastPos.y) stuckStreak++; else stuckStreak = 0;
+    lastPos = {x: ai.x, y: ai.y};
+    assert.ok(stuckStreak < 30, `IA ficou 30 ticks seguidos sem se mover (posicao ${JSON.stringify(lastPos)}) -- mesmo padrao do bug real de producao`);
+  }
+  S.aiEntities.clear();
+});
+
 test('aiPopulationTick: sempre povoa a zona MENOS povoada primeiro, nunca concentra tudo numa zona so', () => {
   S.aiEntities.clear();
   // forja 3 IA ja em 'floresta' -- a proxima automatica deveria ir pra outra zona.
@@ -147,6 +184,33 @@ test('aiPopulationTick: respeita AI_ENABLED=0 explicito (nunca spawna com o gate
 });
 
 // FSM: idle -> hunt -> combat -> mob morre (IA nunca recebe recompensa)
+// Fase 5.16.4 -- bug real: ai.atkT/atkAng nunca eram setados em lugar
+// nenhum do codigo-fonte (aiPublicPlayer sempre mandava atkT:0), entao a
+// animacao de ataque do cliente (que so liga quando atkT>0) nunca
+// disparava pra nenhuma Aventureiro IA -- "ataque parece travado" era
+// literal, nunca uma animacao existiu. Corrigido com um evento explicito
+// (ai_attack) disparado no instante exato do golpe, tocado localmente no
+// cliente (nunca depende do proximo snapshot de posicao, que so chega
+// 1x/s) -- dano continua 100% resolvido aqui, no servidor.
+test('aiDoCombat dispara ai_attack (broadcastMap) no instante de cada golpe bem sucedido, com angulo pro alvo -- nunca so um snapshot de posicao', () => {
+  const src = S.aiDoCombat.toString();
+  assert.match(src, /broadcastMap\(ai\.map,\s*\{type:\s*'ai_attack'/, 'aiDoCombat deveria emitir um evento ai_attack dedicado no momento do golpe');
+  assert.match(src, /angle:\s*atkAng/, 'o evento deveria incluir o angulo do golpe (pro cliente orientar a animacao)');
+});
+test('REGRA ABSOLUTA: ai_attack nunca carrega dano -- so id/mapa/angulo, resolvido puramente visual no cliente', () => {
+  const src = S.aiDoCombat.toString();
+  const evtMatch = src.match(/broadcastMap\(ai\.map,\s*\{type:\s*'ai_attack'[^}]*\}\)/);
+  assert.ok(evtMatch, 'evento ai_attack deveria existir em aiDoCombat');
+  for (const forbidden of ['dmg', 'damage', 'hp:']) assert.equal(evtMatch[0].includes(forbidden), false, `ai_attack nao deveria carregar '${forbidden}' -- dano e so via mob_state/mob_hit de sempre`);
+});
+test('aiPublicPlayer: atkT continua sempre 0 no snapshot de posicao normal (a animacao de ataque vem so do evento ai_attack, nunca do sync de posicao)', () => {
+  S.aiEntities.clear();
+  const ai = S.aiSpawnEntity('floresta');
+  ai.atkT = 0; // nunca setado de verdade em lugar nenhum do runtime -- confirma que o campo permanece 0
+  assert.equal(S.aiPublicPlayer(ai).atkT, 0);
+  S.aiEntities.clear();
+});
+
 test('FSM de campo: idle acha mob proximo e vai pra hunt; hunt se aproxima; combat mata o mob sem conceder nada a IA', () => {
   S.maps.set('__ai_test_field__', {id:'__ai_test_field__', mobs:new Map(), hitGuard:new Map()});
   const state = S.maps.get('__ai_test_field__');
