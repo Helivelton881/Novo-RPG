@@ -3804,8 +3804,22 @@ function dungeonHandleMobDeath(state, mob, now, killerCharId) {
   }
   if (killerCharId && mob.type) creditBestiaryKill(killerCharId, mob.type).catch(err => console.error('bestiary_credit_error', err.message));
 }
+// Fase 5.16.4 (bug real de producao, achado com log ao vivo -- IA de vila
+// medindo "combat"/"hunt" contra targetMobId tipo "vila:7"): a vila TEM
+// mobs de verdade (slimes fracos, level 1-3, populados sob demanda em
+// map_join quando um jogador humano visita -- ver o branch `map==='vila'`
+// dentro do handler de map_join). O guard contra a IA social entrar em
+// combate so cobria a transicao 'travel' (comentario original abaixo) --
+// nunca o proprio gatilho de hunt, que le state.mobs.size igual a IA de
+// campo faria. Resultado: assim que algum humano visitava a vila e os
+// slimes apareciam, a IA social passava a canitar/lutar contra eles,
+// parada atacando por 8-23s reais repetidas vezes (medido ao vivo) -- e
+// isso, nao o dist<4 ja corrigido antes, era o "andando travado" que
+// sobrou apos aquele fix. `ai.map!=='vila'` aqui e a MESMA garantia que
+// o guard de travel ja fazia, so que tambem no ponto onde ela realmente
+// era violada.
 function aiDoIdle(ai, now) {
-  const state = maps.get(ai.map);
+  const state = ai.map !== 'vila' ? maps.get(ai.map) : null;
   if (state && state.mobs.size) {
     const mob = aiNearestMob(ai, state, ai.profile.aggroRadius);
     if (mob) { aiTransition(ai, 'hunt', now, {targetMobId:mob.id}); return; }
@@ -3823,7 +3837,7 @@ function aiDoIdle(ai, now) {
 function aiDoWander(ai, now) {
   const remain = aiMoveToward(ai, ai.wanderTargetX ?? ai.x, ai.wanderTargetY ?? ai.y, AI_MOVE_SPEED);
   if (remain <= 0) { aiTransition(ai, 'idle', now); return; }
-  const state = maps.get(ai.map);
+  const state = ai.map !== 'vila' ? maps.get(ai.map) : null; // mesma garantia de aiDoIdle -- nunca hunt pra IA social da vila
   if (state && state.mobs.size && Math.random() < .3) {
     const mob = aiNearestMob(ai, state, ai.profile.aggroRadius);
     if (mob) aiTransition(ai, 'hunt', now, {targetMobId:mob.id});
@@ -3990,35 +4004,11 @@ function aiDoTvt(ai, now) {
 // arquivo) -- nunca um setInterval novo por entidade (zero timer pra
 // vazar por IA: aiDespawnEntity so remove do Map, nunca deixa nenhum
 // setTimeout/setInterval pendurado).
-// DIAGNOSTICO TEMPORARIO (Fase 5.16.4 follow-up, remover apos achar a causa):
-// producao ao vivo mostrou uma IA (map:'vila') com x/y bit-identicos por
-// 30s+ seguidos, fsm nao reproduzido localmente com so idle/wander/travel
-// isolados (180s reais, 0 congelamentos) -- ou seja, precisa de algo que so
-// existe em producao (jogadores reais, mobs de campo, eventos) pra disparar.
-// Este log so dispara UMA VEZ por IA quando ela cruza 8s sem mover x/y,
-// com o estado completo no momento exato -- e novamente quando ela sai do
-// congelamento, pra medir a duracao real. Zero mudanca de comportamento.
-const __aiFreezeWatch = new Map();
-function __aiFreezeCheck(ai, now) {
-  let w = __aiFreezeWatch.get(ai.id);
-  if (!w) { w = {x:ai.x, y:ai.y, lastMoveAt:now, flagged:false}; __aiFreezeWatch.set(ai.id, w); return; }
-  const moved = w.x !== ai.x || w.y !== ai.y;
-  if (moved) {
-    if (w.flagged) console.log('ai_freeze_recovered', ai.id, ai.name, 'frozenMs='+(now-w.lastMoveAt));
-    w.x = ai.x; w.y = ai.y; w.lastMoveAt = now; w.flagged = false;
-    return;
-  }
-  if (!w.flagged && (now - w.lastMoveAt) > 8000) {
-    w.flagged = true;
-    console.log('ai_freeze_detected', JSON.stringify({id:ai.id, name:ai.name, map:ai.map, fsm:ai.fsm, dead:ai.dead, slot:ai.slot, targetMobId:ai.targetMobId, wanderTargetX:ai.wanderTargetX, wanderTargetY:ai.wanderTargetY, retreatUntil:ai.retreatUntil, restUntil:ai.restUntil, fsmUntil:ai.fsmUntil, x:ai.x, y:ai.y, moving:ai.moving, frozenMs:now-w.lastMoveAt}));
-  }
-}
 function aiTick() {
   const now = Date.now();
   aiPopulationTick();
   for (const ai of [...aiEntities.values()]) {
     aiStep(ai, now);
-    __aiFreezeCheck(ai, now);
     broadcast({type:'state', player:aiPublicPlayer(ai)});
   }
 }

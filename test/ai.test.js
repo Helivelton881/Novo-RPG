@@ -156,6 +156,44 @@ test('aiDoWander: nunca fica preso pra sempre quando a distancia restante cai ab
   S.aiEntities.clear();
 });
 
+// Fase 5.16.4 follow-up -- bug real de producao (achado com log ao vivo:
+// IA de vila em fsm 'combat'/'hunt' contra targetMobId "vila:N", parada
+// atacando por 8-23s reais, repetidas vezes). Causa raiz: a vila TEM mobs
+// de verdade (slimes fracos, populados sob demanda quando um jogador
+// humano visita -- ver o branch map==='vila' do handler map_join). O
+// guard contra IA social entrar em combate so cobria a transicao 'travel'
+// -- nunca o gatilho de hunt em si, que lia state.mobs.size igual IA de
+// campo faria. Resultado: assim que a vila tinha slimes, a IA social
+// canitava/lutava contra eles, quebrando a garantia "nunca combate pra
+// esse grupo" e produzindo exatamente o "andando travado" que sobrou
+// apos o fix do dist<4.
+test('aiDoIdle: IA social da vila NUNCA entra em hunt mesmo com mobs reais presentes no mapa (vila tem slimes de verdade)', () => {
+  S.aiEntities.clear();
+  const state = S.mapState('vila');
+  state.mobs.set('vila:0', {id:'vila:0', maxhp:10, hp:10, dead:false, x:720, y:1258, state:'idle', boss:false, type:'slime', lvl:1});
+  const ai = S.aiSpawnEntity('vila');
+  ai.x = 720; ai.y = 1258; // exatamente em cima do slime -- pior caso pro aggro
+  ai.fsm = 'idle';
+  S.aiDoIdle(ai, Date.now());
+  assert.notEqual(ai.fsm, 'hunt', 'IA social da vila nunca deveria entrar em hunt, mesmo com um mob a 0px de distancia');
+  assert.equal(ai.fsm, 'wander', 'sem hunt nem travel (vila nao e AI_FIELD_ZONES), deveria cair direto em wander');
+  state.mobs.clear();
+  S.aiEntities.clear();
+});
+test('aiDoWander: IA social da vila NUNCA entra em hunt mesmo com mobs reais presentes no mapa', () => {
+  S.aiEntities.clear();
+  const state = S.mapState('vila');
+  state.mobs.set('vila:0', {id:'vila:0', maxhp:10, hp:10, dead:false, x:720, y:1258, state:'idle', boss:false, type:'slime', lvl:1});
+  const ai = S.aiSpawnEntity('vila');
+  ai.x = 720; ai.y = 1258; ai.fsm = 'wander'; ai.wanderTargetX = 721; ai.wanderTargetY = 1258; // 1px, sempre remain<=0
+  for (let i = 0; i < 40; i++) { // Math.random()<.3 no aiDoWander -- roda bastante pra nao passar por sorte
+    S.aiDoWander(ai, Date.now());
+    assert.notEqual(ai.fsm, 'hunt', 'IA social da vila nunca deveria entrar em hunt a partir do wander, mesmo com mob presente');
+    ai.wanderTargetX = ai.x + 1; ai.wanderTargetY = ai.y; // reseta pra continuar exercitando o branch de mob todo tick
+  }
+  state.mobs.clear();
+  S.aiEntities.clear();
+});
 test('aiPopulationTick: sempre povoa a zona MENOS povoada primeiro, nunca concentra tudo numa zona so', () => {
   S.aiEntities.clear();
   // forja 3 IA ja em 'floresta' -- a proxima automatica deveria ir pra outra zona.
