@@ -3094,7 +3094,7 @@ async function handleWsJoin(ws, msg) {
         const dState=maps.get(dMapId);
         if(!dState||!dState.isDungeon)continue;
         const dMember=dState.members.get(p.charId);
-        if(dMember&&dMember.userId===p.userId){dMember.online=true;dState.lastActiveAt=Date.now();p.map=dState.id;sendDungeonStateTo(ws,dState,{reconnect:true})}
+        if(dMember&&dMember.userId===p.userId){dMember.online=true;dState.lastActiveAt=Date.now();placePlayerAtDungeonStart(p,dState);sendDungeonStateTo(ws,dState,{reconnect:true})}
         break;
       }
     }
@@ -3143,6 +3143,15 @@ function dungeonRosterPayload(state) {
 function sendDungeonStateTo(ws, state, extra) {
   send(ws, Object.assign({type:'dungeon_state', map:state.id, zone:state.zone, seed:state.seed, start:state.layout.start, roster:dungeonRosterPayload(state), bossDefeated:state.bossDefeated}, extra||{}));
 }
+// Trocar para uma instancia precisa atualizar mapa e posicao como uma unica
+// operacao autoritativa. Caso contrario, o spawn enviado ao cliente parece
+// um teleporte a validateMovement e separa o render do runtime do combate.
+function placePlayerAtDungeonStart(p, state, now=Date.now()) {
+  const start=state&&state.layout&&state.layout.start;
+  if(!p||!state||!Number.isFinite(start?.x)||!Number.isFinite(start?.y))return false;
+  p.map=state.id;p.x=start.x;p.y=start.y;p.lastMoveAt=now;p.moving=false;p.atkT=0;
+  return true;
+}
 // Fase 5.13.1: entrada agora suporta ate 4 jogadores reais de uma Party
 // (reaproveitando o sistema de Party existente, parties/memberParty --
 // nenhum sistema novo) alem do solo de sempre. So o LIDER da Party
@@ -3185,7 +3194,7 @@ async function handleDungeonEnter(ws, p, msg) {
     if (existing) {
       const member = existing.members.get(p.charId);
       if (member && member.userId === p.userId) {
-        member.online = true; existing.lastActiveAt = Date.now(); p.map = existing.id;
+        member.online = true; existing.lastActiveAt = Date.now(); placePlayerAtDungeonStart(p, existing);
         sendDungeonStateTo(ws, existing); return;
       }
     }
@@ -3233,7 +3242,7 @@ async function handleDungeonEnter(ws, p, msg) {
     for (const m of validMembers) {
       rememberDungeonInstance(m.charId, zone, state.id);
       const memberWs = m.ws || wsForChar(m.charId);
-      if (memberWs) { const memberP = clients.get(memberWs); if (memberP) memberP.map = state.id; sendDungeonStateTo(memberWs, state, inRealParty && validMembers.length > 1 ? {party:true} : undefined); }
+      if (memberWs) { const memberP = clients.get(memberWs); if (memberP) placePlayerAtDungeonStart(memberP, state); sendDungeonStateTo(memberWs, state, inRealParty && validMembers.length > 1 ? {party:true} : undefined); }
     }
   } catch (err) {
     console.error('dungeon_enter_error', err.message, err.status || '', err.detail || '');
@@ -3386,7 +3395,7 @@ async function formDungeonGroup(zone, group) {
     rememberDungeonInstance(m.charId, zone, state.id);
     const memberWs = wsForChar(m.charId);
     if (memberWs) {
-      const memberP = clients.get(memberWs); if (memberP) memberP.map = state.id;
+      const memberP = clients.get(memberWs); if (memberP) placePlayerAtDungeonStart(memberP, state);
       send(memberWs, {type:'dungeon_queue_matched', zone, size:validMembers.length + aiFillMembers.length});
       sendDungeonStateTo(memberWs, state, (validMembers.length + aiFillMembers.length) > 1 ? {party:true} : undefined);
     }
@@ -5020,7 +5029,7 @@ module.exports = {
   normalizeLivingWorldSettings, applyLivingWorldConfig, loadLivingWorldConfig, persistLivingWorldConfig,
   fieldAiEntities, fieldAiCounts, instanceAiCounts, isSafeFieldAi, despawnFieldAi, rebalanceFieldAi, livingWorldStatus,
   villageAiEntities, VILLAGE_SOCIAL_CAP, VILLAGE_ANCHOR,
-  moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
+  moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST, placePlayerAtDungeonStart,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):
   DUNGEON_ROOM_MOB_COUNTS,
