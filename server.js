@@ -2901,6 +2901,13 @@ function buildDungeonInstance(zone, members) {
     }
   }
   const bp = cfg.boss, bstats = mobStats(bp.type, bp.lvl, true, bp.k), bossHp = bstats ? Math.round(bstats.hp * 3 * scale) : 1000;
+  // DIAGNOSTICO TEMPORARIO (Fase 5.16.5 Stability Gate, remover apos achar a
+  // causa): achado ao vivo em producao que 2 entradas solo seguidas na
+  // mesma masmorra deram bossHp diferente (1440 depois 480 = bstats.hp sem
+  // nenhum multiplicador) -- matematicamente impossivel pela formula acima
+  // (scale nunca cai abaixo de 1.00). Loga os 3 fatores reais da formula no
+  // instante exato da criacao pra pegar o valor real de `scale`/`members.length`.
+  console.log('dungeon_boss_create', JSON.stringify({zone, mapId, membersLen: members.length, scale, bstatsHp: bstats ? bstats.hp : null, bossHp}));
   const bossId = mapId + ':boss', bc = layout.boss;
   state.mobs.set(bossId, {id:bossId,maxhp:bossHp,hp:bossHp,dead:false,x:bc.x,y:bc.y,sx:bc.x,sy:bc.y,state:'idle',respawnAt:0,boss:true,type:bp.type,lvl:bp.lvl,k:bp.k,dun:true,wallRects:layout.rects});
   state.bossId = bossId;
@@ -3233,6 +3240,8 @@ async function handleDungeonEnter(ws, p, msg) {
     // por ele ou por outro lider)? Reusa -- reconexao/reenvio de
     // dungeon_enter nunca duplica instancia.
     const existing = ownedDungeonInstance(p.charId, zone);
+    // DIAGNOSTICO TEMPORARIO (Fase 5.16.5, ver comentario em buildDungeonInstance)
+    console.log('dungeon_enter_path', JSON.stringify({zone, charId: p.charId, reused: !!existing, existingBossHp: existing ? existing.mobs.get(existing.bossId)?.maxhp : null, existingBossDead: existing ? existing.mobs.get(existing.bossId)?.dead : null}));
     if (existing) {
       const member = existing.members.get(p.charId);
       if (member && member.userId === p.userId) {
