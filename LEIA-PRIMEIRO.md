@@ -1309,3 +1309,64 @@ A metade **client-side** (a causa real do bug) foi verificada ao vivo no navegad
 ## Migração de banco
 
 Nenhuma — mudança inteiramente de comportamento client-side (JS/CSS/HTML), servidor não foi alterado.
+
+# FASE 5.13.1 — DUNGEON EM PARTY
+
+**Escopo**: tornar a masmorra (até então estritamente solo — última limitação conhecida documentada no fim da Fase 5.13, acima) cooperativa para 1–4 jogadores, **reusando o sistema de Party já existente** (`parties`/`memberParty`, `/api/party`) sem inventar nenhuma estrutura paralela. Mapa/colisão/spawn da Fase 5.13 não foram tocados — só a camada de "quem pode entrar e é dono da instância" e "como a recompensa é distribuída" mudou.
+
+## Núcleo: `createDungeonInstance` virou um wrapper fino sobre `buildDungeonInstance`
+
+`buildDungeonInstance(zone, members[])` (novo, `server.js`) é a função real — recebe uma lista de `{charId, userId, cls}` em vez de um único dono. `createDungeonInstance(zone, ownerCharId, ownerUserId)` (assinatura antiga, usada por todo o teste pré-existente) virou uma casca de uma linha que chama `buildDungeonInstance(zone, [{charId, userId}])` — **comportamento solo bit-a-bit idêntico ao de antes**, confirmado pelos 28 testes de masmorra pré-existentes continuando verdes sem nenhuma alteração de asserção.
+
+`state.members` (campo que já existia, um `Set` nunca lido por ninguém, deixado de propósito por uma fase anterior) virou um `Map<charId, {userId, cls, online, joinedAt, damageDone, lastActivityAt}>` — a fonte real de quem pertence à instância. `ownerCharId`/`ownerUserId` continuam preenchidos (primeiro membro) só por compatibilidade com código antigo que ainda espera um "dono" único (ex.: `dungeonCleanupTick` ao limpar `dungeonByOwner`); `members` é sempre a verdade.
+
+## Escala de HP por participante — nunca no dano do jogador
+
+`DUNGEON_PARTY_SCALE` (`game-data/dungeon-generation.js`, núcleo puro): `{1: 1.00, 2: 1.55, 3: 2.05, 4: 2.50}`, aplicado via `dungeonScaleFor(n)` (grampeado a 1–4, nunca NaN/negativo). O multiplicador entra **só** no HP de mob/chefe (`Math.round(stats.hp * scale)` em `buildDungeonInstance`) — o dano que o jogador causa continua vindo 100% de `resolveAttackDamage`/`clampAtk`, código de combate da Fase 5.12 **inalterado**. TTK não foi medido em produção real (sem ambiente de carga disponível nesta sessão), mas os números de partida (1.55×/2.05×/2.50×) foram os pedidos explicitamente como ponto de partida.
+
+## Entrada: só o líder inicia, membros reais resolvidos pelo servidor
+
+`handleDungeonEnter` reescrito: se o personagem que pediu já tem uma instância viva daquela zona (`ownedDungeonInstance`), **sempre reusa** — nunca reconstrói a lista de membros numa chamada repetida (é assim que o late-join fica bloqueado, ver abaixo). Senão, se ele está numa Party real (`party.members.size > 1`), só o **líder** (`party.ownerId`) pode iniciar — qualquer outro membro recebe `dungeon_error: "Apenas o líder do grupo pode iniciar a masmorra."`. Os candidatos a membro são resolvidos via `activeCharacterForUser(userId)` para cada `userId` da Party — **nunca** uma lista de IDs vinda do cliente — e cada candidato tem o desbloqueio da região revalidado com uma leitura fresca do banco (`save.quest`/`save.gunlock`, nunca o que já está em memória). Quem não está liberado simplesmente fica de fora do grupo que entra; se ninguém estiver liberado, ou se o próprio líder não estiver, a masmorra não abre.
+
+## Late join: quem entra na Party depois que a masmorra já começou nunca entra naquela instância
+
+Não existe um mecanismo dedicado de "bloqueio" — é uma consequência direta de como a entrada funciona: `buildDungeonInstance` recebe a lista de membros **uma única vez**, no momento da criação, e `state.members` nunca é atualizado depois por eventos de Party (entrar/sair). Um personagem que entra na Party depois: (a) se tentar `dungeon_enter` ele mesmo, não é o líder (a menos que vire dono da Party) e é barrado pelo mesmo erro acima; (b) mesmo que o líder chame `dungeon_enter` de novo, a instância já existente é **reusada** (branch `ownedDungeonInstance`), nunca reconstruída com a lista atual da Party.
+
+## Presença compartilhada, HP/morte/loot continuam individuais
+
+Todos os membros resolvidos recebem `p.map = state.id` (o mesmo mapId) e o mesmo `dungeon_state` (com `party:true` quando é uma entrada de grupo real) — o resto do mundo compartilhado (outros jogadores visíveis, mobs sincronizados via `mob_state`/`broadcastMap`) usa exatamente o mesmo pipeline genérico de multiplayer já usado por TvT e World Boss (jogadores no mesmo `p.map` já se veem desde sempre) — **nenhuma mudança em `index.html`** foi necessária pra isso. HP/dano/morte/respawn de jogador continuam 100% o sistema server-authoritative da Fase 5.12, sem nenhum código novo — só o HP dos MOBS foi escalado.
+
+## Recompensa individual — cada membro elegível, seu próprio roll
+
+Dentro de `mob_damage`, quando um mob morre dentro de uma instância de masmorra, o loop de recompensa deixou de creditar só quem desferiu o golpe final e passou a iterar `state.members` inteiro, chamando `creditDungeonReward` **uma vez por membro elegível**, cada um com seu próprio `charId`/`userId`/`cls` (o roll de loot usa a classe de CADA membro, não a de quem bateu) — `creditDungeonReward` já era (desde a Fase 5.2/5.3) um `withCharLock`+leitura+PATCH atômico e independente por personagem, então chamá-lo em loop, um por membro, não precisou de nenhuma mudança nele. Membro offline no momento da morte recebe a recompensa do mesmo jeito (persistida no banco) através de um WS "morto" (`DUNGEON_OFFLINE_WS = {readyState:3}`) que deixa `send()` fazer nada com segurança — só não vê a notificação em tempo real. Mochila cheia usa exatamente o mecanismo já existente (`applyGearDrops`/`dropLost`), sem nenhum código novo.
+
+**Elegibilidade nunca exige abate** (mesmo espírito de `isTvtEligible` da Fase 5.7): `dungeonMemberEligible(member, now)` aceita quem já causou dano real (`damageDone>0`) OU esteve ativo nos últimos 90s (`DUNGEON_ELIGIBLE_IDLE_MS`) — um membro que ficou parado a masmorra inteira sem participar não rouba recompensa de quem lutou, mas ninguém precisa ter batido o golpe fatal especificamente.
+
+**Corrida de morte do chefe** (dois golpes quase simultâneos): `mob.dead=true` e `state.bossDefeated=true` são setados de forma síncrona, antes de qualquer `await` — como Node processa uma mensagem WS até completar antes da próxima, uma segunda mensagem `mob_damage` pro mesmo mob (mesmo chegando logo em seguida) sempre encontra `mob.dead===true` no guard do topo do handler e retorna sem reprocessar. Mesma proteção que já cobria o caso solo (testada em `test/dungeon-integration.test.js`), agora também correta pra N membros batendo ao mesmo tempo — nenhuma trava nova foi necessária.
+
+## Desconexão, reconexão e "dono" que não trava a instância
+
+Desconectar (líder ou qualquer outro membro) **nunca** termina a instância nem afeta quem mais está dentro — só marca aquele membro `online=false` (mesmo padrão de World Boss/TvT, novo bloco dentro do `ws.on('close', ...)`). `dungeonCleanupTick` decide se uma instância morre por presença real no mapa (`playersOnMap`), não por quem é "dono" — então o líder cair não derruba o grupo. Reconectar com o mesmo `userId`+`charId` (novo bloco dentro de `handleWsJoin`, espelhando o padrão já usado por World Boss/TvT) percorre `dungeonByOwner.get(charId)` procurando uma instância que ainda esteja viva e onde esse personagem seja membro de verdade — encontrando, marca `online=true` de novo e manda `dungeon_state` com `reconnect:true`, sem duplicar personagem nem criar instância nova.
+
+## Sair da Party durante uma masmorra ativa
+
+Sair da Party (`leaveParty`) é uma operação inteiramente no nível de Party — não tem nenhum gancho para dentro de `state.members` da masmorra. Como a lista de membros da instância foi fixada na criação (ver "late join" acima) e nunca é sincronizada de volta a partir da Party, sair do grupo não expulsa ninguém de uma masmorra em andamento nem abre brecha para reentrar em várias Parties e coletar a mesma recompensa mais de uma vez — a elegibilidade (`dungeonMemberEligible`) e o `withCharLock` por personagem em `creditDungeonReward` já impedem duplicação, com ou sem mudança de Party no meio do caminho.
+
+## Isolamento entre Parties
+
+Cada `dungeon_enter` bem-sucedido gera um `mapId` novo (`zone + '_d#' + hex aleatório de 4 bytes`) e só os membros resolvidos daquela chamada específica recebem `p.map` apontando pra ele — duas Parties diferentes entrando na mesma zona ao mesmo tempo sempre caem em instâncias `mapId` distintas, sem nenhum código de isolamento dedicado (é uma consequência direta de cada instância ser um `mapState` novo, mesmo princípio já usado por World Boss/TvT). Um personagem fora da Party nunca recebe `dungeon_state` daquela instância (só quem está na lista `validMembers` resolvida a partir da própria Party é notificado) e, mesmo sabendo o `mapId` por fora, não tem como se colocar dentro dela — nenhuma mensagem do cliente altera `p.map` diretamente.
+
+## Testes
+
+`test/dungeon-party.test.js` (novo arquivo, mesmo padrão de `test/dungeon-integration.test.js`): 6 testes puros de `dungeonScaleFor`/`buildDungeonInstance` (**sempre rodam, sem Supabase** — cobrem os 4 valores de escala pedidos, grampeamento fora de 1–4, forma solo idêntica à antiga, HP de mob/chefe escalado em 2.50× pra 4 membros sem alterar dano do jogador, `wallRects` compartilhado, zona/lista inválida retornando `null`) + 8 testes de integração real via Party+WebSocket (`{skip:!hasSupabase()}`, mesma convenção de todo o resto da suite): solo sem Party (regressão), Party de 2 caindo no mesmo mapId, Party de 4 caindo no mesmo mapId com chefe escalado, membro não-líder impedido de iniciar, duas Parties isoladas em mapIds diferentes, intruso nunca recebendo `dungeon_state` da instância alheia, reconexão voltando pra mesma instância (`reconnect:true`), recompensa individual creditando os DOIS membros mesmo quando só um bateu no chefe. Os 28 testes pré-existentes de masmorra (solo) continuam verdes sem nenhuma alteração de asserção — suite completa: 456 testes / 302 passando / 0 falhando / 154 pulados (todos os pulados exigem Supabase real, nenhum contado como passado).
+
+## Verificação
+
+Os 6 testes puros rodam de verdade nesta sessão (sandbox sem credenciais Supabase configuradas) e passam. Os 8 testes de integração real via WebSocket foram escritos para exercitar o fluxo completo (`/api/party` real, `dungeon_enter`/`mob_damage` reais, nunca bypass) mas **não puderam ser executados nesta sessão** — não há `SUPABASE_URL`/`SUPABASE_SECRET_KEY` disponíveis neste ambiente (mesma situação de TODOS os outros testes com `{skip:!hasSupabase()}` já existentes no repositório, incluindo o de `test/dungeon-integration.test.js` e o de `session_replaced` da Fase 5.12.1 — não é uma limitação nova desta fase). A correção foi verificada por revisão estática cuidadosa de cada trecho alterado (guard de `mob.dead` síncrono antes de qualquer `await`, `withCharLock` independente por `charId`, `state.members` nunca ressincronizado a partir da Party, presença por `playersOnMap` em vez de "dono") e por comparação direta com os padrões já comprovados de World Boss/TvT (reconexão, desconexão, isolamento por `mapId`). **Recomenda-se rodar `npm test` com `SUPABASE_URL`/`SUPABASE_SECRET_KEY` de um projeto de TESTE antes do merge em `main`**, para confirmar os 8 cenários fim-a-fim.
+
+## Limitações conhecidas
+
+- **Sem HUD dedicado de grupo dentro da masmorra** (barra de HP dos outros membros, indicador de "em grupo") — o pedido original cobre mecânica (escala/loot/reconexão), não UI nova; jogadores do mesmo grupo já se veem/se movem/lutam juntos pelo pipeline genérico de multiplayer (mesmo usado em TvT/World Boss), só não há um painel dedicado. Fica pronto pra uma fase futura de polish, se pedido.
+- **TTK (time-to-kill) não medido em produção real** — sem ambiente de carga/grupo real disponível nesta sessão; os multiplicadores de escala usados são os valores de partida pedidos explicitamente (1.55×/2.05×/2.50×), não uma calibração validada por playtesting.
+- **Os 8 testes de integração real (Party+WebSocket) não foram executados nesta sessão** — ver "Verificação" acima. Escritos e prontos, mas pendentes de confirmação com Supabase real antes do merge.
+- **Nenhuma migração de banco** — toda a mudança é em memória (`server.js`/`game-data/dungeon-generation.js`); o formato salvo em `characters.save` (gold/gem/bag/eq) não mudou.
