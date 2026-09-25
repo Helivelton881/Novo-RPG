@@ -27,7 +27,14 @@ test('publicCache: hit dentro do TTL nunca reexecuta a funcao de origem', async 
   assert.equal(hit2.calls, 1, 'deveria reusar o valor cacheado, nunca recalcular');
 });
 
-test('/api/public/status: responde sem nenhuma autenticacao, formato de populacao humano/IA presente', { skip: !hasSupabase() }, async () => {
+// Achado na revisao pre-merge: /api/public/status envolve sua propria
+// leitura de guilds num try/catch (Supabase fora do ar nunca derruba o
+// status publico, de proposito) e /api/public/events nem chama
+// Supabase (so EVENT_DATA.scheduleAfter, puro) -- os dois deveriam
+// rodar SEMPRE, nunca so com {skip:!hasSupabase()}. So /api/public/news
+// (le portal_news direto, sem fallback) genuinamente precisa de
+// Supabase, e continua com o skip abaixo.
+test('/api/public/status: responde sem nenhuma autenticacao, formato de populacao humano/IA presente', async () => {
   const res = await httpJson(srv, 'GET', '/api/public/status');
   assert.equal(res.status, 200);
   assert.ok('human' in res.json.population);
@@ -40,7 +47,7 @@ test('/api/public/status: responde sem nenhuma autenticacao, formato de populaca
   assert.equal(typeof res.json.worldBossActive, 'boolean');
 });
 
-test('/api/public/status: nunca vaza user_id/email/save/token/session/role em nenhum campo', { skip: !hasSupabase() }, async () => {
+test('/api/public/status: nunca vaza user_id/email/save/token/session/role em nenhum campo', async () => {
   const res = await httpJson(srv, 'GET', '/api/public/status');
   const flat = JSON.stringify(res.json).toLowerCase();
   for (const forbidden of ['user_id','email','password','token','session','"role"','save']) {
@@ -48,7 +55,7 @@ test('/api/public/status: nunca vaza user_id/email/save/token/session/role em ne
   }
 });
 
-test('/api/public/events: lista proximos eventos sem exigir conta', { skip: !hasSupabase() }, async () => {
+test('/api/public/events: lista proximos eventos sem exigir conta', async () => {
   const res = await httpJson(srv, 'GET', '/api/public/events');
   assert.equal(res.status, 200);
   assert.ok(Array.isArray(res.json.upcoming));

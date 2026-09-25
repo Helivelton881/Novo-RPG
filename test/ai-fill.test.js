@@ -65,11 +65,13 @@ test('REGRA ABSOLUTA (masmorra): dungeonHandleMobDeath credita SOMENTE o humano 
   try { S.dungeonHandleMobDeath(state, mob, Date.now(), null); await sleep(300); }
   finally { console.error = origError; }
   // com Supabase nao configurado, uma tentativa real de creditar
-  // QUALQUER membro (humano ou IA) gera 'dungeon_reward_error' no log --
-  // a IA nunca deveria gerar essa tentativa, entao no maximo 1 (a do
-  // humano) deveria aparecer, nunca 2.
+  // QUALQUER membro (humano ou IA) gera 'dungeon_reward_error' no log.
+  // Exige EXATAMENTE 1 (nunca <=1 -- isso passaria tambem se ninguem
+  // fosse creditado, o que esconderia um bug onde o proprio humano
+  // parasse de receber recompensa): a IA nunca deveria gerar a
+  // tentativa, mas o humano SEMPRE deveria.
   const attempts = logs.filter(l => l.includes('dungeon_reward_error')).length;
-  assert.ok(attempts <= 1, `esperava no maximo 1 tentativa de credito (so o humano), viu ${attempts}`);
+  assert.equal(attempts, 1, `esperava exatamente 1 tentativa de credito (so o humano, nunca 0 nem 2), viu ${attempts}`);
 });
 
 test('aiDoTvt: nunca ataca no mesmo tick que adquire um alvo novo (latencia de reacao simulada)', () => {
@@ -161,7 +163,16 @@ async function newQueueChar(cls) {
   return { token, charId: id, conn };
 }
 
-test('AI Dungeon Fill: 3 humanos com allowAiFill completam o grupo com 1 IA apos o fallback de 3 (25s)', { skip: !hasSupabase(), timeout: 40000 }, async () => {
+async function adminOwnerAccount() {
+  const username = rnd(), password = 'SenhaForte123';
+  const reg = await httpJson(srv, 'POST', '/api/auth/register', { username, password });
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  await fetch(`${url}/rest/v1/admin_roles`, { method: 'POST', headers: { apikey: key, Authorization: `Bearer ${key}`, 'content-type': 'application/json', prefer: 'return=minimal' }, body: JSON.stringify({ user_id: reg.json.user.id, role: 'owner' }) });
+  return reg.json.token;
+}
+
+test('AI Dungeon Fill: 3 humanos com allowAiFill completam o grupo com 1 IA de verdade apos o fallback de 3 (25s)', { skip: !hasSupabase(), timeout: 40000 }, async () => {
   const chars = [await newQueueChar('guerreiro'), await newQueueChar('druida'), await newQueueChar('mago')];
   for (const c of chars) c.conn.ws.send(JSON.stringify({ type: 'dungeon_queue_join', zone: 'floresta', allowAiFill: true }));
   for (const c of chars) await waitFor(c.conn.msgs, m => m.type === 'dungeon_queue_state', 3000);
@@ -169,7 +180,16 @@ test('AI Dungeon Fill: 3 humanos com allowAiFill completam o grupo com 1 IA apos
   for (const c of chars) states.push(await waitFor(c.conn.msgs, m => m.type === 'dungeon_state', 32000));
   const mapIds = new Set(states.map(s => s.map));
   assert.equal(mapIds.size, 1, 'os 3 humanos deveriam cair na mesma instancia');
+  const mapId = states[0].map;
   assert.ok(states[0].roster.some(m => m.boss), 'roster deveria ter o chefe (escalado pra 4 participantes se a IA entrou)');
+  // Achado na revisao pre-merge: o teste original so verificava onde os
+  // HUMANOS cairam, nunca se a IA realmente entrou (o bug do teto de
+  // populacao a deixava "fantasma": contada no grupo mas nunca spawnada
+  // de verdade). Confirma via /api/admin/ai que existe uma entidade de
+  // IA real, ativa, alocada exatamente nesta instancia.
+  const ownerToken = await adminOwnerAccount();
+  const aiList = await httpJson(srv, 'GET', '/api/admin/ai', null, ownerToken);
+  const filledHere = aiList.json.entities.filter(e => e.slot && e.slot.kind === 'dungeon' && e.slot.instanceId === mapId);
+  assert.equal(filledHere.length, 1, 'deveria existir exatamente 1 entidade de IA real alocada nesta instancia (nunca um "fantasma" contado sem existir)');
   for (const c of chars) c.conn.close();
 });
-

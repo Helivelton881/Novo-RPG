@@ -90,6 +90,24 @@ async function adminInsertRole(userId, role, grantedBy) {
   if (!r.ok) throw new Error('adminInsertRole falhou: ' + JSON.stringify(rows));
   return rows[0];
 }
+async function adminListOwnerIds() {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const r = await fetch(`${url}/rest/v1/admin_roles?select=user_id&role=eq.owner`, {
+    headers: { apikey: key, Authorization: `Bearer ${key}` },
+  });
+  const rows = await r.json();
+  if (!r.ok) throw new Error('adminListOwnerIds falhou: ' + JSON.stringify(rows));
+  return rows.map(row => row.user_id);
+}
+async function adminDeleteRole(userId) {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  await fetch(`${url}/rest/v1/admin_roles?user_id=eq.${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+    headers: { apikey: key, Authorization: `Bearer ${key}`, prefer: 'return=minimal' },
+  });
+}
 
 test('sem cargo nenhum: /api/admin/me retorna 403 (acesso restrito)', { skip: !hasSupabase() }, async () => {
   const acc = await newAccount();
@@ -185,18 +203,30 @@ test('cargo: owner concede moderator a outra conta, que passa a poder kickar mas
 
 test('cargo: nunca deixa remover o ultimo owner (travaria o painel)', { skip: !hasSupabase() }, async () => {
   const owner = await newAccount(); await adminInsertRole(owner.userId, 'owner');
+  // Achado na revisao pre-merge: testes anteriores neste MESMO arquivo
+  // ja inserem seus proprios owners e nunca fazem limpeza -- sem isso,
+  // owners.length nunca chega a 1 de verdade e o guard testado aqui
+  // nunca dispara (o revoke sempre "passava" mesmo com o bug presente).
+  // Remove qualquer outro owner acumulado ANTES de testar, garantindo
+  // que este e realmente o unico no momento da asserção.
+  for (const id of await adminListOwnerIds()) if (id !== owner.userId) await adminDeleteRole(id);
   const res = await httpJson(srv, 'POST', '/api/admin/roles/revoke', {userId:owner.userId}, owner.token);
   assert.equal(res.status, 400);
+  assert.deepEqual(await adminListOwnerIds(), [owner.userId], 'o unico owner nao deveria ter sido removido');
 });
 
 test('auditoria: ban gera entrada no audit log, sem nenhum campo sensivel', { skip: !hasSupabase() }, async () => {
   const owner = await newAccount(); await adminInsertRole(owner.userId, 'owner');
   const victim = await newAccount();
-  const before = await httpJson(srv, 'GET', '/api/admin/audit', null, owner.token);
-  const beforeCount = before.json.audit.length;
   await httpJson(srv, 'POST', '/api/admin/ban', {userId:victim.userId, reason:'auditoria de teste'}, owner.token);
   const after = await httpJson(srv, 'GET', '/api/admin/audit', null, owner.token);
-  assert.ok(after.json.audit.length > beforeCount, 'deveria ter uma entrada nova no audit log');
+  // Achado na revisao pre-merge: comparar o TAMANHO da lista antes/depois
+  // quebra assim que o log passa de 100 linhas (o limite da propria rota)
+  // -- as duas leituras ficam presas no mesmo teto e a comparacao nunca
+  // aumenta, mesmo com uma entrada nova de verdade. victim.userId e
+  // gerado fresco a cada execucao, entao localizar a entrada especifica
+  // (sempre a mais recente, sempre dentro da janela de 100) e a unica
+  // checagem que realmente importa.
   const entry = after.json.audit.find(a => a.action === 'ban' && a.target_user_id === victim.userId);
   assert.ok(entry, 'a entrada do ban deveria estar no audit log');
   assert.equal(entry.reason, 'auditoria de teste');
