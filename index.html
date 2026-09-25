@@ -6302,7 +6302,13 @@ function makeRug(w,h){
   g.fillStyle='#3a0e10';g.fillRect(0,0,c.width,c.height);
   g.fillStyle='#6e181c';g.fillRect(3,3,c.width-6,c.height-6);
   g.strokeStyle='#c9a24a';g.lineWidth=2;g.strokeRect(2.5,2.5,c.width-5,c.height-5);
-  g.fillStyle='rgba(201,162,74,.5)';for(let i=6;i<c.width-6;i+=14)g.fillRect(i,c.height/2-1,6,2);
+  // Fase 5.16.3 (V3): tapete pode ser desenhado deitado (largo) ou em pe
+  // (alto) -- as franjas seguem o eixo mais comprido automaticamente, pra
+  // sempre ler como "tapete correndo na direcao do trono", nunca deitado
+  // errado quando o eixo entrada->trono e vertical (layout de encruzilhada).
+  g.fillStyle='rgba(201,162,74,.5)';
+  if(c.width>=c.height)for(let i=6;i<c.width-6;i+=14)g.fillRect(i,c.height/2-1,6,2);
+  else for(let i=6;i<c.height-6;i+=14)g.fillRect(c.width/2-1,i,2,6);
   return _rugCache[key]={c,ax:c.width/2,ay:c.height/2};
 }
 function decorateMasmorra(w,rooms,theme,pr){
@@ -6322,72 +6328,66 @@ function decorateMasmorra(w,rooms,theme,pr){
     }
   }
   if(DUN_IMG){
-    // Camada base (opcional, tileset externo): colunas/tochas do sistema
-    // ja existente -- mantida como esta, so complementada pela camada SP.*.
-    {const r=rooms.sala1,ct=c('sala1');placeColumn(r.x*T+40,ct.y);if(pr()<.7)placeColumn((r.x+r.w)*T-40,ct.y)}
-    {const r=rooms.sala4,pad=48;
+    // Camada base (opcional, tileset externo): colunas do sistema ja
+    // existente -- mantida como esta, so complementada pela camada SP.*.
+    {const r=rooms.encruzilhada,pad=40;
       placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
       placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
     {const r=rooms.boss,pad=56;
       placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
       placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
   }
-  // 1. Entrada -- area segura, tochas acolhedoras (agora com brilho de
-  // verdade via kitTorch/FX), sem entulho.
+  // 1. Entrada -- area segura, tochas acolhedoras (brilho de verdade via
+  // kitTorch/FX), sem entulho.
   {const r=rooms.entrada;
     kitTorch(kit,r.x*T+24,(r.y+r.h/2)*T);kitTorch(kit,(r.x+r.w)*T-24,(r.y+r.h/2)*T);
-    kitProp(kit,'crate',r.x*T+r.w*T*.28,(r.y+r.h*.78)*T,[24,16]);
+    kitProp(kit,'crate',r.x*T+r.w*T*.22,(r.y+r.h*.7)*T,[24,16]);
   }
-  // 2. Corredor inicial (sala1+corr1) -- primeiros mobs, primeiro sinal de
-  // ruina: entulho leve nas bordas, uma tocha de transicao acesa.
-  {const r=rooms.sala1;debris(r,4,{allowClutter:true});kitProp(kit,'fence',r.x*T+18,(r.y+r.h*.2)*T,[28,20])}
-  {const r=rooms.corr1;kitTorch(kit,(r.x+r.w/2)*T,r.y*T+14)}
-  // 3. Encruzilhada (sala2, a mais movimentada) -- sensacao de exploracao:
-  // pilar central se o tema tiver, entulho/ossos espalhados pelos 4
-  // cantos, tochas acesas nas duas bordas (hub bem iluminado).
-  {const r=rooms.sala2,ct=c('sala2');
-    kitProp(kit,'pillar',ct.x,r.y*T+40,[28,20]);
+  // 2. Corredor inicial -- primeiros mobs, primeiro sinal de ruina:
+  // entulho leve, uma tocha de transicao acesa.
+  {const r=rooms.corredorInicial;debris(r,3,{allowClutter:true});kitTorch(kit,(r.x+r.w/2)*T,r.y*T+14)}
+  // 3. Encruzilhada -- HUB de verdade (abre pra 3 direcoes: sala esquerda,
+  // sala direita, sala de elite -- nunca mais um corredor de passagem so):
+  // pilar central se o tema tiver, entulho/ossos nos 4 cantos, tochas
+  // acesas nas bordas (hub bem iluminado, "sensacao de exploracao").
+  {const r=rooms.encruzilhada,ct=c('encruzilhada');
+    kitProp(kit,'pillar',ct.x,ct.y,[28,20]);
     debris(r,5);
-    kitProp(kit,'landmark',r.x*T+34,(r.y+r.h)*T-34,[30,22]);
     kitTorch(kit,r.x*T+20,ct.y);kitTorch(kit,(r.x+r.w)*T-20,ct.y);
   }
-  {const r=rooms.corr2v;kitProp(kit,'bones',(r.x+r.w/2)*T,(r.y+r.h/2)*T,[20,12])}
-  // 4. Ala esquerda (sala3) -- mobs comuns, decoracao de ruina: entulho
-  // denso, marco tematico central (banner/altar do kit), tocha propria.
-  {const r=rooms.sala3,ct=c('sala3');kitProp(kit,'landmark',ct.x,ct.y,[30,22]);debris(r,4);kitTorch(kit,r.x*T+22,r.y*T+22)}
-  // 5. Ala direita (sala4, a mais densa) -- mobs mais fortes: entulho +
-  // ossos abundantes junto as 4 colunas ja existentes, grade proxima a
-  // uma das entradas (reforca "ruina avancada"), tocha propria.
-  {const r=rooms.sala4;debris(r,6);kitProp(kit,'fence',(r.x+r.w)*T-16,r.y*T+r.h*T*.3,[26,20]);kitTorch(kit,(r.x+r.w)*T-22,(r.y+r.h)*T-22)}
-  // 6. Sala de elite (sala5) -- passagem guardada: tochas simetricas
-  // acesas + estatuas/pedestais flanqueando a passagem central,
-  // reforcando a leitura de "guarda de elite" sem mudar combate/loot.
-  {const r=rooms.sala5,ct=c('sala5');
+  // 4. Sala esquerda -- ala opcional a oeste do hub (mobs comuns,
+  // decoracao de ruina): entulho denso, marco tematico central, tocha.
+  {const r=rooms.salaEsquerda,ct=c('salaEsquerda');kitProp(kit,'landmark',ct.x,ct.y,[30,22]);debris(r,5);kitTorch(kit,r.x*T+22,r.y*T+22);kitTorch(kit,(r.x+r.w)*T-22,(r.y+r.h)*T-22)}
+  // 5. Sala direita -- ala opcional a leste do hub (mobs mais fortes/
+  // densos): entulho+ossos abundantes, grade, tocha.
+  {const r=rooms.salaDireita,ct=c('salaDireita');kitProp(kit,'fence',r.x*T+18,r.y*T+20,[26,20]);debris(r,6);kitTorch(kit,(r.x+r.w)*T-22,r.y*T+22);kitTorch(kit,r.x*T+22,(r.y+r.h)*T-22)}
+  // 6. Sala de elite -- passagem guardada rumo ao chefe, ao norte do hub:
+  // tochas simetricas acesas + estatuas/pedestais flanqueando a passagem
+  // central, reforcando a leitura de "guarda de elite" sem mudar
+  // combate/loot (decisao documentada em LEIA-PRIMEIRO.md).
+  {const r=rooms.salaElite,ct=c('salaElite');
     kitTorch(kit,r.x*T+30,ct.y);kitTorch(kit,(r.x+r.w)*T-30,ct.y);
-    kitProp(kit,'crate',r.x*T+r.w*T*.5-60,r.y*T+30,[26,20]);kitProp(kit,'crate',r.x*T+r.w*T*.5+60,r.y*T+30,[26,20]);
-    kitProp(kit,'pillar',ct.x,(r.y+r.h)*T-34,[28,20]);
+    kitProp(kit,'crate',ct.x-60,r.y*T+26,[26,20]);kitProp(kit,'crate',ct.x+60,r.y*T+26,[26,20]);
+    kitProp(kit,'pillar',ct.x,(r.y+r.h)*T-26,[28,20]);
   }
-  // Checkpoint -- sem inimigos, ponto de descanso: iluminacao propria +
-  // marco central (ja existia via runa/cristal do tileset).
-  {const ct=c('checkpoint');if(DUN_IMG)addStatic(dunSprite(5,4,.4),ct.x,ct.y,'dunprop');kitTorch(kit,ct.x-70,ct.y+10);kitTorch(kit,ct.x+70,ct.y+10)}
   // 7. Corredor final -- visual mais sombrio: tochas grandes acesas
-  // (clima de aproximacao) + entulho dobrado, ossos concentrados.
-  {const r=rooms.corrfinal;
-    kitTorch(kit,r.x*T+10,(r.y+r.h/2)*T);kitTorch(kit,(r.x+r.w)*T-10,(r.y+r.h/2)*T);
-    kitProp(kit,'bones',(r.x+r.w/2)*T,r.y*T+r.h*T*.3,[22,14]);kitProp(kit,'bones',(r.x+r.w/2)*T,r.y*T+r.h*T*.7,[22,14]);
+  // (clima de aproximacao) + ossos concentrados.
+  {const r=rooms.corredorFinal;
+    kitTorch(kit,r.x*T+8,(r.y+r.h/2)*T);kitTorch(kit,(r.x+r.w)*T-8,(r.y+r.h/2)*T);
+    kitProp(kit,'bones',(r.x+r.w/2)*T,r.y*T+r.h*T*.3,[20,12]);
   }
-  // 8. Sala do boss -- arena grande e marcante: tapete vermelho da entrada
-  // (oeste) ate o trono/marco atras do chefe (leste), trono flanqueado por
-  // 2 estandartes (SP.banner, universal) e 2 tochas grandes acesas -- a
-  // mesma leitura de "sala do chefe" das referencias (trono + bandeiras +
-  // luz quente), so com os sprites que o jogo ja tem. Espaco central
-  // (onde o chefe nasce, layout.boss) continua limpo pra combate em party.
-  {const r=rooms.boss,ct=c('boss'),throneX=(r.x+r.w)*T-90,throneY=ct.y;
-    const rug=makeRug(Math.max(40,throneX-(r.x*T+70)),56);
-    addStatic(rug,(r.x*T+70+throneX)/2,ct.y,'decal');
+  // 8. Sala do boss -- arena grande e marcante: entrada pelo SUL (vinda do
+  // corredor final), tapete vermelho vertical ate o trono/marco no lado
+  // NORTE (atras do chefe, layout.boss fica exatamente no centro da sala
+  // -- espaco livre pra combate em party nunca e coberto pelo tapete/
+  // marco), flanqueado por 2 estandartes (SP.banner) e 2 tochas acesas.
+  // Lado LESTE fica livre (e onde a saida se conecta).
+  {const r=rooms.boss,entryY=(r.y+r.h)*T,throneX=(r.x+r.w/2)*T,throneY=r.y*T+46;
+    const rug=makeRug(56,Math.max(40,entryY-throneY-40));
+    addStatic(rug,throneX,(throneY+40+entryY)/2,'decal');
     kitProp(kit,'landmark',throneX,throneY,[34,24]);
-    addStatic(SP.banner,throneX-46,throneY-10,'dunkit');addStatic(SP.banner,throneX+46,throneY-10,'dunkit');
-    kitTorch(kit,throneX-70,throneY+30);kitTorch(kit,throneX+70,throneY+30);
+    addStatic(SP.banner,throneX-50,throneY-6,'dunkit');addStatic(SP.banner,throneX+50,throneY-6,'dunkit');
+    kitTorch(kit,throneX-74,throneY+26);kitTorch(kit,throneX+74,throneY+26);
   }
   statics.sort((a,b)=>a.sy-b.sy);
 }

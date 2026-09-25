@@ -17,6 +17,20 @@ const path = require('node:path');
 const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
 const ZONES = ['floresta', 'cripta', 'serra', 'pantano', 'torre', 'ilhas', 'vulcao'];
 
+// Fase 5.16.3 (V3, layout de encruzilhada): decorateMasmorra deveria usar
+// SOMENTE os IDs de sala do layout novo -- nunca mais um nome do layout
+// V2 antigo (sala1-5/corr1/corr2v/gap23/checkpoint), que sumiu de
+// DUNGEON_ROOMS_V2 e faria rooms.<id> ser undefined em runtime.
+test('decorateMasmorra referencia somente IDs de sala do layout V3 (encruzilhada), nunca um ID do layout V2 antigo que nao existe mais', () => {
+  const start = html.indexOf('function decorateMasmorra');
+  const end = html.indexOf('\n// Fase 5.13 -- DUNGEON MAP V2', start);
+  const body = html.slice(start, end > start ? end : start + 6000);
+  const stale = ['sala1', 'sala2', 'sala3', 'sala4', 'sala5', 'corr1', 'corr2v', 'gap23', 'checkpoint'];
+  for (const id of stale) assert.doesNotMatch(body, new RegExp('rooms\\.' + id + '\\b|c\\(\'' + id + '\'\\)'), `decorateMasmorra ainda referencia o ID antigo '${id}', que nao existe mais em DUNGEON_ROOMS_V2`);
+  const current = ['entrada', 'corredorInicial', 'encruzilhada', 'salaEsquerda', 'salaDireita', 'salaElite', 'corredorFinal', 'boss'];
+  for (const id of current) assert.match(body, new RegExp('rooms\\.' + id + '\\b'), `decorateMasmorra deveria decorar a sala '${id}'`);
+});
+
 // Fase 5.16.3 (bug real de producao, achado pelo usuario): extrai a funcao
 // REAL locationDisplayName de index.html e executa de verdade (nao so
 // inspeciona o texto) -- prova comportamento, nao so presenca de codigo.
