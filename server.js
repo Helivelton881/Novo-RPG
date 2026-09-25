@@ -964,6 +964,12 @@ async function handleAuth(req, res, pathname) {
       const rows=await supabase('users',{query:`?select=id,username,password_hash&username=eq.${encodeURIComponent(username)}&limit=1`});
       const user=rows[0];
       if(!user||!(await verifyPassword(password,user.password_hash))){json(res,401,{error:'Usuário ou senha incorretos'});return true}
+      // Fase 5.14: ban persistente e verificado ANTES de emitir sessao --
+      // nunca deixa logar de novo enquanto o ban estiver ativo (permanente
+      // ou com prazo ainda nao vencido). Mesma checagem se repete no WS
+      // (handleWsJoin) pra cobrir quem ja tinha sessao valida antes do ban.
+      const ban=await activeBanFor(user.id);
+      if(ban){json(res,403,{error:'Conta banida'+(ban.reason?': '+ban.reason:'')+(ban.expires_at?' (ate '+new Date(ban.expires_at).toLocaleString('pt-BR')+')':' (permanente)')});return true}
       const update={last_login:new Date().toISOString()};
       if(/^\$2[aby]\$/.test(user.password_hash))update.password_hash=await hashPassword(password);
       await supabase('users',{method:'PATCH',query:`?id=eq.${encodeURIComponent(user.id)}`,body:update,prefer:'return=minimal'});
@@ -1531,6 +1537,236 @@ async function handleParty(req, res, pathname) {
     json(res,405,{error:'Método não permitido'}); return true;
   } catch (err) {
     console.error('party_error', err.message);
+    if (!res.headersSent) json(res,500,{error:'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+// ===== Fase 5.14: Admin + Observabilidade =====
+// RBAC de 4 niveis (owner > admin > moderator > support), auth SEMPRE
+// server-side (mesmo Bearer token de sessao de sempre -- resolveUser --
+// mais uma leitura fresca de admin_roles a CADA requisicao, nunca um
+// cargo guardado no cliente/localStorage). Matriz de permissao
+// centralizada: cada rota do painel checa uma permissao nomeada, nunca
+// compara `role==='admin'` espalhado pelo codigo.
+const ADMIN_PERMS = Object.freeze({
+  owner:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','manage_roles','view_guilds','view_events','view_security_log'],
+  admin:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','view_guilds','view_events','view_security_log'],
+  moderator: ['view_dashboard','search_players','kick','mute','ban','unban','view_guilds','view_events'],
+  support:   ['view_dashboard','search_players','view_guilds','view_events'],
+});
+function adminHasPerm(role, perm) { return !!(ADMIN_PERMS[role] || []).includes(perm); }
+async function resolveAdmin(req) {
+  const user = await resolveUser(req);
+  if (!user) return null;
+  const rows = await supabase('admin_roles', {query:`?select=role&user_id=eq.${encodeURIComponent(user.id)}&limit=1`});
+  const row = rows[0];
+  return row ? {...user, role: row.role} : null;
+}
+function activeAmong(rows) {
+  const now = Date.now();
+  return rows.find(r => !r.revoked_at && (!r.expires_at || new Date(r.expires_at).getTime() > now)) || null;
+}
+async function activeBanFor(userId) {
+  const rows = await supabase('player_bans', {query:`?select=id,reason,expires_at,revoked_at&user_id=eq.${encodeURIComponent(userId)}&order=created_at.desc&limit=5`});
+  return activeAmong(rows);
+}
+async function activeMuteFor(userId) {
+  const rows = await supabase('player_mutes', {query:`?select=id,reason,expires_at,revoked_at&user_id=eq.${encodeURIComponent(userId)}&order=created_at.desc&limit=5`});
+  return activeAmong(rows);
+}
+// Lista de campos que NUNCA entram no audit log, mesmo que alguem passe
+// por engano dentro de `metadata` -- checagem por substring do nome do
+// campo (case-insensitive), nao uma lista fechada de chaves exatas.
+const ADMIN_AUDIT_NEVER_LOG = ['password','token','service_role','session'];
+function sanitizeAuditMetadata(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (ADMIN_AUDIT_NEVER_LOG.some(f => k.toLowerCase().includes(f))) continue;
+    out[k] = v;
+  }
+  return out;
+}
+async function writeAdminAudit(actorUserId, action, {targetUserId, targetCharacterId, reason, metadata} = {}) {
+  try {
+    await supabase('admin_audit_log', {method:'POST', body:{
+      actor_user_id: actorUserId || null, action, target_user_id: targetUserId || null,
+      target_character_id: targetCharacterId || null, reason: reason || null,
+      metadata: sanitizeAuditMetadata(metadata),
+    }, prefer:'return=minimal'});
+  } catch (err) { console.error('admin_audit_log_error', err.message); }
+}
+// Fecha AGORA toda conexao WS ativa de uma conta -- usado por kick e como
+// efeito colateral de ban (nunca deixa quem acabou de ser banido
+// continuar jogando ate a proxima reconexao).
+function kickUserSockets(userId, code, reason) {
+  const set = accountSockets.get(userId);
+  if (!set) return 0;
+  let n = 0;
+  for (const ws of [...set]) { try { ws.close(code, reason); n++; } catch { /* socket ja fechando */ } }
+  return n;
+}
+async function handleAdmin(req, res, pathname) {
+  if (!pathname.startsWith('/api/admin')) return false;
+  try {
+    const admin = await resolveAdmin(req);
+    if (!admin) { json(res,403,{error:'Acesso restrito'}); return true; }
+
+    if (pathname === '/api/admin/me' && req.method === 'GET') {
+      json(res,200,{admin:{userId:admin.id,username:admin.username,role:admin.role,permissions:ADMIN_PERMS[admin.role]||[]}}); return true;
+    }
+
+    if (pathname === '/api/admin/dashboard' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_dashboard')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const onlineTotal = new Set([...clients.values()].filter(p=>p.authed).map(p=>p.userId)).size;
+      const [bansOpen, mutesOpen, recentAudit] = await Promise.all([
+        supabase('player_bans', {query:'?select=id,expires_at&revoked_at=is.null'}),
+        supabase('player_mutes', {query:'?select=id,expires_at&revoked_at=is.null'}),
+        supabase('admin_audit_log', {query:'?select=id,action,actor_user_id,target_user_id,reason,created_at&order=created_at.desc&limit=25'}),
+      ]);
+      // ban/mute com prazo ja vencido ainda aparece como "revoked_at is
+      // null" no banco (nunca reescrevemos a linha so por ela ter
+      // expirado -- expiracao e sempre calculada na leitura, nunca um job
+      // de fundo apagando historico) -- so conta como ATIVO agora quem
+      // nao tem prazo (permanente) ou cujo prazo ainda nao passou.
+      const now = Date.now();
+      const stillActive = row => !row.expires_at || new Date(row.expires_at).getTime() > now;
+      json(res,200,{
+        online: onlineTotal, bansOpen: bansOpen.filter(stillActive).length, mutesOpen: mutesOpen.filter(stillActive).length,
+        recentAudit, serverNow: now,
+      }); return true;
+    }
+
+    if (pathname === '/api/admin/players' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'search_players')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const q = cleanText(new URL(req.url,'http://localhost').searchParams.get('q')||'', 32);
+      if (q.length < 2) { json(res,200,{players:[]}); return true; }
+      const rows = await supabase('characters', {query:`?select=id,name,cls,lvl,user_id,users(username)&name=ilike.${encodeURIComponent('%'+q+'%')}&limit=20`});
+      const players = await Promise.all(rows.map(async r => {
+        const u = Array.isArray(r.users) ? r.users[0] : r.users;
+        const [ban, mute] = await Promise.all([activeBanFor(r.user_id), activeMuteFor(r.user_id)]);
+        return {charId:r.id, name:r.name, cls:r.cls, lvl:r.lvl, userId:r.user_id, username:u?u.username:'?', online:isAccountOnline(r.user_id), banned:!!ban, muted:!!mute};
+      }));
+      json(res,200,{players}); return true;
+    }
+
+    if (pathname === '/api/admin/kick' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'kick')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200)||'Sem motivo informado';
+      if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
+      const n = kickUserSockets(targetUserId, 4004, 'Expulso por um administrador');
+      await writeAdminAudit(admin.id, 'kick', {targetUserId, reason, metadata:{socketsClosed:n}});
+      json(res,200,{ok:true, socketsClosed:n}); return true;
+    }
+
+    if (pathname === '/api/admin/ban' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'ban')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200);
+      const durationMs = Number.isFinite(Number(input.durationMs)) && Number(input.durationMs) > 0 ? Number(input.durationMs) : null;
+      if (!targetUserId || !reason) { json(res,400,{error:'userId e reason obrigatórios'}); return true; }
+      const expiresAt = durationMs ? new Date(Date.now()+durationMs).toISOString() : null;
+      await supabase('player_bans', {method:'POST', body:{user_id:targetUserId, reason, banned_by:admin.id, expires_at:expiresAt}, prefer:'return=minimal'});
+      const n = kickUserSockets(targetUserId, 4003, 'Banido');
+      await writeAdminAudit(admin.id, 'ban', {targetUserId, reason, metadata:{expiresAt, socketsClosed:n}});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/unban' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'unban')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64);
+      if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
+      await supabase('player_bans', {method:'PATCH', query:`?user_id=eq.${encodeURIComponent(targetUserId)}&revoked_at=is.null`, body:{revoked_at:new Date().toISOString(), revoked_by:admin.id}, prefer:'return=minimal'});
+      await writeAdminAudit(admin.id, 'unban', {targetUserId});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/mute' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'mute')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200);
+      const durationMs = Number.isFinite(Number(input.durationMs)) && Number(input.durationMs) > 0 ? Number(input.durationMs) : null;
+      if (!targetUserId || !reason) { json(res,400,{error:'userId e reason obrigatórios'}); return true; }
+      const expiresAt = durationMs ? new Date(Date.now()+durationMs).toISOString() : null;
+      await supabase('player_mutes', {method:'POST', body:{user_id:targetUserId, reason, muted_by:admin.id, expires_at:expiresAt}, prefer:'return=minimal'});
+      // aplica em tempo real pra quem ja esta conectado -- nunca precisa
+      // reconectar pra o mute comecar a valer.
+      const set = accountSockets.get(targetUserId);
+      if (set) for (const ws2 of set) { const p2 = clients.get(ws2); if (p2) { p2.muted = true; p2.muteReason = reason; } }
+      await writeAdminAudit(admin.id, 'mute', {targetUserId, reason, metadata:{expiresAt}});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/unmute' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'unban')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64);
+      if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
+      await supabase('player_mutes', {method:'PATCH', query:`?user_id=eq.${encodeURIComponent(targetUserId)}&revoked_at=is.null`, body:{revoked_at:new Date().toISOString(), revoked_by:admin.id}, prefer:'return=minimal'});
+      const set = accountSockets.get(targetUserId);
+      if (set) for (const ws2 of set) { const p2 = clients.get(ws2); if (p2) { p2.muted = false; p2.muteReason = null; } }
+      await writeAdminAudit(admin.id, 'unmute', {targetUserId});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/roles' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'manage_roles')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const rows = await supabase('admin_roles', {query:'?select=user_id,role,granted_at,users(username)&order=granted_at.asc'});
+      json(res,200,{roles:rows.map(r=>({userId:r.user_id, role:r.role, grantedAt:r.granted_at, username:(Array.isArray(r.users)?r.users[0]:r.users)?.username||'?'}))}); return true;
+    }
+    if (pathname === '/api/admin/roles' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_roles')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64), role = cleanText(input.role,16);
+      if (!targetUserId || !Object.keys(ADMIN_PERMS).includes(role)) { json(res,400,{error:'userId e role válidos são obrigatórios'}); return true; }
+      await supabase('admin_roles', {method:'POST', query:'?on_conflict=user_id', body:{user_id:targetUserId, role, granted_by:admin.id}, prefer:'resolution=merge-duplicates,return=minimal'});
+      await writeAdminAudit(admin.id, 'role_grant', {targetUserId, metadata:{role}});
+      json(res,200,{ok:true}); return true;
+    }
+    if (pathname === '/api/admin/roles/revoke' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_roles')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64);
+      if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
+      // nunca deixa o ultimo owner se auto-revogar (ou ser revogado) --
+      // travaria o painel inteiro sem ninguem pra conceder cargo de novo.
+      const owners = await supabase('admin_roles', {query:`?select=user_id&role=eq.owner`});
+      if (owners.length <= 1 && owners.some(o=>o.user_id===targetUserId)) { json(res,400,{error:'Não é possível remover o último owner.'}); return true; }
+      await supabase('admin_roles', {method:'DELETE', query:`?user_id=eq.${encodeURIComponent(targetUserId)}`});
+      await writeAdminAudit(admin.id, 'role_revoke', {targetUserId});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/economy' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_economy')) { json(res,403,{error:'Sem permissão'}); return true; }
+      // Visao SOMENTE LEITURA -- soma o que ja esta no banco, nunca altera
+      // nada. Nenhuma acao corretiva (dar/tirar ouro) foi implementada
+      // nesta fase de proposito: o pedido e explicito que nunca vire um
+      // "console de cheat"; uma acao corretiva futura, se pedida, exige
+      // seu proprio fluxo auditado com motivo obrigatorio.
+      const rows = await supabase('characters', {query:'?select=save'});
+      let totalGold=0, totalGem=0; for (const r of rows) { const s=r.save||{}; totalGold += Number(s.gold)||0; totalGem += Number(s.gem)||0; }
+      const [listings, transactions] = await Promise.all([
+        supabase('market_listings', {query:'?select=id&status=eq.active'}),
+        supabase('market_transactions', {query:'?select=id'}),
+      ]);
+      json(res,200,{totalGold, totalGem, charactersCounted:rows.length, activeListings:listings.length, totalTransactions:transactions.length}); return true;
+    }
+
+    if (pathname === '/api/admin/guilds' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_guilds')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const rows = await supabase('guilds', {query:'?select=id,name,tag,created_at&order=created_at.desc&limit=50'});
+      json(res,200,{guilds:rows}); return true;
+    }
+    if (pathname === '/api/admin/events' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_events')) { json(res,403,{error:'Sem permissão'}); return true; }
+      json(res,200,{upcoming: EVENT_DATA.scheduleAfter(Date.now(), 6)}); return true;
+    }
+    if (pathname === '/api/admin/audit' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_security_log')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const rows = await supabase('admin_audit_log', {query:'?select=id,actor_user_id,action,target_user_id,target_character_id,reason,metadata,created_at&order=created_at.desc&limit=100'});
+      json(res,200,{audit:rows}); return true;
+    }
+
+    json(res,404,{error:'Rota não encontrada'}); return true;
+  } catch (err) {
+    console.error('admin_error', err.message);
     if (!res.headersSent) json(res,500,{error:'Não foi possível concluir. Tente novamente.'});
     return true;
   }
@@ -2439,7 +2675,8 @@ const server = http.createServer(async (req, res) => {
   if (handleRankings(req, res, pathname)) return;
   if (await handleMarket(req, res, pathname)) return;
   if (handleEvents(req, res, pathname)) return;
-  const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+  if (await handleAdmin(req, res, pathname)) return;
+  const rel = pathname === '/' ? 'index.html' : pathname === '/admin' || pathname === '/admin/' ? 'admin.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
   if (!file.startsWith(ROOT + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
   fs.stat(file, (err, stat) => {
@@ -2494,6 +2731,16 @@ async function handleWsJoin(ws, msg) {
         }
       } catch (err) { console.error('ws_join_auth_error', err.message); userId = null; charRow = null; }
     }
+    // Fase 5.14: ban persistente tambem e checado aqui -- cobre quem ja
+    // tinha uma sessao valida (token) emitida ANTES de ser banido (o
+    // check no login so pega quem tenta logar DEPOIS). Nunca degrada pra
+    // anonimo: fecha a conexao de verdade, com o motivo explicito.
+    if (userId) {
+      try {
+        const ban = await activeBanFor(userId);
+        if (ban) { send(ws, {type:'banned', reason:ban.reason, expiresAt:ban.expires_at||null}); ws.close(4003, 'Banido'); return; }
+      } catch (err) { console.error('ws_join_ban_check_error', err.message); }
+    }
     if (clients.get(ws)) return; // ja tratado por outra mensagem enquanto este join aguardava o Supabase
     const claimedCls=ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',claimedLvl=Math.max(1,Math.min(99,Number(msg.lvl)||1));
     const realSave = charRow ? sanitizeSave(charRow.save,charRow.lvl) : startingSave(claimedCls,cleanText(msg.name,14)||'Herói');
@@ -2517,6 +2764,10 @@ async function handleWsJoin(ws, msg) {
     // carrega a filiacao real do banco no join/reconnect pra rotear
     // guild_chat sem bater no banco a cada mensagem.
     if (p.charId) { try { const brief = await loadCharGuildBrief(p.charId); if (brief) { p.guildId=brief.guildId; p.guildRole=brief.role; p.guildTag=brief.tag; p.guildName=brief.name; } } catch (err) { console.error('ws_join_guild_error', err.message); } }
+    // Fase 5.14: mute persistente -- checado no join (cobre quem entrou
+    // DEPOIS do mute) e reforcado de novo em tempo real por
+    // handleAdminMute pra quem ja estava conectado.
+    if (userId) { try { const mute = await activeMuteFor(userId); p.muted = !!mute; p.muteReason = mute ? mute.reason : null; } catch (err) { console.error('ws_join_mute_check_error', err.message); } }
     if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
     send(ws, {type:'welcome', id:p.id, sessionKey:p.sessionKey, hp:p.hp, maxHp:p.maxHp, dead:p.dead, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
     send(ws, eventStatePayload(p));
@@ -3075,8 +3326,13 @@ wss.on('connection', ws => {
       const map=cleanText(msg.map,24),id=cleanText(msg.id,64);if(map!==p.map||!id)return;
       broadcastMap(map,{type:'projectile_end',map,ownerId:p.id,id,x:Number(msg.x)||0,y:Number(msg.y)||0,boom:!!msg.boom});
     } else if (msg.type === 'chat') {
+      // Fase 5.14: mute persistente bloqueia qualquer chat (global/guilda) --
+      // p.muted e checado no join e mantido em tempo real por
+      // handleAdminMute/handleAdminUnmute pra quem ja esta conectado.
+      if (p.muted) { send(ws, {type:'muted', reason:p.muteReason||null}); return; }
       const text=cleanText(msg.text,160);if(text)broadcast({type:'chat',from:p.name,text,at:Date.now()});
     } else if (msg.type === 'guild_chat') {
+      if (p.muted) { send(ws, {type:'muted', reason:p.muteReason||null}); return; }
       // Fase 5.8: so quem realmente esta em memoria como membro (cache
       // carregado no join/reconnect e atualizado a cada mutacao de guilda)
       // pode falar -- nunca confia num guildId que o cliente mandasse.
@@ -3893,6 +4149,8 @@ module.exports = {
   dungeonQueue, userQueueZone, dungeonQueueTick, dungeonQueuePickGroup, dungeonQueueLeaveInternal,
   DUNGEON_QUEUE_PREFERRED_SIZE, DUNGEON_QUEUE_FALLBACK_3_MS, DUNGEON_QUEUE_FALLBACK_2_MS,
   DUNGEON_QUEUE_FALLBACK_SOLO_MS, DUNGEON_QUEUE_DISCONNECT_GRACE_MS,
+  // Fase 5.14 -- RBAC/admin (nucleo puro + helpers reusados pelos testes):
+  ADMIN_PERMS, adminHasPerm, sanitizeAuditMetadata, activeAmong, resolveAdmin, kickUserSockets,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):
