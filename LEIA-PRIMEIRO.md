@@ -1196,3 +1196,94 @@ A política de sessão é “última conexão autenticada vence”. A anterior r
 Poções online são consumidas dentro de `withCharLock` e só aplicam cura depois do PATCH persistente; overheal é limitado, morto não usa consumível e dois pedidos para uma unidade produzem no máximo um consumo. Pergaminho é teleport server-driven. Mana ainda não possui runtime global completo: o servidor autoriza e consome a poção, retornando o efeito ao cliente.
 
 Auditoria econômica residual manteve Mercado nas RPCs transacionais PostgreSQL. `withCharLock` continua process-local para shop/enchant/consumíveis; isso é suficiente na instância Render atual, mas não substitui lock distribuído se o serviço horizontalizar. O runtime global (HP, cooldown e sessão) também é process-local e se perde num restart/deploy; nenhuma migration foi necessária nesta fase.
+
+# FASE 5.13 — DUNGEON MAP V2
+
+**Escopo estritamente visual/estrutural**: só o mapa, colisão e posicionamento da masmorra mudaram. Nenhuma linha de `DungeonInstance`, `dungeon_enter`/`dungeon_state`, combate, HP, morte, respawn, loot, reward, IA de mob/chefe, Bestiário, Rare/Epic/Legendary, Party, autenticação, anti-teleport ou Supabase foi reescrita — confirmado pelos 18 testes pré-existentes de `test/dungeon.test.js` (roster server-autoritativo, HP real, 3× HP de chefe, `respawnAt=0`, `wallRects` compartilhado, cleanup por idle/tempo-de-vida, loot sem XP) continuando **verdes sem nenhuma alteração de asserção**.
+
+## O que existia (mapa antigo)
+
+O labirinto era **procedural**: `mazeGen(cols,rows,seed)` (DFS perfeito 7×5 + BFS achando a sala mais distante = sala do chefe) em `game-data/dungeon-generation.js`, com o mesmo seed usado pelo cliente (`buildMasmorra`, chamando `mazeGen` direto) e pelo servidor (`dungeonWallRects`/`dungeonLayout`, pra colisão de IA) — cada personagem via um labirinto snake sorteado a cada entrada, mesma matemática dos dois lados.
+
+## Por que virou fixo, e por que o layout precisou ser redesenhado do proposto original
+
+O layout pedido (Entrada → 6 salas nomeadas → Saída, com tamanhos de até 22×18) foi desenhado primeiro **fora** do código (script de planejamento, iterativo) e só então portado — porque existe um teto **global e não-negociável** de tamanho de mundo: `MW=60, MH=44` tiles (`WPX=2880px, HPX=2112px` em `index.html`), o **mesmo** limite que o anti-teleport do servidor já usa pra **qualquer** mapa do jogo (Vila, campo, masmorra, tudo). O labirinto 7×5 antigo cabia com folga nesse teto; o layout pedido, somado em linha reta (salas + corredores empilhados), passava de 130 tiles de altura — muito além dos 44 disponíveis. A solução foi dobrar o caminho num formato de "S" (3 "bandas" horizontais conectadas por dois cotovelos verticais curtos), preservando 100% a sequência linear pedida (nenhuma bifurcação, nenhum ciclo — verificado por teste), e reduzir algumas dimensões em relação à proposta original pra caber com folga de segurança. Layout final: **58×43 tiles** (dentro do limite de 60×44, com margem).
+
+Tabela do que mudou de tamanho (tiles, proposta → final):
+
+| Sala | Proposta | Final |
+|---|---|---|
+| Entrada | 10×8 | 10×8 (igual) |
+| Sala 1 — Recepção | 14×12 | 14×10 |
+| Corredor 1 | larg.3×8-10 | 8×3 (horizontal) |
+| Sala 2 — Combate Inicial | 16×12 | 16×10 |
+| Sala 3 — Câmara Lateral | 12×10 | 12×10 (igual) |
+| Sala 4 — Sala Central | 18×16 | 18×12 |
+| Sala 5 — Elite/Guarda | 14×10 | 14×10 (igual) |
+| Checkpoint | 10×8 | 10×8 (igual) |
+| Corredor Final | larg.4×10-14 | 8×4 (horizontal) |
+| Sala 6 — Arena do Chefe | 22×18 | 20×12 |
+| Saída | 10×8 | 10×8 (igual) |
+
+Mesmo reduzida, a Arena do Chefe (20×12=240 tiles) continua a **maior sala** da masmorra (a Sala Central, 18×12=216, fica em segundo). Também: **entrada e saída pelo mesmo lado da arena** (leste/oeste), em vez de "parte inferior/parte superior" como pedido — mesma ideia funcional (passagem limpa entre paredes opostas, nunca um beco sem saída), só a orientação que precisou virar pra caber no dobramento em S. Ambas as adaptações estão documentadas aqui de propósito, não escondidas.
+
+## Fonte única: mesmo dado pra render E colisão
+
+`game-data/dungeon-generation.js` (compartilhado, `require()` no servidor e `<script>` no cliente — mesmo padrão desde a Fase 5.2) ganhou `DUNGEON_ROOMS_V2` (13 salas/corredores nomeados, coordenadas em tiles) e `DUNGEON_CONNECTIONS_V2` (12 conexões, cada uma com o lado e a largura da porta). `dungeonLayout(seed)` — **mesma assinatura de sempre**, `seed` preservado só por compatibilidade de chamada (o roster de monstros ainda usa `mulberry(seed+1)` como stream próprio, independente da geometria) — agora sempre devolve o **mesmo** layout fixo, calculado uma vez e cacheado (`buildFixedDungeonLayout`), com `{rects, start, boss, exitPoint, rooms, mobRooms}`.
+
+`rects` (retângulos de parede, com o vão/porta exato em cada conexão, calculado por subtração de intervalo — mesma ideia da Fase 5.2, generalizada de "célula uniforme" pra "sala de tamanho arbitrário") é a **mesma lista** que:
+- o **cliente** usa pra colisão do jogador (`buildMasmorra` chama `addBlock(r.x,r.y,r.w,r.h)` pra cada rect — nada de recalcular parede a parede como antes);
+- o **servidor** usa pra colisão de IA de monstro (`mob.wallRects = layout.rects`, `moveMob`/`rectsBlock` inalterados).
+
+Nunca duas matemáticas que podem divergir — o mesmo princípio que já valia desde a Fase 5.2, só que agora a fonte é uma lista de retângulos pré-computada em vez de uma fórmula por célula.
+
+`mazeGen()` continua exportada em `game-data/dungeon-generation.js` (matemática pura, sem custo mantê-la, e removê-la sem necessidade estaria além do escopo desta fase) — mas `dungeonLayout()` **não a chama mais**.
+
+## Layout: sequência linear (confirmada por teste)
+
+```
+ENTRADA → SALA 1 (Recepção) → CORREDOR 1 → SALA 2 (Combate Inicial)
+  → [cotovelo] → SALA 3 (Câmara Lateral) → SALA 4 (Central) → SALA 5 (Elite/Guarda)
+  → [folga] → CHECKPOINT → CORREDOR FINAL → SALA 6 (Arena do Chefe) → SAÍDA
+```
+
+Um teste (`DUNGEON_GEN: sequencia de conexoes forma um unico caminho linear...`) confirma matematicamente que cada sala aparece exatamente 1× (entrada/saída, pontas) ou 2× (meio, uma entrada uma saída) no total de conexões — a definição formal de "caminho único, sem ramificação nem ciclo", sem depender de inspeção visual.
+
+## Colisão
+
+Todo retângulo de `layout.rects` vira um bloqueador real (`addBlock` no cliente, `mob.wallRects` no servidor) — o que parece parede bloqueia, o que parece piso é pintado como chão caminhável (`paintRect(...,3)` dentro de cada sala, `paintRect(...,4)` no fundo). Testes cobrem: nenhuma sala se sobrepõe a outra; toda sala tem pelo menos uma porta; o ponto médio de cada uma das 12 conexões está fora de qualquer rect de parede (a porta é realmente caminhável); `start`/`boss`/`exitPoint` nunca caem dentro de parede; nenhum mob (comum ou chefe) nasce dentro de um rect de colisão.
+
+## Spawn do jogador, saída e portal
+
+`w.start` = ponto fixo dentro da Entrada (nunca mais derivado de `mz.sx/sy`). `w.portal` (o objeto que, ao ser tocado, chama `travel(zoneId)` de volta pro mapa de campo) **mudou de posição**: antes ficava na própria Entrada (entrada e saída eram o mesmo ponto); agora fica na sala de Saída, depois da Arena do Chefe — atende ao pedido de "prefira uma pequena sala de saída" sem precisar de nenhuma mudança de lógica (o objeto portal sempre foi 100% client-side/posicional; só as coordenadas mudaram).
+
+## Spawn de monstros — por sala nomeada, não mais por célula
+
+A distribuição antiga (72% de chance por célula de uma grade 7×5, uniforme) virou distribuição **por sala nomeada** (`DUNGEON_ROOM_MOB_COUNTS` em `server.js`, dentro de `createDungeonInstance`): Sala 1: 2–3, Sala 2: 4–6, Sala 3: 3–4, Sala 4: 5–7, Sala 5: 2 (interpretação de "1 elite ou 2 guardas fortes" — ver limitação abaixo). O **tipo/nível de cada mob continua vindo exatamente da mesma fonte** (`cfg.trash(rnd)`/`mobStats`, sem nenhuma fórmula nova) — só a distribuição espacial mudou, usando `DUNGEON_GEN.roomRandomPoint(room, rnd)` (ponto aleatório dentro da área caminhável da sala, encolhida pela espessura da parede) em vez de "centro da célula + jitter de 70px". O chefe nasce exatamente no centro da Arena (`layout.boss`), como sempre. `rnd` continua o mesmo stream `mulberry(seed+1)`, determinístico por instância.
+
+Checkpoint, corredores e a sala de Saída **nunca** recebem monstro comum (`DUNGEON_MOB_ROOMS_V2` lista só as 5 salas de combate) — Checkpoint é área segura de propósito.
+
+## Decoração (100% cosmética)
+
+Reescrita pra iterar salas nomeadas em vez de células de uma grade. Usa sprites reais já existentes em `tileset-masmorras-original.png` (inspecionado visualmente antes de escolher os índices, nenhum sprite novo baixado): tocha acesa (linha 7, coluna 0) na Entrada (2), Sala 5 (2, flanqueando) e Corredor Final (2, "tochas grandes" na entrada da arena); coluna/pilar (linha 1, coluna 0 — um pilar de pedra arredondado standalone) na Sala 1 (1–2), 4 nos **cantos internos** da Sala 4 (nunca no centro exato, como pedido) e 4 próximos às **extremidades** da Arena do Chefe (arena limpa no meio); banner/estandarte (linha 7, coluna 6) como objeto central da Sala 3 e símbolo do Checkpoint junto com um cristal (linha 4, coluna 5) representando "iluminação/símbolo diferente". Props temáticos por zona (cogumelos/ossos/cristais conforme o tema, tabela reduzida de `DUNGEON_THEME_PROPS`) continuam espalhados dentro de cada sala via o mesmo stream de RNG de decoração (`mulberry`), nunca no vão de passagem entre salas.
+
+## Minimapa
+
+`buildMini` já era genérico (lê o mesmo grid `kind` pintado por `paintRect`, sem lógica dungeon-específica) — não precisou de reescrita. O único ponto hardcoded encontrado (um marcador vermelho de "posição do chefe" fixo em `(46*T,10*T)`, **que não correspondia à posição real do chefe** no mapa procedural antigo) foi corrigido pra ler `DUNGEON_GEN.dungeonLayout().boss` de verdade — agora o minimapa aponta pro chefe real, não um palpite fixo desatualizado.
+
+## Verificação (sem jogar manualmente)
+
+Toda a geometria foi validada por execução real de código, não só leitura: um script de planejamento (Node, fora do repositório) calculou a bounding box e testou sobreposição/conectividade antes da implementação; depois de implementado, o layout foi carregado de verdade no navegador (via console, sem submeter nenhuma conta real) confirmando visualmente Entrada com as 2 tochas, coluna renderizada na Sala 4, chefe + baú posicionados corretamente na Arena, e checagens de colisão (`hitBlock`) confirmando que `start`/`boss`/os 12 pontos médios de porta/os centros das 13 salas **não** estão bloqueados, e que uma parede real (fora de uma porta) **está** bloqueada.
+
+## Testes
+
+10 testes novos em `test/dungeon.test.js` (sempre rodam, sem Supabase): layout idêntico independente do seed (fixo); bounding box dentro do teto global (2880×2112px); nenhuma sobreposição entre as 13 salas/corredores; toda sala aparece em pelo menos uma conexão; a sequência de conexões forma matematicamente um caminho único sem ramificação; `start`/`boss`/`exitPoint` fora de qualquer parede; o ponto médio de cada uma das 12 portas é caminhável; mobs comuns nascem dentro da sala certa e na quantidade certa (`DUNGEON_ROOM_MOB_COUNTS`); o chefe nasce exatamente no centro da Arena; nenhum mob nasce dentro de colisão. Os 18 testes pré-existentes de `test/dungeon.test.js` continuam verdes **sem nenhuma alteração de asserção** (só o título de um teste foi atualizado pra descrever com precisão o novo comportamento "sempre fixo", a asserção em si não mudou).
+
+## Limitações conhecidas
+
+- **Dimensões reduzidas em relação à proposta original** (ver tabela acima) — necessário pra caber no teto global de mundo de 60×44 tiles, que nunca tinha sido binding pra masmorra antes (o labirinto procedural 7×5 antigo cabia com folga). Documentado explicitamente, não uma omissão silenciosa.
+- **Entrada/saída da Arena do Chefe por lados opostos leste-oeste**, não "inferior/superior" como pedido — mesma função (passagem limpa, sem beco sem saída), orientação adaptada pro dobramento em S do layout.
+- **Sala 5 (Elite/Guarda) usa 2 mobs comuns**, não um "elite" com stats diferenciados — nenhum tier de elite existe hoje em `mobStats`/`DUNGEON_CFG`, e inventar um sistema novo estaria fora do escopo desta fase (só mapa/colisão/posicionamento). Fica pronto pra uma fase futura de conteúdo, se pedido.
+- **Total de monstros por instância caiu** (~17–21, distribuição curada por sala) em relação à média antiga (~35, chance uniforme por célula) — decisão deliberada seguindo a distribuição explicitamente pedida por sala, não um corte de recompensa (a fórmula de recompensa por abate não mudou nem um pouco, só quantos monstros existem pra abater).
+- **Checkpoint continua sem lógica de save-point própria** (nenhuma existia antes) — a sala foi preparada visualmente (área segura, sem monstro, decoração própria) mas nenhum sistema novo de "salvar progresso no meio da masmorra" foi implementado, como pedido explicitamente ("se não existir, não implementar sistema novo").
+- **Mesma limitação de sempre**: a masmorra continua solo (uma instância por personagem, `ownedDungeonInstance` por `charId`) — cooperativo multi-jogador não é desta fase, nunca foi.
