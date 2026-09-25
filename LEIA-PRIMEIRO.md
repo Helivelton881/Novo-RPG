@@ -1533,3 +1533,69 @@ Durante a verificação desta fase, percebi que `test/blacksmith.test.js` e `tes
 - **Notícias sem edição** (só publicar/excluir) — pedido era um sistema "simples", editar um título/texto publicado não foi considerado essencial; excluir e republicar já cobre o caso de correção.
 - **7 testes de integração não executados nesta sessão** — ver "Verificação" acima.
 - **Nenhuma migração de banco além de `portal_news`** — aditiva, mesmo padrão das fases anteriores.
+
+# FASE 5.16 (TIER 1) — LIVING WORLD / AVENTUREIROS IA (NÚCLEO)
+
+**Escopo**: camada de IA server-side (nunca navegador, nunca conta Supabase) que povoa as zonas de campo com "Aventureiros" simulados — um FSM determinístico, combate real usando a mesma autoridade dos humanos, isolamento econômico absoluto. Esta seção documenta o **núcleo** (entidade/FSM/combate de campo/visibilidade/isolamento). O preenchimento de masmorra e TvT por IA (Dungeon Fill / TvT Fill) é uma fase seguinte, documentada em separado quando pronta.
+
+## Nunca um processo de navegador, nunca uma conta fake — e nunca um LLM em runtime
+
+Cada Aventureiro IA é só um objeto em memória (`aiEntities`, `Map<id, entity>`) — nenhum WebSocket, nenhuma linha em `users`/`characters`, nenhum processo/aba de navegador. Simulado por um tick determinístico (`aiTick`, reaproveitando o mesmo `setInterval` de 1s que já existia — dentro da janela de 500-1000ms pedida, sem criar um timer novo). **Nenhuma chamada a LLM em lugar nenhum** — o "cérebro" da IA é um FSM com heurísticas simples (raio de agressividade, limiar de fuga por personalidade, seleção por zona menos povoada), nunca uma API de IA generativa.
+
+## FSM: os 12 estados pedidos, todos realmente alcançáveis
+
+`idle` → decide (mob por perto? `hunt`; senão `wander` ou raramente `travel`) · `wander` → passeio aleatório, pode virar `hunt` se um mob aparecer no raio · `travel` → realocação pra outra zona (ver limitação de "viagem" abaixo) · `hunt` → persegue o mob alvo · `combat` → ataca (ou foge, se HP abaixo do limiar de personalidade) · `retreat` → foge do alvo por alguns segundos · `rest` → recupera HP passivamente antes de voltar a `idle` · `dead`/`respawn` → aguarda o prazo e reaparece. `party`/`queue`/`dungeon`/`tvt` são os estados reservados pro preenchimento de masmorra/TvT (Fase seguinte) — o switch já os reconhece (no-op controlado externamente), preparados sem serem enfeite morto.
+
+## Combate: a MESMA autoridade dos humanos, nunca uma fórmula paralela
+
+`aiDoCombat` chama `resolveAttackDamage(ai, {skill:'basic'}, now)` — a função exportada desde a Fase 5.12 e usada por **todo** dano do jogo — com o próprio objeto da IA no lugar de `p`. Cooldown, teto de dano, fórmula por classe/nível: tudo idêntico. Mobs de campo também **revidam de verdade**: `tickMobAI` agora inclui `aiPresentOnMap(mapId)` na lista de alvos possíveis, e `hitTarget` ganhou um ramo pra IA (`aiEntities.get(p.id)===p` no lugar do `clients.get(ws)===p` de um jogador real) — combate nos dois sentidos, a IA pode morrer de verdade e não é uma entidade fantasma que só bate e nunca apanha.
+
+## Equipamento simulado — nunca um item real
+
+`buildAiSave`/`buildAiCombat` geram um `save` descartável em memória, com `createGear()` (a mesma função real) numa arma da classe — nunca gravado em `bag`/`eq` de personagem nenhum, sem UID reconhecido por `lockOwnedItems`/Mercado/encantamento. **Detalhe técnico descoberto durante a implementação**: `GEAR_DATA.statsFor` só tem tabela de stats pros níveis de tier reais do jogo (1/4/8/12/16/20/24/28/32/36/40) — um nível arbitrário (ex. 15) retorna `null` e `createGear` silenciosamente não equipa nada. `aiGearTierFor(lvl)` arredonda sempre **pra baixo** pro tier válido mais próximo (nunca pra cima — nunca "empresta" um requisito de nível maior que o real da IA) antes de gerar o item.
+
+## Nível/zona: derivado do próprio manifesto de mobs, nunca uma tabela paralela
+
+`aiZoneLevelRange(zone)` lê o `MOB_MANIFEST[zone]` já existente (a mesma fonte que define os mobs reais de cada zona) pra descobrir a faixa de nível apropriada — uma IA em `floresta` luta como `floresta` pede, sem duplicar a curva de dificuldade em lugar nenhum.
+
+## Distribuição de população: sempre a zona menos povoada, nunca concentrada
+
+`aiPopulationTick` conta quantas IA já existem por zona (`AI_FIELD_ZONES`, as 7 zonas de campo — nunca `vila`, hub social sem mobs) e sempre spawna na zona com **menos** IA no momento — nunca deixa a população inteira se acumular numa zona só. Teto conservador de partida: `AI_MAX_POPULATION=10` (ver limitações — não foi possível medir carga real nesta sessão pra calibrar um teto por benchmark, como pedido).
+
+## Visibilidade: mesmo pipeline de sempre, indicador discreto
+
+Uma IA aparece pra jogadores reais via `player_join`/`state`/`player_leave` — **exatamente** as mesmas mensagens que um jogador real já usava — com um campo `kind:'ai'` a mais (`aiPublicPlayer`, espelha `publicPlayer` campo a campo). Isso significa **zero código novo de desenho no cliente**: o mesmo `drawRemote` que já desenhava outros jogadores desenha a IA automaticamente. A única mudança de cliente foi o rótulo (`index.html`, `drawRemote`): cor diferente + sufixo `[IA]` quando `p.kind==='ai'` — nunca esconde, nunca finge ser humano. `charId` é sempre `null` no payload público — nenhuma IA pode ser confundida com um personagem real em nenhuma tela.
+
+## Isolamento econômico — a REGRA ABSOLUTA, garantida estruturalmente
+
+Uma entidade de IA **nunca** tem `userId`/`charId` reais (sempre `null`) — cada função que credita economia (`creditKillReward`, `creditDungeonReward`, `applyGearDrops`, `creditBestiaryKill`, qualquer rota de Mercado) já rejeita entrada sem `charId`/`userId` válidos por construção própria, **e** o próprio caminho de combate da IA (`aiDoCombat`) nunca chama nenhuma dessas funções — quando a IA mata um mob (de campo ou de masmorra), o mob morre pro mundo (broadcast idêntico a um abate real) mas a recompensa da IA é sempre ZERO, nunca uma checagem condicional que poderia ser esquecida num caminho novo. A lógica de recompensa de masmorra foi **extraída** pra uma função só (`dungeonHandleMobDeath`, reusada pelo handler `mob_damage` de sempre E pelo combate da IA) com um guard explícito `if (member.kind==='ai') continue;` **antes** de qualquer chamada de crédito — testado com um membro de IA com `userId`/`charId` propositalmente parecendo válidos, pra provar que a exclusão é pelo `kind`, não um acidente de campo vazio.
+
+## Observabilidade: sempre marcada, nunca escondida, nunca inflando o humano
+
+`/api/admin/dashboard` ganhou `aiOnline` (separado de `online`, nunca somado) e uma rota nova `GET /api/admin/ai` (lista completa, cada entrada sempre `kind:'ai'`). `/api/public/status` (Fase 5.15) agora reporta `population.ai` real (`aiEntities.size`) em vez do `0` fixo temporário — nunca misturado com `population.human` (fontes totalmente separadas: `clients` vs `aiEntities`), o número de humanos online nunca é falsificado pela presença de IA.
+
+## Limpeza rigorosa — sem vazamento
+
+Nenhuma IA tem seu próprio `setTimeout`/`setInterval` — tudo roda no único tick de 1s compartilhado, então não existe timer nenhum pra vazar por entidade. `aiDespawnEntity` só remove do `Map` e manda `player_leave` — sem referência pendurada em lugar nenhum.
+
+## Gate de testes: `AI_ENABLED` desligado por padrão em toda suite
+
+Durante a verificação, uma IA que nasceu automaticamente (`aiPopulationTick`) dentro do processo filho de `test/monster-movement.test.js` interferiu num teste sensível a tempo (`alvo desconectado e trocado sem paralisar a perseguição`) — um ator não controlado apareceu no mapa compartilhado do teste, quebrando uma suposição implícita sobre quem está presente. Corrigido com `aiEnabled()` (função, não uma const congelada — lê `process.env.AI_ENABLED` a cada chamada) e `test/helpers.js` passando `AI_ENABLED:'0'` pra **todo** servidor de teste por padrão — nenhuma suite depende de atores não controlados aparecendo sozinhos. Criar uma IA manualmente (`aiSpawnEntity` direto, como os testes puros fazem, ou um preenchimento de fila/TvT futuro) nunca depende dessa flag — só o spawn automático em segundo plano é afetado. Confirmado com 3 execuções consecutivas e limpas da suite completa após a correção.
+
+## Testes
+
+`test/ai.test.js` (novo arquivo): **16 testes puros** (sempre rodam, sem Supabase, sem esperar o tick real de 1s — FSM exercitado chamando `aiStep`/`aiDoCombat` diretamente com timestamps forjados): geração de stats/equipamento simulado por classe (nunca `maxHp` zero, nunca `userId`/`charId` reais), tier de equipamento sempre arredondado pra baixo, faixa de nível derivada do manifesto real, perfis de personalidade realmente distintos, spawn/despawn sem deixar rastro no Map, teto de população respeitado, formato `publicPlayer`-compatível com `kind:'ai'`, distribuição pra zona menos povoada, gate `AI_ENABLED` respeitado, ciclo completo idle→hunt→combat→mob morto, fuga por HP baixo, morte/respawn no prazo certo, e as duas REGRAS ABSOLUTAS (nenhuma recompensa creditada a um membro `kind:'ai'` mesmo com campos parecendo válidos; nenhuma função de economia mencionada no código-fonte do FSM de combate) — mais **2 testes de integração real via WebSocket/HTTP** (`{skip:!hasSupabase()}`, mesma convenção do resto da suite, usando um servidor com `AI_ENABLED:'1'` explícito): uma IA aparece pra um jogador humano real via `player_join` dentro de 15s, e `/api/admin/ai`/`aiOnline` no dashboard funcionam de ponta a ponta.
+
+## Verificação
+
+Os 16 testes puros rodam de verdade e passam — cobrem o núcleo inteiro (geração de stats, FSM, distribuição, as duas regras absolutas) sem depender de Supabase. Adicionalmente, o ciclo completo foi verificado manualmente em Node antes de escrever o teste formal (`aiSpawnEntity`→`aiStep` repetido→mob morto, `aiDespawnEntity`→Map vazio), e a suite completa do projeto (518 testes) rodou **3 vezes consecutivas sem nenhuma falha** após corrigir o problema de interferência entre processos. Os 2 testes de integração via WebSocket foram escritos pra provar o fluxo real mas não puderam ser executados aqui pela mesma razão já documentada nas fases anteriores (sem Supabase de teste configurado neste sandbox). **Recomenda-se rodar `npm test` com Supabase de TESTE antes do merge**, junto com os pendentes das fases anteriores.
+
+## Limitações conhecidas
+
+- **Sem colisão de parede pra IA em mapa de campo** — mesma limitação pré-existente de todo mob de campo (documentada desde fases anteriores: "a geometria de paredes de mapa de campo ainda vive só no cliente"); IA pode visualmente atravessar cenário decorativo, nunca um problema de segurança/economia.
+- **"Viajar" entre zonas é uma realocação direta, não uma caminhada real** — zonas de campo não são espacialmente contíguas no servidor (cada uma é um `mapState()` isolado); documentado no próprio código, nunca escondido.
+- **Zona nunca visitada por humano fica sem mobs pra IA caçar** (`state.mobs` só é populado quando o primeiro `map_join` real de um jogador chega, com posições que só o cliente conhece) — IA nessas zonas só vagueia (`wander`) até um jogador real aparecer; decisão deliberada pra não inventar um sistema paralelo de posicionamento de mob sem colisão real. Nunca acontece nas zonas onde já existe atividade humana (o caso comum).
+- **Teto de população (10) não veio de um benchmark de carga real** — o pedido era "benchmark-então-teto"; não havia como gerar carga real de produção nesta sessão. Valor de partida conservador, documentado como tal, pronto pra ser recalibrado com dados reais depois do deploy.
+- **Dano recebido de mob não gera feedback visual pra outros jogadores olhando a IA** (`mob_hit` não é transmitido quando o alvo é IA) — simplificação deliberada: a IA não tem HP visível em `publicPlayer` mesmo (igual jogador remoto real, que também não mostra barra de vida pros outros), então o feedback visual não faria diferença nenhuma hoje.
+- **Fase 5.16 Tier 2 (AI Dungeon Fill / AI TvT Fill) ainda não implementada** — os estados `party`/`queue`/`dungeon`/`tvt` do FSM e o campo `ai.slot` já existem no núcleo, prontos pra serem preenchidos por essa fase seguinte, mas nenhuma integração com o matchmaking (Fase 5.13.2) ou TvT ainda chama `aiSpawnEntity` pra esse fim.
+- **Nenhuma migração de banco** — toda a camada de IA é em memória; nada foi persistido no Supabase (e nunca deveria ser, pela própria regra absoluta).
