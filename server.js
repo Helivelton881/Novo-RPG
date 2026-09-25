@@ -680,6 +680,30 @@ function allowedFieldTransition(p, nextMap) {
     : Math.hypot(p.x - 480, p.y - 1906) <= 190;
   return atPortal;
 }
+
+// Saida de masmorra precisa ser uma transicao autoritativa separada das
+// viagens entre mapas de campo. O cliente so pode voltar para a zona que
+// originou a propria instancia e quando a posicao server-side ainda esta
+// junto do portal de saida. Isso tambem impede que um `state` forjado seja
+// usado como teleporte para fora da instancia.
+function applyDungeonExit(p, state, nextMap, now=Date.now()) {
+  if (!p || !state || !state.isDungeon || p.map !== state.id || nextMap !== state.zone) return false;
+  const member = state.members && state.members.get(p.charId);
+  const exit = state.layout && state.layout.exitPoint;
+  if (!member || member.userId !== p.userId || !Number.isFinite(exit?.x) || !Number.isFinite(exit?.y)) return false;
+  if (Math.hypot(p.x - exit.x, p.y - exit.y) > 190) return false;
+  member.online = false;
+  member.inside = false;
+  member.lastActivityAt = now;
+  state.lastActiveAt = now;
+  p.map = state.zone;
+  p.x = 480;
+  p.y = 1906;
+  p.lastMoveAt = now;
+  p.moving = false;
+  p.atkT = 0;
+  return true;
+}
 function attackRangeFor(p, skill) {
   if (skill === 'spin' || skill === 'dash') return 150;
   if (skill === 'roots' || skill === 'thorns' || skill === 'frost') return 410;
@@ -2841,7 +2865,7 @@ function buildDungeonInstance(zone, members) {
   const scale = DUNGEON_GEN.dungeonScaleFor(members.length);
   const memberMap = new Map(members.map(m => [m.charId, {
     userId: m.userId, cls: m.cls || 'guerreiro', online: true, joinedAt: Date.now(),
-    damageDone: 0, lastActivityAt: Date.now(), kind: m.kind || 'human', // Fase 5.16: marca membro de IA (dungeonHandleMobDeath usa pra nunca creditar)
+    damageDone: 0, lastActivityAt: Date.now(), kind: m.kind || 'human', inside: true, // Fase 5.16: marca membro de IA (dungeonHandleMobDeath usa pra nunca creditar)
   }]));
   Object.assign(state, {
     // ownerCharId/ownerUserId preservados (primeiro membro real) -- usados
@@ -3094,8 +3118,7 @@ async function handleWsJoin(ws, msg) {
         const dState=maps.get(dMapId);
         if(!dState||!dState.isDungeon)continue;
         const dMember=dState.members.get(p.charId);
-        if(dMember&&dMember.userId===p.userId){dMember.online=true;dState.lastActiveAt=Date.now();placePlayerAtDungeonStart(p,dState);sendDungeonStateTo(ws,dState,{reconnect:true})}
-        break;
+        if(dMember&&dMember.userId===p.userId&&dMember.inside!==false){dMember.online=true;dState.lastActiveAt=Date.now();placePlayerAtDungeonStart(p,dState);sendDungeonStateTo(ws,dState,{reconnect:true});break}
       }
     }
     // Fase 5.13.2: reconectar dentro da tolerancia de desconexao da fila
@@ -3194,7 +3217,7 @@ async function handleDungeonEnter(ws, p, msg) {
     if (existing) {
       const member = existing.members.get(p.charId);
       if (member && member.userId === p.userId) {
-        member.online = true; existing.lastActiveAt = Date.now(); placePlayerAtDungeonStart(p, existing);
+        member.online = true; member.inside = true; existing.lastActiveAt = Date.now(); placePlayerAtDungeonStart(p, existing);
         sendDungeonStateTo(ws, existing); return;
       }
     }
@@ -3978,7 +4001,16 @@ wss.on('connection', ws => {
       if(p.dead)return;
       let x = Number(msg.x), y = Number(msg.y);
       if (!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>2880||y>2112) { securityReject(p,'INVALID_MOVEMENT'); send(ws,{type:'position_resync',x:p.x,y:p.y,map:p.map}); return; }
-      if(map!==p.map){if(!allowedFieldTransition(p,map)){securityReject(p,'INVALID_MAP');send(ws,{type:'position_resync',x:p.x,y:p.y,map:p.map});return}p.map=map;p.x=x;p.y=y;p.lastMoveAt=Date.now();broadcast({type:'state',player:publicPlayer(p)},ws);return}
+      if(map!==p.map){
+        const dungeonState=maps.get(p.map);
+        if(applyDungeonExit(p,dungeonState,map)){
+          send(ws,{type:'position_resync',x:p.x,y:p.y,map:p.map});
+          broadcast({type:'state',player:publicPlayer(p)},ws);
+          return;
+        }
+        if(!allowedFieldTransition(p,map)){securityReject(p,'INVALID_MAP');send(ws,{type:'position_resync',x:p.x,y:p.y,map:p.map});return}
+        p.map=map;p.x=x;p.y=y;p.lastMoveAt=Date.now();broadcast({type:'state',player:publicPlayer(p)},ws);return
+      }
       const moveNow=Date.now(),movement=p.authed?validateMovement(p,x,y,moveNow):{ok:true,x,y};x=movement.x;y=movement.y;
       if(!movement.ok){securityReject(p,movement.code);send(ws,{type:'position_resync',x,y,map:p.map})}p.lastMoveAt=moveNow;
       const atkT=Math.max(0,Math.min(.4,Number(msg.atkT)||0)),atkAng=Number(msg.atkAng)||0;
@@ -5008,7 +5040,7 @@ if (require.main === module) {
 module.exports = {
   sanitizeItem, sanitizeSave, lockOwnedItems, createGear, dedupeByUid, typeSlot, CLASS_ITEM_TYPES, EQ_SLOTS, GEAR_DATA,
   // Fase 5.2 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
-  startingSave, ECONOMY_LOCK_FIELDS, createDungeonInstance, dungeonCleanupTick,
+  startingSave, ECONOMY_LOCK_FIELDS, createDungeonInstance, dungeonCleanupTick, applyDungeonExit,
   // Fase 5.13.1 -- masmorra em party (nucleo puro, sem HTTP/WS/Supabase):
   buildDungeonInstance, dungeonMemberEligible, DUNGEON_ELIGIBLE_IDLE_MS,
   // Fase 5.13.2 -- matchmaking de masmorra (nucleo puro + runtime em memoria):
