@@ -150,12 +150,12 @@ test('session_replaced: segunda conexao com o mesmo token+charId expulsa a prime
   const connA = await wsConnect(srv);
   let closeCode = null, closeReason = null;
   connA.ws.on('close', (code, reason) => { closeCode = code; closeReason = String(reason); });
-  connA.ws.send(JSON.stringify({ type: 'join', name: 'AparelhoA', cls: 'guerreiro', lvl: 1, token: acc.token, charId: acc.id }));
+  connA.ws.send(JSON.stringify({ type: 'join', name: 'AparelhoA', cls: 'guerreiro', lvl: 1, token: acc.token, charId: acc.id, clientInstanceId:'device_A_12345678' }));
   await waitFor(connA.msgs, m => m.type === 'welcome', 3000);
 
   // B entra com o MESMO token+charId -- A ainda esta aberto, nao foi fechado.
   const connB = await wsConnect(srv);
-  connB.ws.send(JSON.stringify({ type: 'join', name: 'AparelhoB', cls: 'guerreiro', lvl: 1, token: acc.token, charId: acc.id }));
+  connB.ws.send(JSON.stringify({ type: 'join', name: 'AparelhoB', cls: 'guerreiro', lvl: 1, token: acc.token, charId: acc.id, clientInstanceId:'device_B_12345678' }));
   await waitFor(connB.msgs, m => m.type === 'welcome', 3000);
 
   // A deveria ter recebido session_replaced e sido fechado com 4001.
@@ -169,5 +169,22 @@ test('session_replaced: segunda conexao com o mesmo token+charId expulsa a prime
   const state = await waitFor(connB.msgs, m => m.type === 'event_state', 3000);
   assert.ok(state, 'B deveria continuar respondendo normalmente depois de A ser expulso');
 
+  connB.close();
+});
+
+test('same client instance: reconexão fecha A silenciosamente com 4000 e mantém B ativa', { skip: !hasSupabase() }, async () => {
+  const acc=await newCharAccount('druida',10),clientInstanceId='same_page_12345678';
+  const connA=await wsConnect(srv);let closeCode=null;
+  connA.ws.on('close',code=>{closeCode=code});
+  connA.ws.send(JSON.stringify({type:'join',name:'A',cls:'guerreiro',lvl:1,token:acc.token,charId:acc.id,clientInstanceId}));
+  await waitFor(connA.msgs,m=>m.type==='welcome',3000);
+  const connB=await wsConnect(srv);
+  connB.ws.send(JSON.stringify({type:'join',name:'B',cls:'guerreiro',lvl:1,token:acc.token,charId:acc.id,clientInstanceId}));
+  await waitFor(connB.msgs,m=>m.type==='welcome',3000);
+  await new Promise(resolve=>{const check=()=>closeCode!==null?resolve():setTimeout(check,25);check()});
+  assert.equal(closeCode,4000);
+  assert.equal(connA.msgs.some(m=>m.type==='session_replaced'),false);
+  connB.ws.send(JSON.stringify({type:'event_status'}));
+  assert.ok(await waitFor(connB.msgs,m=>m.type==='event_state',3000));
   connB.close();
 });

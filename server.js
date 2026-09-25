@@ -2979,6 +2979,10 @@ async function resolveCharacterForWs(userId, charId) {
 // conexao (antes da primeira terminar) disparem autenticacao concorrente
 // e criem dois `p` diferentes pro mesmo socket.
 const joining = new Set();
+// Identificador efemero de uma pagina, nunca autenticacao. Formato curto e
+// restrito impede payload arbitrario em memoria/logs.
+function validClientInstanceId(value){return typeof value==='string'&&/^[A-Za-z0-9_-]{16,80}$/.test(value);}
+function sessionReplacementMode(oldP,newClientInstanceId){return validClientInstanceId(newClientInstanceId)&&oldP?.clientInstanceId===newClientInstanceId?'same_instance':'different_instance';}
 // Autentica o 'join': com token de sessao valido, userId vem do banco
 // (nunca do que o cliente manda); com token+charId validos E o charId
 // pertencendo de fato aquele userId, cls/lvl tambem vem do banco --
@@ -3019,11 +3023,12 @@ async function handleWsJoin(ws, msg) {
     }
     if (clients.get(ws)) return; // ja tratado por outra mensagem enquanto este join aguardava o Supabase
     const claimedCls=ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',claimedLvl=Math.max(1,Math.min(99,Number(msg.lvl)||1));
+    const clientInstanceId=validClientInstanceId(msg.clientInstanceId)?msg.clientInstanceId:null;
     const realSave = charRow ? sanitizeSave(charRow.save,charRow.lvl) : startingSave(claimedCls,cleanText(msg.name,14)||'Herói');
     const combat = WORLD_BOSS.combatSnapshot({userId,charId:charRow?.id||null,name:charRow?.name||msg.name,cls:charRow?.cls||claimedCls,lvl:charRow?.lvl||claimedLvl,save:realSave});
     const remembered = charRow && characterRuntime.get(charRow.id);
     const p = {
-      id: crypto.randomUUID(), userId, charId: charRow ? charRow.id : null,
+      id: crypto.randomUUID(), userId, charId: charRow ? charRow.id : null, clientInstanceId,
       name: charRow ? (cleanText(charRow.name,14)||'Herói') : (cleanText(msg.name, 14) || 'Herói'),
       cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : claimedCls,
       lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : claimedLvl,
@@ -3034,7 +3039,19 @@ async function handleWsJoin(ws, msg) {
       lastMoveAt:Date.now(), gameplayAuthority:true, packetWindows:new Map(), sessionKey:crypto.randomUUID(),
       quest:realSave?.quest||0, gunlock:realSave?.gunlock||{},
     };
-    if(p.charId){const old=activeCharacterSockets.get(p.charId);if(old&&old!==ws){const oldP=clients.get(old);if(oldP){oldP.gameplayAuthority=false;p.map=oldP.map;p.x=oldP.x;p.y=oldP.y;p.hp=oldP.hp;p.dead=oldP.dead;p.respawnAt=oldP.respawnAt;p.skillCd={...(oldP.skillCd||{})};p.basicCdUntil=oldP.basicCdUntil||0;p.lastDamageAt=oldP.lastDamageAt||0}send(old,{type:'session_replaced'});old.close(4001,'Sessão substituída')}activeCharacterSockets.set(p.charId,ws)}
+    if(p.charId){
+      const old=activeCharacterSockets.get(p.charId),oldP=old&&old!==ws?clients.get(old):null;
+      if(old&&old!==ws){
+        if(oldP){oldP.gameplayAuthority=false;p.map=oldP.map;p.x=oldP.x;p.y=oldP.y;p.hp=oldP.hp;p.dead=oldP.dead;p.respawnAt=oldP.respawnAt;p.skillCd={...(oldP.skillCd||{})};p.basicCdUntil=oldP.basicCdUntil||0;p.lastDamageAt=oldP.lastDamageAt||0}
+        const sameClientInstance=sessionReplacementMode(oldP,clientInstanceId)==='same_instance';
+        // Transfere autoridade ANTES de fechar o antigo: mesmo se o evento
+        // close disparar imediatamente, ele nao marca a sessao nova offline.
+        activeCharacterSockets.set(p.charId,ws);
+        console.log('session_replace',JSON.stringify({charId:p.charId,oldConnectionId:oldP?.id||null,newConnectionId:p.id,sameClientInstance}));
+        if(sameClientInstance)old.close(4000,'Reconexão da mesma instância');
+        else{send(old,{type:'session_replaced'});old.close(4001,'Sessão substituída')}
+      }else activeCharacterSockets.set(p.charId,ws);
+    }
     clients.set(ws, p);
     // Fase 5.8: guilda e persistente (Supabase), nao efemera como Party --
     // carrega a filiacao real do banco no join/reconnect pra rotear
@@ -4117,23 +4134,23 @@ wss.on('connection', ws => {
       for (const [ws2,p2] of clients) if (p2.guildId===p.guildId && ws2.readyState===WebSocket.OPEN) ws2.send(payload);
     }
   });
-  ws.on('close', () => { const p=clients.get(ws);if(p){if(p.charId&&activeCharacterSockets.get(p.charId)===ws){activeCharacterSockets.delete(p.charId);characterRuntime.set(p.charId,{map:p.map,x:p.x,y:p.y,hp:p.hp,dead:p.dead,respawnAt:p.respawnAt,skillCd:p.skillCd||{},basicCdUntil:p.basicCdUntil||0,lastDamageAt:p.lastDamageAt||0,savedAt:Date.now()})}const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member)member.online=false;
+  ws.on('close', () => { const p=clients.get(ws);if(p){const wasAuthoritative=!p.charId||activeCharacterSockets.get(p.charId)===ws;if(p.charId&&wasAuthoritative){activeCharacterSockets.delete(p.charId);characterRuntime.set(p.charId,{map:p.map,x:p.x,y:p.y,hp:p.hp,dead:p.dead,respawnAt:p.respawnAt,skillCd:p.skillCd||{},basicCdUntil:p.basicCdUntil||0,lastDamageAt:p.lastDamageAt||0,savedAt:Date.now()})}const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member&&wasAuthoritative)member.online=false;
     // Fase 5.7: desconectar NAO termina a partida nem pontua morte -- so
     // marca offline (mesma regra do World Boss). O personagem continua
     // pertencendo a instancia; reconectar com o mesmo userId/charId acha
     // ela de novo em handleWsJoin.
-    const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);if(tvtMember)tvtMember.online=false;
+    const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);if(tvtMember&&wasAuthoritative)tvtMember.online=false;
     // Fase 5.13.1: desconectar nao termina a masmorra nem afeta quem mais
     // esta dentro -- so marca esse membro offline (mesma regra de
     // World Boss/TvT). Reconectar acha a mesma instancia de novo (ver
     // bloco de reconexao em handleWsJoin).
-    if(p.charId){const dOwned=dungeonByOwner.get(p.charId);if(dOwned)for(const dMapId of dOwned.values()){const dState=maps.get(dMapId);const dMember=dState&&dState.members.get(p.charId);if(dMember){dMember.online=false;break}}}
+    if(p.charId&&wasAuthoritative){const dOwned=dungeonByOwner.get(p.charId);if(dOwned)for(const dMapId of dOwned.values()){const dState=maps.get(dMapId);const dMember=dState&&dState.members.get(p.charId);if(dMember){dMember.online=false;break}}}
     // Fase 5.13.2: cair da fila de matchmaking nao remove na hora --
     // marca disconnectedAt e da uma tolerancia (DUNGEON_QUEUE_DISCONNECT_
     // GRACE_MS) pra reconectar sem perder a posicao; dungeonQueueTick
     // remove de vez so depois do prazo, e nunca forma grupo com quem
     // esta desconectado nesse meio-tempo.
-    if(p.userId){const qz=userQueueZone.get(p.userId);const qe=qz&&dungeonQueue.get(qz)?.get(p.userId);if(qe)qe.disconnectedAt=Date.now()}
+    if(p.userId&&wasAuthoritative){const qz=userQueueZone.get(p.userId);const qe=qz&&dungeonQueue.get(qz)?.get(p.userId);if(qe)qe.disconnectedAt=Date.now()}
     clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
 });
 
@@ -4954,6 +4971,8 @@ module.exports = {
   resolveAttackDamage, applyGlobalPlayerDamage, mitigatePlayerDamage, consumeRuntimePotion,
   validateMovement, allowedFieldTransition, allowPacket, attackRangeFor,
   isAuthoritativeSocket, activeCharacterSockets,
+  validClientInstanceId,
+  sessionReplacementMode,
   // Fase 5.5 -- agenda/lifecycle puro e manager runtime (sem Supabase):
   EVENT_DATA, eventManager, eventStatePayload,
   // Fase 5.6 -- World Boss (nucleo puro + runtime em memoria):
