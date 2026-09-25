@@ -1485,3 +1485,51 @@ Os 11 testes puros rodam de verdade e passam. Os 9 testes de integração foram 
 - **Bootstrap do primeiro owner é manual** (SQL direto), ver acima — decisão deliberada pra nunca existir uma rota de auto-promoção.
 - **9 testes de integração não executados nesta sessão** — ver "Verificação" acima.
 - **Nenhuma métrica de observabilidade além do dashboard básico** (online agora, bans/mutes ativos, atividade recente) — latência/erro-rate/uptime não fazem parte desta fase; o pedido de "métricas leves de observabilidade" foi interpretado como o dashboard administrativo em si, não um sistema de monitoramento de infraestrutura separado.
+
+# FASE 5.15 — PORTAL PÚBLICO
+
+**Escopo**: site público (`/portal`, `portal.html`) sem quebrar a URL do jogo (`/`) nem a do admin (`/admin`) — profissional, com status do servidor, rankings, guildas, eventos e um sistema simples de notícias gerenciável pelo painel admin (Fase 5.14).
+
+## Reuso em vez de reconstrução: rankings e guildas já eram públicos
+
+Antes de escrever qualquer rota nova, `/api/rankings` (Fase 5.10) foi revisado — já é **100% público** (nenhuma autenticação exigida) e já retorna só campos de exibição seguros (nome/classe/nível/tag de guilda/estatísticas, nunca `userId`/`characterId` real/token/save). `type=guild` já devolve exatamente `name`/`tag`/`memberCount`/`totalLevel`/`tvtWins`/`worldBossKills` — a informação pública de guilda pedida. O portal **reusa esse endpoint sem nenhuma mudança nele**, tanto para os rankings de jogador quanto para a lista de guildas — nenhuma rota nova foi criada para isso, e o cache de 45s que ele já tinha (`RANKINGS.createRankCache`, Fase 5.10) já atende à janela de 30-60s pedida.
+
+## API nova: só o que realmente faltava
+
+`handlePublic` (`server.js`, montado em `/api/public/*`, sem autenticação nenhuma):
+- `GET /api/public/status` — população (`{human, ai}` — `ai` sempre `0` porque a Fase 5.16/Aventureiros IA ainda não existe; o formato já fica pronto pra quando existir, sem precisar mudar o contrato depois), se o World Boss está ativo agora, horário do próximo World Boss/próximo Team vs Team (reusa `EVENT_DATA.scheduleAfter`, Fase 5.5, sem nenhuma mudança nele), contagem de guildas.
+- `GET /api/public/events` — próximos 8 eventos agendados (mesma fonte de sempre).
+- `GET /api/public/news` — notícias publicadas, mais recentes primeiro (`title`/`body`/`published_at` — nunca `author_user_id`, que fica só na tabela e nas rotas administrativas).
+
+Todas as três usam a **mesma fábrica de cache TTL** já criada na Fase 5.10 (`RANKINGS.createRankCache()`, uma instância nova `publicCache`) — 45s por padrão, dentro da janela de 30-60s pedida — mais o header HTTP `Cache-Control: public, max-age=30` (status/eventos) ou `max-age=60` (notícias) pra CDNs/navegadores também poderem cachear.
+
+## Privacidade: nunca os campos proibidos
+
+Nenhuma rota de `/api/public/*` toca em `resolveUser`/token/sessão — são as únicas rotas do projeto que respondem sem checar credencial nenhuma, de propósito. `user_id`, `email`, `save` (inventário/ouro/gemas reais), token, sessão, cargo de admin e qualquer ação de moderação nunca aparecem em nenhuma resposta — testado explicitamente (`test/portal-public.test.js`, varre a resposta inteira procurando essas substrings). `/api/public/news` nunca inclui `author_user_id` (só é lido internamente pra auditoria).
+
+## Notícias: gerenciável pelo admin, publicado na hora
+
+`portal_news` (migração aditiva, RLS sem policy — mesmo padrão das 17 tabelas já existentes) + duas rotas novas em `handleAdmin` (`POST /api/admin/news`, `POST /api/admin/news/delete`), gated pela permissão nova `manage_news` (só `owner`/`admin` — nunca `moderator`/`support`). Publicar ou excluir uma notícia limpa o `publicCache` inteiro (`publicCache.clear()`) — a notícia aparece na API pública **imediatamente**, sem esperar o TTL de 60s expirar sozinho. `admin.html` ganhou uma aba "Notícias" (formulário simples título+texto, lista com botão excluir) reusando a mesma leitura pública (`/api/public/news`) pra não duplicar lógica de listagem.
+
+## Cliente: `portal.html` (separado do jogo e do admin)
+
+Página pública em `/portal` — hero com call-to-action "Jogar agora" (linka pra `/`, nunca quebra a URL do jogo), cards de status, abas de ranking (reusando `/api/rankings` direto do navegador), tabela de próximos eventos, lista de notícias. SEO básico: `<title>` descritivo, `<meta name="description">`, tags Open Graph mínimas. Responsivo (grid flexível `auto-fit`, tipografia com `clamp()`, um breakpoint simples de mobile) — sem framework, mesmo espírito leve de `admin.html`.
+
+## Testes
+
+`test/portal-public.test.js` (novo arquivo — nome distinto de `test/portal.test.js`, que já existia e testa a tela de viagem "portal" dentro do jogo, um conceito diferente): **1 teste puro** (sempre roda, sem Supabase — contrato do cache TTL: hit dentro da janela nunca reexecuta a função de origem) + **7 testes de integração real via HTTP** (`{skip:!hasSupabase()}`, mesma convenção do resto da suite): status/eventos/notícias respondem sem autenticação nenhuma, o formato de população humano/IA está presente (IA sempre 0), nenhum campo proibido vaza em nenhuma resposta pública, notícia publicada pelo admin aparece na API pública na hora (cache limpo no publish), e `moderator` (sem `manage_news`) não consegue publicar.
+
+## Verificação
+
+O teste puro roda de verdade e passa. Os 7 de integração foram escritos pra exercitar o fluxo HTTP completo mas não puderam ser executados aqui — mesma razão já documentada nas Fases 5.13.1/5.13.2/5.14 (sem Supabase de teste configurado neste sandbox, e o único projeto Supabase disponível é o de produção real, onde não se deve rodar testes que criam contas descartáveis). A correção foi verificada por revisão estática (toda rota pública revisada campo a campo contra a lista de proibidos, cache invalidado explicitamente no publish/delete de notícia) e por reuso direto de rotas já testadas e comprovadamente públicas (`/api/rankings`, Fase 5.10). **Recomenda-se rodar `npm test` com Supabase de TESTE de verdade antes do merge**, junto com os pendentes das fases anteriores.
+
+## Efeito colateral: corrigido um problema pré-existente na suite de testes
+
+Durante a verificação desta fase, percebi que `test/blacksmith.test.js` e `test/monster-movement.test.js` usavam a **mesma porta** (8113) — uma colisão pré-existente (não introduzida nesta sessão) que podia causar `EADDRINUSE` intermitente quando os dois rodam em paralelo (comportamento padrão do `node:test`). Corrigido movendo `monster-movement.test.js` pra uma porta livre (8115). Contagem final da suite completa, confirmada por soma independente de cada arquivo: **498 testes / 323 passando / 0 falhando / 175 pulados**.
+
+## Limitações conhecidas
+
+- **`ai` sempre 0 em `/api/public/status`** — de propósito, ver acima; passa a refletir a realidade automaticamente quando a Fase 5.16 existir, sem precisar mudar o contrato da API.
+- **Notícias sem edição** (só publicar/excluir) — pedido era um sistema "simples", editar um título/texto publicado não foi considerado essencial; excluir e republicar já cobre o caso de correção.
+- **7 testes de integração não executados nesta sessão** — ver "Verificação" acima.
+- **Nenhuma migração de banco além de `portal_news`** — aditiva, mesmo padrão das fases anteriores.
