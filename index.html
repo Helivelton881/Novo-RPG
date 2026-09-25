@@ -6188,32 +6188,113 @@ function scatterProps(room,theme,pr,count){
 }
 function placeColumn(x,y){addStatic(dunSprite(0,1,.5),x,y,'dunwall');addBlock(x-14,y-14,28,20)}
 function placeTorch(x,y){addStatic(dunSprite(0,7,.42),x,y,'dunprop')}
+// Fase 5.16.3 -- redesenho visual: em vez de inventar arte nova, reusa os
+// MESMOS geradores procedurais (SP.*) que os 7 mapas de CAMPO ja usam pra
+// cripta/serra/pantano/torre/ilhas/vulcao/floresta -- a masmorra passa a
+// "rimar" visualmente com sua zona de origem (paredes de pedra, colunas,
+// tochas, ossos, cogumelos, entulho, grades, altares, pedestais/estatuas,
+// barris) em vez do cenario generico/vazio de antes. SP.* de uma zona so
+// existe depois que a zona de CAMPO correspondente foi construida
+// (ensureFieldSprites cuida disso, chamado por buildMasmorra ANTES desta
+// funcao); os campos aqui sao FUNCOES (lazy) porque em alguns temas dependem
+// de arrays que so a propria build da zona preenche.
+const DUNGEON_THEME_KIT={
+  floresta:{pillar:null,                         torch:()=>SP.fire,      rubble:()=>pick(SP.rocks),        bones:()=>SP.log,   landmark:()=>SP.totem,  fence:()=>SP.pal,   clutter:()=>SP.mush,                       crate:()=>SP.barrel},
+  cripta:  {pillar:()=>SP.pillar,                 torch:()=>SP.brazier,   rubble:()=>SP.ruin,               bones:()=>(Math.random()<.5?SP.bones:SP.skulls), landmark:()=>SP.altar, fence:()=>SP.iron, clutter:()=>pick(SP.tombs), crate:()=>SP.sarc},
+  serra:   {pillar:null,                          torch:()=>SP.fire,      rubble:()=>pick(SP.srocks),       bones:()=>SP.bones, landmark:()=>SP.den,    fence:null,          clutter:()=>SP.crystal,                    crate:()=>SP.flog},
+  pantano: {pillar:null,                          torch:()=>SP.lpost,     rubble:()=>pick(SP.mrocks),       bones:()=>SP.bones, landmark:()=>SP.cauldron, fence:()=>SP.reeds, clutter:()=>(Math.random()<.5?SP.mush:pick(SP.mush2)), crate:()=>SP.stump},
+  torre:   {pillar:()=>SP.mpillar,                torch:()=>SP.candel,    rubble:()=>pick(SP.twalls),       bones:()=>SP.bones, landmark:()=>SP.obelisk, fence:null,          clutter:()=>SP.bookshelf,                  crate:()=>SP.throne},
+  ilhas:   {pillar:()=>SP.sPillar,                torch:()=>SP.scrystal,  rubble:()=>pick(SP.frocks),       bones:()=>SP.bones, landmark:()=>SP.saltar, fence:null,          clutter:()=>SP.fbed,                       crate:()=>SP.wtotem},
+  vulcao:  {pillar:()=>SP.obelisk2,               torch:()=>SP.geyserRock,rubble:()=>pick(SP.lrocks),       bones:()=>SP.crackedRock, landmark:()=>SP.ashTotem, fence:null,     clutter:()=>SP.craterRing,                 crate:()=>SP.throneV},
+};
+function pick(arr){return arr&&arr.length?arr[Math.floor(Math.random()*arr.length)]:null}
+// Garante que as zonas de CAMPO usadas como fonte de sprite ja foram
+// construidas (SP.* populado) antes da masmorra tentar desenha-las --
+// idempotente (ensureWorld/buildXxx nao refazem nada se a zona ja existe)
+// e nunca deixa o jogador atual (W_) trocado (ensureWorld restaura).
+function ensureFieldSprites(theme){
+  if(!SP.bones)SP.bones=makeBones();if(!SP.skulls)SP.skulls=makeSkulls();
+  if(theme==='floresta')return; // base set ja vem de buildSprites() no boot, sempre disponivel
+  ensureWorld(theme);
+}
+// Coloca um prop do kit do tema com sombra e bloqueio pequeno (nunca no
+// vao de porta) -- se o kit nao tiver aquele papel pro tema (ex.: serra
+// nao tem "fence"), simplesmente nao desenha nada (nunca quebra).
+function kitProp(kit,role,x,y,block){
+  const fn=kit&&kit[role];if(!fn)return false;
+  let spr;try{spr=fn()}catch(e){spr=null}
+  if(!spr)return false;
+  addStatic(spr,x,y,'dunkit');if(block)addBlock(x-block[0]/2,y-block[1],block[0],block[1]);
+  return true;
+}
 function decorateMasmorra(w,rooms,theme,pr){
-  if(!DUN_IMG)return;
+  ensureFieldSprites(theme);
+  const kit=DUNGEON_THEME_KIT[theme]||DUNGEON_THEME_KIT.cripta;
   const c=id=>DUNGEON_GEN.roomCenter(rooms[id]);
-  // Sala 1 - Recepcao: 1-2 colunas perto das bordas (nunca no vao central)
-  {const r=rooms.sala1,ct=c('sala1');placeColumn(r.x*T+40,ct.y);if(pr()<.7)placeColumn((r.x+r.w)*T-40,ct.y);scatterProps(r,theme,pr,2)}
-  // Sala 2 - Combate inicial: ate 2 obstaculos pequenos, fora do eixo principal
-  {const r=rooms.sala2;scatterProps(r,theme,pr,2)}
-  // Sala 3 - Camara lateral: objeto decorativo central (banner), visual fechado
-  {const r=rooms.sala3,ct=c('sala3');addStatic(dunSprite(6,7,.4),ct.x,ct.y,'dunprop');scatterProps(r,theme,pr,2)}
-  // Sala 4 - Central: 4 colunas nos CANTOS INTERNOS (nao no centro exato)
-  {const r=rooms.sala4,pad=48;
-    placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
-    placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad);
-    scatterProps(r,theme,pr,3)}
-  // Sala 5 - Elite/Guarda: layout simetrico, visual de pre-boss (tochas nas laterais)
-  {const r=rooms.sala5,ct=c('sala5');placeTorch(r.x*T+30,ct.y);placeTorch((r.x+r.w)*T-30,ct.y)}
-  // Checkpoint: sem inimigos, runa/simbolo central (cristal), iluminacao propria
-  {const ct=c('checkpoint');addStatic(dunSprite(5,4,.4),ct.x,ct.y,'dunprop')}
-  // Corredor final: 2 tochas grandes na entrada da arena
-  {const r=rooms.corrfinal;placeTorch(r.x*T+10,(r.y+r.h/2)*T);placeTorch((r.x+r.w)*T-10,(r.y+r.h/2)*T)}
-  // Arena do chefe: 4 pilares proximos as extremidades, arena limpa no meio
-  {const r=rooms.boss,pad=56;
-    placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
-    placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
-  // Tochas na entrada (2, como pedido)
-  {const r=rooms.entrada;placeTorch(r.x*T+24,(r.y+r.h/2)*T);placeTorch((r.x+r.w)*T-24,(r.y+r.h/2)*T)}
+  // Espalha uma combinacao de entulho/ossos/cogumelos perto das bordas de
+  // uma sala (nunca no eixo central de passagem) -- densidade cresce por
+  // sala conforme o jogador se aproxima do chefe, pra dar sensacao de
+  // avanco (mais perigo/ruina visual quanto mais fundo).
+  function debris(room,count,{allowBones=true,allowClutter=true}={}){
+    for(let n=0;n<count;n++){
+      const pt=DUNGEON_GEN.roomRandomPoint(room,pr,2.4);
+      const roll=pr();
+      const role=roll<.4?'rubble':(allowBones&&roll<.7)?'bones':(allowClutter?'clutter':'rubble');
+      kitProp(kit,role,pt.x,pt.y,[26,16]);
+    }
+  }
+  if(DUN_IMG){
+    // Camada base (opcional, tileset externo): colunas/tochas do sistema
+    // ja existente -- mantida como esta, so complementada pela camada SP.*.
+    {const r=rooms.sala1,ct=c('sala1');placeColumn(r.x*T+40,ct.y);if(pr()<.7)placeColumn((r.x+r.w)*T-40,ct.y)}
+    {const r=rooms.sala4,pad=48;
+      placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
+      placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
+    {const r=rooms.boss,pad=56;
+      placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
+      placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
+  }
+  // 1. Entrada -- area segura, poucas tochas acolhedoras, sem entulho.
+  {const r=rooms.entrada;
+    kitProp(kit,'torch',r.x*T+24,(r.y+r.h/2)*T);kitProp(kit,'torch',(r.x+r.w)*T-24,(r.y+r.h/2)*T);
+    kitProp(kit,'crate',r.x*T+r.w*T*.28,(r.y+r.h*.78)*T,[24,16]);
+  }
+  // 2. Corredor inicial (sala1+corr1) -- primeiros mobs, primeiro sinal de
+  // ruina: entulho leve nas bordas, uma tocha de transicao.
+  {const r=rooms.sala1;debris(r,3,{allowClutter:true});kitProp(kit,'fence',r.x*T+18,(r.y+r.h*.2)*T,[28,20])}
+  {const r=rooms.corr1;kitProp(kit,'torch',(r.x+r.w/2)*T,r.y*T+14)}
+  // 3. Encruzilhada (sala2, a mais movimentada) -- sensacao de exploracao:
+  // pilar central se o tema tiver, entulho/ossos espalhados pelos 4 cantos.
+  {const r=rooms.sala2,ct=c('sala2');
+    kitProp(kit,'pillar',ct.x,r.y*T+40,[28,20]);
+    debris(r,4);
+    kitProp(kit,'landmark',r.x*T+34,(r.y+r.h)*T-34,[30,22]);
+  }
+  {const r=rooms.corr2v;kitProp(kit,'bones',(r.x+r.w/2)*T,(r.y+r.h/2)*T,[20,12])}
+  // 4. Ala esquerda (sala3) -- mobs comuns, decoracao de ruina: entulho
+  // denso, marco tematico central (banner/altar do kit).
+  {const r=rooms.sala3,ct=c('sala3');kitProp(kit,'landmark',ct.x,ct.y,[30,22]);debris(r,3)}
+  // 5. Ala direita (sala4, a mais densa) -- mobs mais fortes: entulho +
+  // ossos abundantes junto as 4 colunas ja existentes, grade proxima a
+  // uma das entradas (reforca "ruina avancada").
+  {const r=rooms.sala4;debris(r,5);kitProp(kit,'fence',(r.x+r.w)*T-16,r.y*T+r.h*T*.3,[26,20])}
+  // 6. Sala de elite (sala5) -- passagem guardada: tochas simetricas
+  // (ja existia) + estatuas/pedestais flanqueando a passagem central,
+  // reforcando a leitura de "guarda de elite" sem mudar combate/loot.
+  {const r=rooms.sala5,ct=c('sala5');
+    kitProp(kit,'torch',r.x*T+30,ct.y);kitProp(kit,'torch',(r.x+r.w)*T-30,ct.y);
+    kitProp(kit,'crate',r.x*T+r.w*T*.5-60,r.y*T+30,[26,20]);kitProp(kit,'crate',r.x*T+r.w*T*.5+60,r.y*T+30,[26,20]);
+    kitProp(kit,'pillar',ct.x,(r.y+r.h)*T-34,[28,20]);
+  }
+  // Checkpoint -- sem inimigos, ponto de descanso: iluminacao propria +
+  // marco central (ja existia via runa/cristal do tileset).
+  {const ct=c('checkpoint');if(DUN_IMG)addStatic(dunSprite(5,4,.4),ct.x,ct.y,'dunprop');kitProp(kit,'torch',ct.x-70,ct.y+10);kitProp(kit,'torch',ct.x+70,ct.y+10)}
+  // 7. Corredor final -- visual mais sombrio: tochas grandes (ja existia)
+  // + entulho dobrado, ossos concentrados (aproximacao do chefe).
+  {const r=rooms.corrfinal;kitProp(kit,'bones',(r.x+r.w/2)*T,r.y*T+r.h*T*.3,[22,14]);kitProp(kit,'bones',(r.x+r.w/2)*T,r.y*T+r.h*T*.7,[22,14])}
+  // 8. Sala do boss -- arena grande, espaco livre no meio pra party: so
+  // marcos nos 4 cantos (colunas ja existiam) + 1 landmark atras do chefe.
+  {const r=rooms.boss;kitProp(kit,'landmark',(r.x+r.w/2)*T,r.y*T+30,[34,24])}
   statics.sort((a,b)=>a.sy-b.sy);
 }
 // Fase 5.13 -- DUNGEON MAP V2: layout FIXO (game-data/dungeon-generation.js
