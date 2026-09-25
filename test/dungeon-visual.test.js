@@ -17,6 +17,25 @@ const path = require('node:path');
 const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
 const ZONES = ['floresta', 'cripta', 'serra', 'pantano', 'torre', 'ilhas', 'vulcao'];
 
+// Fase 5.16.3 (bug real de producao, achado pelo usuario): extrai a funcao
+// REAL locationDisplayName de index.html e executa de verdade (nao so
+// inspeciona o texto) -- prova comportamento, nao so presenca de codigo.
+// So MASMORRA_CFG (so os campos .name, os outros campos referenciam
+// funcoes de gameplay que nao existem fora do navegador) e T sao
+// necessarios como dependencias.
+function extractFn(name) {
+  const start = html.indexOf('function ' + name + '(');
+  let depth = 0, i = html.indexOf('{', start), end = i;
+  for (; i < html.length; i++) { if (html[i] === '{') depth++; else if (html[i] === '}') { depth--; if (depth === 0) { end = i + 1; break; } } }
+  return html.slice(start, end);
+}
+const MASMORRA_CFG_STUB = {
+  floresta: { name: 'Covil dos Goblins' }, cripta: { name: 'Catacumba Profunda' },
+  serra: { name: 'Toca da Matilha' }, pantano: { name: 'Poço Venenoso' },
+  torre: { name: 'Câmara Arcana' }, ilhas: { name: 'Refúgio Celeste' }, vulcao: { name: 'Forja Ancestral' },
+};
+const locationDisplayName = new Function('MASMORRA_CFG', 'T', 'return ' + extractFn('locationDisplayName'))(MASMORRA_CFG_STUB, 48);
+
 test('DUNGEON_THEME_KIT cobre exatamente as 7 zonas de masmorra (mesmas de MASMORRA_CFG, nenhuma faltando)', () => {
   const start = html.indexOf('const DUNGEON_THEME_KIT');
   const end = html.indexOf('\n};', start);
@@ -82,6 +101,49 @@ test('paintGround(theme,dungeonWalls): k===4 vira blocos de pedra com argamassa 
   const block = html.slice(kIdx, kIdx + 400);
   assert.match(block, /if\(dungeonWalls\)/, 'k===4 deveria ramificar em dungeonWalls -- textura de parede grossa so na masmorra, textura de rocha original em todo o resto (ex.: beira de lago em paintWater)');
   assert.match(html, /paintGround\(cfg\.theme,true\)/, 'buildMasmorra deveria ser o unico lugar passando dungeonWalls=true pro paintGround');
+});
+
+// Fase 5.16.3 -- bug real de producao: HUD rotulava QUALQUER masmorra
+// como "Vila Inicial"/"Planicie dos Slimes" (o antigo calculo de nome de
+// localizacao nunca reconhecia sufixo '_d', tvt# ou wb#, caindo sempre no
+// fallback de vila). locationDisplayName agora e a UNICA fonte da verdade,
+// e so w.name==='vila' decide entre os dois rotulos de vila.
+test('locationDisplayName: vila com coordenada interna -> "Vila Inicial"', () => {
+  assert.equal(locationDisplayName({ name: 'vila' }, 10 * 48), 'Vila Inicial');
+});
+test('locationDisplayName: vila com coordenada da planicie -> "Planície dos Slimes"', () => {
+  assert.equal(locationDisplayName({ name: 'vila' }, 40 * 48), 'Planície dos Slimes');
+});
+test('locationDisplayName: floresta (campo) -> "Floresta dos Goblins"', () => {
+  assert.equal(locationDisplayName({ name: 'floresta' }, 0), 'Floresta dos Goblins');
+});
+test('locationDisplayName: NENHUMA masmorra pode retornar "Vila Inicial" ou "Planície dos Slimes" (as 7 zonas)', () => {
+  const expected = {
+    floresta_d: 'Masmorra — Covil dos Goblins', cripta_d: 'Masmorra — Catacumba Profunda',
+    serra_d: 'Masmorra — Toca da Matilha', pantano_d: 'Masmorra — Poço Venenoso',
+    torre_d: 'Masmorra — Câmara Arcana', ilhas_d: 'Masmorra — Refúgio Celeste', vulcao_d: 'Masmorra — Forja Ancestral',
+  };
+  for (const [name, label] of Object.entries(expected)) {
+    // px propositalmente na faixa da "Planicie dos Slimes" da vila (x alto)
+    // -- prova que a coordenada X NUNCA influencia o rotulo de masmorra.
+    const got = locationDisplayName({ name }, 40 * 48);
+    assert.equal(got, label, `${name} deveria ser '${label}', veio '${got}'`);
+    assert.notEqual(got, 'Vila Inicial');
+    assert.notEqual(got, 'Planície dos Slimes');
+  }
+});
+test('locationDisplayName: arena de TvT (tvt#...) e World Boss (wb#...) nunca caem no fallback de vila', () => {
+  assert.equal(locationDisplayName({ name: 'tvt#ab12cd' }, 40 * 48), 'Arena TvT');
+  assert.equal(locationDisplayName({ name: 'wb#ab12cd#XYZ234' }, 40 * 48), 'Arena do Titã');
+});
+test('locationDisplayName: mundo desconhecido nunca vira "Vila Inicial" por padrão (ecoa o id cru em vez de inventar um nome errado)', () => {
+  const got = locationDisplayName({ name: 'algo_novo_nunca_visto' }, 40 * 48);
+  assert.notEqual(got, 'Vila Inicial');
+  assert.notEqual(got, 'Planície dos Slimes');
+});
+test('update(): a chamada real usa locationDisplayName(W_,P.x), nunca reconstroi a logica de nome de local inline', () => {
+  const start = html.indexOf('const ln=locationDisplayName');
+  assert.ok(start > -1, 'update() deveria calcular `ln` chamando locationDisplayName(W_,P.x), nao reimplementando a logica ali');
 });
 
 test('sala do boss ganha trono/marco + 2 estandartes + tapete vermelho ate ele (leitura de "sala final" clara, como pedido)', () => {

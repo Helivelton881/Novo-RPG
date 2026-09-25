@@ -3362,6 +3362,34 @@ $('#talk').addEventListener('click',()=>interact());
 $('#mBtn').addEventListener('click',()=>$('#tr').classList.toggle('big'));
 
 /* ================= atualização ================= */
+// Fase 5.16.3 (bug real, achado em produção): a expressão antiga que
+// decidia o nome de localização (nomeada `ln` no update()) nunca
+// reconhecia mundos de masmorra ('<zona>_d') nem arenas de TvT ('tvt#…')
+// /World Boss ('wb#…') -- qualquer um desses caía no ELSE final, que so
+// existia pra decidir entre "Vila Inicial"/"Planície dos Slimes" pela
+// coordenada X. Resultado: uma masmorra completamente diferente (ex.:
+// Covil dos Goblins) aparecia rotulada como "Vila Inicial" no HUD. A
+// única condição que pode decidir entre esses dois rótulos agora é
+// w.name==='vila' explicitamente -- nunca mais um "pega tudo que sobrou".
+// Extraído pra uma função dedicada e testável (test/dungeon-visual.test.js).
+function locationDisplayName(w,px){
+  if(!w)return'';
+  if(w.name.endsWith('_d')){
+    const base=w.name.slice(0,-2),cfg=MASMORRA_CFG[base];
+    return cfg?('Masmorra — '+cfg.name):'Masmorra';
+  }
+  if(w.name.startsWith('tvt#'))return'Arena TvT';
+  if(w.name.startsWith('wb#'))return'Arena do Titã';
+  if(w.name==='vulcao')return'Vulcão Ardente';
+  if(w.name==='ilhas')return'Ilhas Flutuantes';
+  if(w.name==='torre')return'Torre do Feiticeiro';
+  if(w.name==='pantano')return'Pântano Sombrio';
+  if(w.name==='serra')return'Serra dos Lobos';
+  if(w.name==='cripta')return'Cripta dos Esqueletos';
+  if(w.name==='floresta')return'Floresta dos Goblins';
+  if(w.name==='vila')return px<28.3*T?'Vila Inicial':'Planície dos Slimes';
+  return w.name; // mundo desconhecido -- nunca inventa "Vila Inicial", so ecoa o id cru (visível/estranho o bastante pra ser notado e corrigido, nunca silenciosamente errado)
+}
 let locName='Vila Inicial',portalCool=0,caveCool=0,saveT=0,hudT=0,mmT=0,time=0,CAVE=null,masmorraSel=null;
 // Fase 5.13.2: estado local da fila de matchmaking de masmorra -- so
 // espelha o que o servidor manda (dungeon_queue_state), nunca decide
@@ -3440,7 +3468,7 @@ function update(dt){
   if(caveCool>0)caveCool-=dt;
   if(caveCool<=0&&CAVE&&Math.hypot(P.x-CAVE.x,P.y-(CAVE.y+8))<62){caveCool=3;stopAuto();masmorraSel=CAVE.zone;openScr('masmorra')}
   // local
-  const ln=W_.name==='vulcao'?'Vulcão Ardente':W_.name==='ilhas'?'Ilhas Flutuantes':W_.name==='torre'?'Torre do Feiticeiro':W_.name==='pantano'?'Pântano Sombrio':W_.name==='serra'?'Serra dos Lobos':W_.name==='cripta'?'Cripta dos Esqueletos':W_.name==='floresta'?'Floresta dos Goblins':(P.x<28.3*T?'Vila Inicial':'Planície dos Slimes');
+  const ln=locationDisplayName(W_,P.x);
   if(ln!==locName){locName=ln;$('#loc').textContent=ln}
   // monstros
   for(const s of MOBS)updMob(s,dt);
