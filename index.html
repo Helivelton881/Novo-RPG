@@ -3088,7 +3088,8 @@ function netLabel(text,on){const e=$('#net');if(!e)return;e.textContent=text;e.c
 // REMOTE (population server-authoritative, nunca inferida aqui).
 function netCountsLabel(){
   let humans=1, ai=0; // +1 pelo proprio jogador local, que nunca fica dentro de REMOTE
-  for(const p of REMOTE.values()) if(p.kind==='ai') ai++; else humans++;
+  const currentMap=netMapId();
+  for(const p of REMOTE.values())if(p.map===currentMap){if(p.kind==='ai')ai++;else humans++}
   return ai>0 ? (humans+(humans===1?' jogador':' jogadores')+' · '+ai+' IA') : (humans+' online');
 }
 function netMobById(id){return MOBS.find(m=>m.netId===id)}
