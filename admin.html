@@ -109,6 +109,7 @@ const TABS = [
   {id:'economy', label:'Economia', perm:'view_economy'},
   {id:'guilds', label:'Guildas', perm:'view_guilds'},
   {id:'events', label:'Eventos', perm:'view_events'},
+  {id:'news', label:'Notícias', perm:'manage_news'},
   {id:'roles', label:'Cargos', perm:'manage_roles'},
   {id:'audit', label:'Auditoria', perm:'view_security_log'},
 ];
@@ -129,6 +130,7 @@ async function openTab(id){
     if (id === 'economy') return renderEconomy(main);
     if (id === 'guilds') return renderGuilds(main);
     if (id === 'events') return renderEvents(main);
+    if (id === 'news') return renderNews(main);
     if (id === 'roles') return renderRoles(main);
     if (id === 'audit') return renderAudit(main);
   } catch (e) {
@@ -199,6 +201,23 @@ async function renderEvents(main){
   ${e.upcoming.map(x=>`<tr><td>${x.label||x.type}</td><td class="muted">${x.type}</td><td class="muted">${new Date(x.startAt||Date.now()).toLocaleString('pt-BR')}</td></tr>`).join('')||'<tr><td colspan="3" class="muted">Nenhum evento agendado.</td></tr>'}
   </tbody></table>`;
 }
+async function renderNews(main){
+  const n = await api('/api/public/news');
+  main.innerHTML = `<div class="row" style="flex-direction:column;align-items:stretch;max-width:520px">
+    <input id="nTitle" placeholder="Título">
+    <textarea id="nBody" placeholder="Texto da notícia" rows="4" style="padding:8px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;color:var(--text);margin-bottom:8px"></textarea>
+    <button class="btn" onclick="publishNews()" style="width:fit-content">Publicar</button>
+  </div>
+  <h3>Notícias publicadas</h3>
+  ${n.news.map(x=>`<div class="card" style="margin-bottom:10px"><b>${x.title}</b> <span class="muted" style="font-size:12px">${new Date(x.published_at).toLocaleString('pt-BR')}</span><p style="white-space:pre-wrap;margin:8px 0 0">${x.body}</p><button class="btn ghost" style="margin-top:8px" onclick="deleteNews('${x.id}')">Excluir</button></div>`).join('') || '<p class="muted">Nenhuma notícia publicada ainda.</p>'}`;
+}
+async function publishNews(){
+  const title = document.getElementById('nTitle').value.trim(), body = document.getElementById('nBody').value.trim();
+  if (!title || !body) { toast('Preencha título e texto'); return; }
+  await api('/api/admin/news', {method:'POST', body:JSON.stringify({title, body})});
+  toast('Notícia publicada'); openTab('news');
+}
+async function deleteNews(id){ if(!confirm('Excluir esta notícia?'))return; await api('/api/admin/news/delete',{method:'POST',body:JSON.stringify({id})}); toast('Excluída'); openTab('news'); }
 async function renderRoles(main){
   const r = await api('/api/admin/roles');
   main.innerHTML = `<div class="row">

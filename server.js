@@ -1550,8 +1550,8 @@ async function handleParty(req, res, pathname) {
 // centralizada: cada rota do painel checa uma permissao nomeada, nunca
 // compara `role==='admin'` espalhado pelo codigo.
 const ADMIN_PERMS = Object.freeze({
-  owner:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','manage_roles','view_guilds','view_events','view_security_log'],
-  admin:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','view_guilds','view_events','view_security_log'],
+  owner:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','manage_roles','view_guilds','view_events','view_security_log','manage_news'],
+  admin:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','view_guilds','view_events','view_security_log','manage_news'],
   moderator: ['view_dashboard','search_players','kick','mute','ban','unban','view_guilds','view_events'],
   support:   ['view_dashboard','search_players','view_guilds','view_events'],
 });
@@ -1764,10 +1764,94 @@ async function handleAdmin(req, res, pathname) {
       json(res,200,{audit:rows}); return true;
     }
 
+    // Fase 5.15: noticias do Portal Publico -- gerenciadas so por
+    // admin/owner (nunca moderator/support). Leitura publica fica em
+    // /api/public/news (handlePublic), sem exigir nenhum cargo.
+    if (pathname === '/api/admin/news' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_news')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), title = cleanText(input.title,120), body = cleanText(input.body,4000);
+      if (!title || !body) { json(res,400,{error:'title e body obrigatórios'}); return true; }
+      await supabase('portal_news', {method:'POST', body:{title, body, author_user_id:admin.id}, prefer:'return=minimal'});
+      publicCache.clear();
+      await writeAdminAudit(admin.id, 'news_publish', {metadata:{title}});
+      json(res,200,{ok:true}); return true;
+    }
+    if (pathname === '/api/admin/news/delete' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_news')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), id = cleanText(input.id,64);
+      if (!id) { json(res,400,{error:'id obrigatório'}); return true; }
+      await supabase('portal_news', {method:'DELETE', query:`?id=eq.${encodeURIComponent(id)}`});
+      publicCache.clear();
+      await writeAdminAudit(admin.id, 'news_delete', {metadata:{id}});
+      json(res,200,{ok:true}); return true;
+    }
+
     json(res,404,{error:'Rota não encontrada'}); return true;
   } catch (err) {
     console.error('admin_error', err.message);
     if (!res.headersSent) json(res,500,{error:'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+// ===== Fase 5.15: Portal Publico =====
+// API 100% publica (sem auth) pro site /portal -- privacidade estrita:
+// nunca user_id/email/save/token/session/cargo-de-admin/moderacao
+// privada, so o que já é seguro por natureza (contagens, nomes
+// públicos, agenda de eventos). Cache curto (mesma fabrica de cache TTL
+// da Fase 5.10, RANKINGS.createRankCache -- 45s, dentro da janela de
+// 30-60s pedida) evita bater no Supabase a cada visitante.
+const publicCache = RANKINGS.createRankCache();
+async function cachedPublic(key, fn) {
+  const hit = publicCache.get(key);
+  if (hit) return hit;
+  const value = await fn();
+  publicCache.set(key, value);
+  return value;
+}
+async function handlePublic(req, res, pathname) {
+  if (!pathname.startsWith('/api/public')) return false;
+  try {
+    if (pathname === '/api/public/status' && req.method === 'GET') {
+      const data = await cachedPublic('status', async () => {
+        const onlineHuman = new Set([...clients.values()].filter(p=>p.authed).map(p=>p.userId)).size;
+        // Fase 5.16 (Aventureiros IA) ainda nao existe -- o campo `ai` ja
+        // fica preparado no formato pedido (breakdown humano vs IA), mas
+        // sempre zero ate aquela fase realmente rodar IA de verdade.
+        const worldBossActive = [...worldBossInstances.values()].some(i => i.state !== 'ended');
+        const nextEvents = EVENT_DATA.scheduleAfter(Date.now(), 4);
+        const nextWorldBoss = nextEvents.find(e => e.type === 'world_boss');
+        const nextTvt = nextEvents.find(e => e.type === 'team_vs_team');
+        let guildsCount = 0;
+        try { const rows = await supabase('guilds', {query:'?select=id'}); guildsCount = rows.length; } catch { /* Supabase fora do ar nunca derruba o status publico */ }
+        return {
+          population: {human: onlineHuman, ai: 0},
+          worldBossActive,
+          nextWorldBossAt: nextWorldBoss ? nextWorldBoss.startAt : null,
+          nextTvtAt: nextTvt ? nextTvt.startAt : null,
+          guildsCount,
+        };
+      });
+      res.writeHead(200, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=30'});
+      res.end(JSON.stringify(data)); return true;
+    }
+    if (pathname === '/api/public/events' && req.method === 'GET') {
+      const data = await cachedPublic('events', async () => ({upcoming: EVENT_DATA.scheduleAfter(Date.now(), 8)}));
+      res.writeHead(200, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=30'});
+      res.end(JSON.stringify(data)); return true;
+    }
+    if (pathname === '/api/public/news' && req.method === 'GET') {
+      const data = await cachedPublic('news', async () => {
+        const rows = await supabase('portal_news', {query:'?select=id,title,body,published_at&order=published_at.desc&limit=20'});
+        return {news: rows};
+      });
+      res.writeHead(200, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=60'});
+      res.end(JSON.stringify(data)); return true;
+    }
+    json(res,404,{error:'Rota não encontrada'}); return true;
+  } catch (err) {
+    console.error('public_error', err.message);
+    if (!res.headersSent) json(res,503,{error:'Portal temporariamente indisponível.'});
     return true;
   }
 }
@@ -2676,7 +2760,8 @@ const server = http.createServer(async (req, res) => {
   if (await handleMarket(req, res, pathname)) return;
   if (handleEvents(req, res, pathname)) return;
   if (await handleAdmin(req, res, pathname)) return;
-  const rel = pathname === '/' ? 'index.html' : pathname === '/admin' || pathname === '/admin/' ? 'admin.html' : pathname.replace(/^\/+/, '');
+  if (await handlePublic(req, res, pathname)) return;
+  const rel = pathname === '/' ? 'index.html' : pathname === '/admin' || pathname === '/admin/' ? 'admin.html' : pathname === '/portal' || pathname === '/portal/' ? 'portal.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
   if (!file.startsWith(ROOT + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
   fs.stat(file, (err, stat) => {
@@ -4151,6 +4236,8 @@ module.exports = {
   DUNGEON_QUEUE_FALLBACK_SOLO_MS, DUNGEON_QUEUE_DISCONNECT_GRACE_MS,
   // Fase 5.14 -- RBAC/admin (nucleo puro + helpers reusados pelos testes):
   ADMIN_PERMS, adminHasPerm, sanitizeAuditMetadata, activeAmong, resolveAdmin, kickUserSockets,
+  // Fase 5.15 -- Portal Publico:
+  publicCache,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):
