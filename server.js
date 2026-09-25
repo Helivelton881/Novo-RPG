@@ -2658,8 +2658,11 @@ function tvtFillTargetSize(humanCount) {
   if (size % 2 !== 0) size++;
   return Math.min(size, TVT.TVT_MAX_PLAYERS);
 }
-function tvtAiFillTargetSize(humanCount){return livingWorldConfig.tvtFillEnabled?tvtFillTargetSize(humanCount):humanCount;}
-function dungeonAiFillEnabled(){return livingWorldConfig.dungeonFillEnabled;}
+// aiEnabled() (AI_ENABLED) e o interruptor mestre -- ver comentario em
+// aiTick(). Continua checando livingWorldConfig.tvtFillEnabled/
+// dungeonFillEnabled do jeito que sempre checou (o painel admin nao muda).
+function tvtAiFillTargetSize(humanCount){return aiEnabled()&&livingWorldConfig.tvtFillEnabled?tvtFillTargetSize(humanCount):humanCount;}
+function dungeonAiFillEnabled(){return aiEnabled()&&livingWorldConfig.dungeonFillEnabled;}
 async function startTvtEvent(event,registrations){
   try{
     const regs=[...registrations.values()].sort((a,b)=>a.registeredAt-b.registeredAt);
@@ -4004,10 +4007,28 @@ function aiDoTvt(ai, now) {
 // arquivo) -- nunca um setInterval novo por entidade (zero timer pra
 // vazar por IA: aiDespawnEntity so remove do Map, nunca deixa nenhum
 // setTimeout/setInterval pendurado).
+// AI_ENABLED=0 e o interruptor mestre (aiEnabled()): antes so cortava
+// NOVO spawn de campo/vila (aiPopulationTick ja tinha o guard). IA ja
+// existente continuava andando/lutando/broadcastando pra sempre --
+// "desligar" nao tirava nenhum fake que ja estava no jogo. Agora, com o
+// interruptor desligado, toda IA solta (sem ai.slot, ou seja campo/vila)
+// e removida na hora. IA presa a uma masmorra/TvT ja em andamento
+// (ai.slot) e deixada terminar a propria instancia sozinha -- nunca
+// arrancada no meio de uma partida real que jogadores humanos estao
+// jogando. dungeonAiFillEnabled()/tvtAiFillTargetSize() tambem respeitam
+// o mesmo interruptor (ver definicoes), entao nenhuma instancia NOVA
+// ganha reforco de IA enquanto estiver desligado. O painel admin
+// (config fieldSpawnEnabled/dungeonFillEnabled/tvtFillEnabled) continua
+// exatamente como era -- esse interruptor e so uma camada extra por
+// cima, nunca substitui nem muda o comportamento dele.
 function aiTick() {
   const now = Date.now();
-  aiPopulationTick();
-  for (const ai of [...aiEntities.values()]) {
+  if (!aiEnabled()) {
+    for (const ai of [...aiEntities.values()]) if (!ai.slot) aiDespawnEntity(ai.id);
+  } else {
+    aiPopulationTick();
+  }
+  for (const ai of aiEntities.values()) {
     aiStep(ai, now);
     broadcast({type:'state', player:aiPublicPlayer(ai)});
   }

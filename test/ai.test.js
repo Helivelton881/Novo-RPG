@@ -194,6 +194,54 @@ test('aiDoWander: IA social da vila NUNCA entra em hunt mesmo com mobs reais pre
   state.mobs.clear();
   S.aiEntities.clear();
 });
+// "Vamos desativar os fakes" -- AI_ENABLED=0 precisa ser um interruptor
+// mestre de verdade: antes so cortava spawn NOVO (aiPopulationTick ja
+// tinha o guard), IA que ja existia continuava pra sempre. Agora aiTick
+// despawna toda IA solta (sem ai.slot) na hora que o interruptor desliga,
+// e dungeonAiFillEnabled/tvtAiFillTargetSize tambem passam a respeitar o
+// mesmo interruptor -- sem tocar em livingWorldConfig (o painel admin
+// continua igual, essa e so uma camada por cima).
+test('aiTick: com AI_ENABLED=0, despawna toda IA solta de campo/vila na hora (interruptor mestre, nunca so bloqueia spawn novo)', () => {
+  const prev = process.env.AI_ENABLED;
+  try {
+    S.aiEntities.clear();
+    S.aiSpawnEntity('vila');
+    S.aiSpawnEntity('floresta');
+    assert.equal(S.aiEntities.size, 2, 'sanity: as duas IA soltas foram criadas');
+    process.env.AI_ENABLED = '0';
+    S.aiTick();
+    assert.equal(S.aiEntities.size, 0, 'com o interruptor desligado, nenhuma IA solta deveria sobreviver ao proximo tick');
+  } finally {
+    if (prev === undefined) delete process.env.AI_ENABLED; else process.env.AI_ENABLED = prev;
+    S.aiEntities.clear();
+  }
+});
+test('aiTick: com AI_ENABLED=0, IA presa a masmorra/TvT ja em andamento (ai.slot) NUNCA e arrancada no meio da partida', () => {
+  const prev = process.env.AI_ENABLED;
+  try {
+    S.aiEntities.clear();
+    const ai = S.aiSpawnEntity('vila');
+    ai.slot = {kind:'dungeon', instanceId:'__ai_kill_switch_test__'};
+    process.env.AI_ENABLED = '0';
+    S.aiTick();
+    assert.ok(S.aiEntities.has(ai.id), 'IA preenchendo uma instancia ativa nunca deveria ser removida so por causa do interruptor mestre');
+  } finally {
+    if (prev === undefined) delete process.env.AI_ENABLED; else process.env.AI_ENABLED = prev;
+    S.aiEntities.clear();
+  }
+});
+test('dungeonAiFillEnabled/tvtAiFillTargetSize: com AI_ENABLED=0, nunca preenchem com IA mesmo com livingWorldConfig ligado', () => {
+  const prev = process.env.AI_ENABLED;
+  try {
+    assert.equal(S.livingWorldConfig.dungeonFillEnabled, true, 'sanity: config do painel admin continua ligada');
+    assert.equal(S.livingWorldConfig.tvtFillEnabled, true, 'sanity: config do painel admin continua ligada');
+    process.env.AI_ENABLED = '0';
+    assert.equal(S.dungeonAiFillEnabled(), false, 'interruptor mestre desligado deveria vencer mesmo com o painel admin permitindo');
+    assert.equal(S.tvtAiFillTargetSize(3), 3, 'sem IA de preenchimento, o alvo de tamanho deveria ser so a contagem humana');
+  } finally {
+    if (prev === undefined) delete process.env.AI_ENABLED; else process.env.AI_ENABLED = prev;
+  }
+});
 test('aiPopulationTick: sempre povoa a zona MENOS povoada primeiro, nunca concentra tudo numa zona so', () => {
   S.aiEntities.clear();
   // forja 3 IA ja em 'floresta' -- a proxima automatica deveria ir pra outra zona.
