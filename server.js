@@ -1632,9 +1632,20 @@ async function handleAdmin(req, res, pathname) {
       // nao tem prazo (permanente) ou cujo prazo ainda nao passou.
       const now = Date.now();
       const stillActive = row => !row.expires_at || new Date(row.expires_at).getTime() > now;
+      // Fase 5.16: IA sempre separada e marcada -- nunca somada ao
+      // `online` humano em nenhum lugar, nunca escondida do admin.
       json(res,200,{
-        online: onlineTotal, bansOpen: bansOpen.filter(stillActive).length, mutesOpen: mutesOpen.filter(stillActive).length,
+        online: onlineTotal, aiOnline: aiEntities.size, bansOpen: bansOpen.filter(stillActive).length, mutesOpen: mutesOpen.filter(stillActive).length,
         recentAudit, serverNow: now,
+      }); return true;
+    }
+    if (pathname === '/api/admin/ai' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_dashboard')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const byZone = {};
+      for (const ai of aiEntities.values()) byZone[ai.map] = (byZone[ai.map] || 0) + 1;
+      json(res,200,{
+        total: aiEntities.size, maxPopulation: AI_MAX_POPULATION, byZone,
+        entities: [...aiEntities.values()].map(ai => ({id:ai.id, kind:'ai', name:ai.name, cls:ai.cls, lvl:ai.lvl, map:ai.map, fsm:ai.fsm, hp:ai.hp, maxHp:ai.maxHp, dead:ai.dead, slot:ai.slot})),
       }); return true;
     }
 
@@ -1815,9 +1826,10 @@ async function handlePublic(req, res, pathname) {
     if (pathname === '/api/public/status' && req.method === 'GET') {
       const data = await cachedPublic('status', async () => {
         const onlineHuman = new Set([...clients.values()].filter(p=>p.authed).map(p=>p.userId)).size;
-        // Fase 5.16 (Aventureiros IA) ainda nao existe -- o campo `ai` ja
-        // fica preparado no formato pedido (breakdown humano vs IA), mas
-        // sempre zero ate aquela fase realmente rodar IA de verdade.
+        // Fase 5.16: contagem de IA real agora (aiEntities.size) -- nunca
+        // misturada com onlineHuman (fontes totalmente separadas: clients
+        // vs aiEntities), o total de humanos online nunca e inflado nem
+        // reduzido pela presenca de IA.
         const worldBossActive = [...worldBossInstances.values()].some(i => i.state !== 'ended');
         const nextEvents = EVENT_DATA.scheduleAfter(Date.now(), 4);
         const nextWorldBoss = nextEvents.find(e => e.type === 'world_boss');
@@ -1825,7 +1837,7 @@ async function handlePublic(req, res, pathname) {
         let guildsCount = 0;
         try { const rows = await supabase('guilds', {query:'?select=id'}); guildsCount = rows.length; } catch { /* Supabase fora do ar nunca derruba o status publico */ }
         return {
-          population: {human: onlineHuman, ai: 0},
+          population: {human: onlineHuman, ai: aiEntities.size},
           worldBossActive,
           nextWorldBossAt: nextWorldBoss ? nextWorldBoss.startAt : null,
           nextTvtAt: nextTvt ? nextTvt.startAt : null,
@@ -2731,6 +2743,11 @@ function dungeonCleanupTick() {
         const owned = dungeonByOwner.get(charId);
         if (owned && owned.get(state.zone) === mapId) owned.delete(state.zone);
       }
+      // Fase 5.16: qualquer IA que estivesse preenchendo esta instancia
+      // (ai.slot.instanceId===mapId) e removida de vez -- nunca fica
+      // presa apontando pra uma masmorra que ja nao existe mais
+      // (limpeza rigorosa de referencias, sem leak).
+      for (const ai of [...aiEntities.values()]) if (ai.slot && ai.slot.instanceId === mapId) aiDespawnEntity(ai.id);
     }
   }
 }
@@ -3142,6 +3159,300 @@ function dungeonQueueTick() {
   }
 }
 
+// ===== Fase 5.16: Living World / Aventureiros IA =====
+// NUNCA processo de navegador, NUNCA conta Supabase fake -- cada IA e
+// puramente um objeto em memoria (aiEntities), simulado por um tick
+// deterministico reaproveitando o MESMO tick de 1s ja existente (dentro
+// da janela de 500-1000ms pedida). O FSM (idle/wander/travel/hunt/
+// combat/retreat/rest/dead/respawn, mais party/queue/dungeon/tvt quando
+// preenchendo Fila/TvT -- ver mais abaixo) e heuristica pura -- NENHUMA
+// chamada a LLM em runtime, em lugar nenhum deste modulo.
+//
+// REGRA ABSOLUTA DE ECONOMIA (preservada verbatim do pedido): IA nunca
+// recebe ouro/gema/item persistente, nunca cria UID economico, nunca
+// compra/vende no Mercado, nunca recebe claim, nunca encanta item real,
+// nunca entra no ranking humano, nunca altera economia de guilda. Isso e
+// garantido ESTRUTURALMENTE aqui: uma entidade de IA nunca tem
+// charId/userId reais (sempre null), e o caminho de combate da IA
+// (aiDoCombat/dungeonHandleMobDeath) nunca chama creditKillReward/
+// creditDungeonReward/applyGearDrops/creditBestiaryKill(com charId real)/
+// nenhuma rota de Mercado -- quando a IA mata um mob, o mob morre pro
+// mundo (broadcast igual a um abate real) mas a recompensa da IA e
+// sempre ZERO por construcao, nunca uma checagem condicional que possa
+// ser esquecida em algum caminho.
+const AI_TICK_MS = 1000; // reusa o tick de 1s ja existente -- dentro de 500-1000ms
+const AI_MAX_POPULATION = 10; // teto conservador de partida (ver limitacoes -- benchmark real de carga nao foi possivel nesta sessao)
+// Ligado por padrao (mundo vivo de verdade em producao) -- so
+// aiPopulationTick() (spawn automatico em background) e afetado; criar
+// uma IA manualmente (aiSpawnEntity direto, usado pelos testes puros e
+// por um futuro preenchimento de fila/TvT) nunca depende desta flag.
+// test/helpers.js desliga explicitamente (AI_ENABLED=0) em todo
+// servidor de teste -- nenhuma suite depende de atores nao controlados
+// aparecendo sozinhos no mapa compartilhado de um teste.
+// Funcao (nunca uma const congelada) -- le process.env.AI_ENABLED a
+// CADA chamada, nunca so uma vez no carregamento do modulo. Isso
+// garante que test/helpers.js (que seta a env ANTES de spawnar o
+// processo filho) funcione, e tambem permite testar o gate ligando/
+// desligando em runtime dentro do mesmo processo.
+function aiEnabled() { return process.env.AI_ENABLED !== '0'; }
+const AI_FIELD_ZONES = ['floresta','cripta','serra','pantano','torre','ilhas','vulcao']; // nunca vila (hub social, sem mobs) nem masmorra/TvT diretamente (essas sao FILL, ver adiante)
+const AI_CLASS_POOL = [...ALLOWED_CLASS];
+const AI_NAME_POOL = ['Aldric','Branwen','Cedric','Dara','Eamon','Fiora','Gareth','Helka','Ivor','Junia','Kael','Lyra','Milo','Nessa','Orin','Petra','Quill','Rowan','Senna','Talon'];
+const AI_PERSONALITY_KINDS = ['agressivo','cauteloso','equilibrado'];
+const AI_MOVE_SPEED = 85; // px por tick -- comparavel a velocidade real de jogador
+function aiPersonalityProfile(kind) {
+  if (kind === 'agressivo') return {aggroRadius:560, fleeHpRatio:.12, restMs:1500};
+  if (kind === 'cauteloso') return {aggroRadius:420, fleeHpRatio:.35, restMs:3200};
+  return {aggroRadius:490, fleeHpRatio:.22, restMs:2200};
+}
+// Nivel simulado por zona: deriva da faixa real de niveis do proprio
+// MOB_MANIFEST (nunca uma tabela paralela) -- IA em floresta luta como
+// floresta pede, sem precisar duplicar a curva de dificuldade em outro lugar.
+function aiZoneLevelRange(zone) {
+  const rows = MOB_MANIFEST[zone] || [];
+  if (!rows.length) return [5, 10];
+  const lvls = rows.map(r => r.lvl);
+  return [Math.min(...lvls), Math.max(...lvls)];
+}
+// Equipamento SIMULADO -- gerado em memoria com o mesmo createGear() de
+// sempre (mesma formula de stats por nivel/raridade que um item real
+// usaria), mas NUNCA gravado em bag/eq de personagem nenhum, nunca tem
+// UID reconhecido por lockOwnedItems/market/enchant. So existe dentro do
+// `save` descartavel usado unicamente para alimentar combatSnapshot.
+// GEAR_DATA.statsFor so tem tabela pras mesmas faixas de nivel que o
+// jogo real usa pra req de equipamento (1/4/8/12/16/20/24/28/32/36/40),
+// nunca todo nivel inteiro -- createGear() com um nivel fora dessas
+// faixas retorna null. Sempre arredonda pra baixo pro tier valido mais
+// proximo (nunca pra cima -- nunca "empresta" um requisito de nivel
+// maior que o real da IA).
+const AI_GEAR_TIERS = [1, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40];
+function aiGearTierFor(lvl) {
+  let best = AI_GEAR_TIERS[0];
+  for (const t of AI_GEAR_TIERS) if (t <= lvl) best = t;
+  return best;
+}
+function buildAiSave(cls, lvl) {
+  const weapon = (CLASS_ITEM_TYPES[cls] || CLASS_ITEM_TYPES.guerreiro)[0];
+  const skills = CLASS_SKILLS[cls] || CLASS_SKILLS.guerreiro;
+  const gearLvl = aiGearTierFor(lvl);
+  const rarity = gearLvl >= 20 && Math.random() < .3 ? 'rare' : 'basic';
+  return {cls, eq:{sword:createGear(weapon, gearLvl, rarity)}, sk:Object.fromEntries(skills.map(id => [id, 1]))};
+}
+function buildAiCombat(cls, lvl, name) {
+  return WORLD_BOSS.combatSnapshot({userId:null, charId:null, name, cls, lvl, save:buildAiSave(cls, lvl)});
+}
+const aiEntities = new Map(); // aiId -> entity (runtime-only, nunca Supabase)
+function aiPublicPlayer(ai) {
+  // Mesmo formato de publicPlayer() -- reusa 100% do pipeline de
+  // renderizacao ja existente no cliente pra outros jogadores (nenhum
+  // codigo novo de desenho foi necessario), so com kind:'ai' a mais pra
+  // o indicador discreto "[IA]" e pra nunca ser confundido com humano
+  // em nenhuma API/admin.
+  return {id:ai.id, name:ai.name, cls:ai.cls, map:ai.map, x:ai.x, y:ai.y, dir:ai.dir, moving:!!ai.moving, lvl:ai.lvl, atkT:ai.atkT||0, atkAng:ai.atkAng||0, charId:null, kind:'ai'};
+}
+function aiSpawnAnchor(zone) {
+  const state = maps.get(zone);
+  if (state && state.mobs.size) {
+    const mobs = [...state.mobs.values()], m = mobs[Math.floor(Math.random() * mobs.length)];
+    return {x:Math.max(0, Math.min(MOB_WORLD_W, m.x + (Math.random() * 300 - 150))), y:Math.max(0, Math.min(MOB_WORLD_H, m.y + (Math.random() * 300 - 150)))};
+  }
+  return {x:MOB_WORLD_W * (.3 + Math.random() * .4), y:MOB_WORLD_H * (.3 + Math.random() * .4)};
+}
+function aiSpawnEntity(zone) {
+  if (aiEntities.size >= AI_MAX_POPULATION) return null;
+  const cls = AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
+  const [lo, hi] = aiZoneLevelRange(zone);
+  const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
+  const name = AI_NAME_POOL[Math.floor(Math.random() * AI_NAME_POOL.length)] + Math.floor(10 + Math.random() * 90);
+  const combat = buildAiCombat(cls, lvl, name);
+  const anchor = aiSpawnAnchor(zone);
+  const personality = AI_PERSONALITY_KINDS[Math.floor(Math.random() * AI_PERSONALITY_KINDS.length)];
+  const id = 'ai_' + crypto.randomBytes(4).toString('hex');
+  const entity = {
+    id, kind:'ai', name:combat.name, cls, lvl, map:zone, x:anchor.x, y:anchor.y, dir:0, moving:false, atkT:0, atkAng:0,
+    hp:combat.maxHp, maxHp:combat.maxHp, dead:false, respawnAt:0,
+    combat, basicCdUntil:0, buffUntil:0, pendingSkill:{}, lastDamageAt:0, evadeUntil:0, shieldUntil:0, shield:0,
+    fsm:'idle', fsmUntil:0, targetMobId:null, homeZone:zone,
+    personality, profile:aiPersonalityProfile(personality),
+    slot:null, // Fase 5.16 Tier 2: {kind:'dungeon'|'tvt', instanceId} quando preenchendo fila/TvT
+    createdAt:Date.now(),
+  };
+  aiEntities.set(id, entity);
+  broadcast({type:'player_join', player:aiPublicPlayer(entity)});
+  return entity;
+}
+function aiDespawnEntity(id) {
+  if (!aiEntities.has(id)) return;
+  aiEntities.delete(id);
+  broadcast({type:'player_leave', id});
+}
+// Distribuicao: sempre povoa a zona MENOS povoada primeiro -- nunca
+// concentra toda a populacao de IA numa unica zona.
+function aiPopulationTick() {
+  if (!aiEnabled() || aiEntities.size >= AI_MAX_POPULATION) return;
+  const counts = Object.fromEntries(AI_FIELD_ZONES.map(z => [z, 0]));
+  for (const ai of aiEntities.values()) if (counts[ai.map] != null) counts[ai.map]++;
+  const zone = AI_FIELD_ZONES.reduce((min, z) => counts[z] < counts[min] ? z : min, AI_FIELD_ZONES[0]);
+  aiSpawnEntity(zone);
+}
+function aiTransition(ai, next, now, extra) { ai.fsm = next; ai.fsmUntil = 0; if (extra) Object.assign(ai, extra); }
+function aiMoveToward(ai, tx, ty, speed) {
+  const dx = tx - ai.x, dy = ty - ai.y, dist = Math.hypot(dx, dy);
+  if (dist < 4) { ai.moving = false; return dist; }
+  const step = Math.min(dist, speed);
+  ai.x = Math.max(0, Math.min(MOB_WORLD_W, ai.x + dx / dist * step));
+  ai.y = Math.max(0, Math.min(MOB_WORLD_H, ai.y + dy / dist * step));
+  ai.dir = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 2 : 1) : (dy < 0 ? 3 : 0);
+  ai.moving = true;
+  return dist - step;
+}
+function aiNearestMob(ai, state, radius) {
+  let best = null, bestD = Infinity;
+  for (const mob of state.mobs.values()) {
+    if (mob.dead) continue;
+    const d = Math.hypot(mob.x - ai.x, mob.y - ai.y);
+    if (d < radius && d < bestD) { best = mob; bestD = d; }
+  }
+  return best;
+}
+// Boss/trash de masmorra morto pela IA passa pelo MESMO caminho de
+// recompensa que um abate real (extraido do handler mob_damage pra
+// nunca duplicar a logica) -- so que iterando state.members, cada
+// membro kind:'ai' e explicitamente pulado ANTES de qualquer chamada de
+// credito (a REGRA ABSOLUTA de novo, no ponto exato onde a recompensa
+// seria concedida). Membros humanos da mesma instancia continuam
+// recebendo normalmente mesmo quando quem baixou o mob foi a IA.
+function dungeonHandleMobDeath(state, mob, now, killerCharId) {
+  if (mob.boss && !state.bossDefeated) {
+    state.bossDefeated = true;
+    for (const [memberCharId, member] of state.members) {
+      if (member.kind === 'ai') continue;
+      if (!dungeonMemberEligible(member, now)) continue;
+      creditDungeonReward(wsForChar(memberCharId) || DUNGEON_OFFLINE_WS, {charId:memberCharId, userId:member.userId}, rollDungeonBossLoot(member.cls, mob.lvl));
+    }
+  } else if (!mob.boss) {
+    for (const [memberCharId, member] of state.members) {
+      if (member.kind === 'ai') continue;
+      if (!dungeonMemberEligible(member, now)) continue;
+      creditDungeonReward(wsForChar(memberCharId) || DUNGEON_OFFLINE_WS, {charId:memberCharId, userId:member.userId}, rollDungeonTrashLoot(mob.lvl, member.cls));
+    }
+  }
+  if (killerCharId && mob.type) creditBestiaryKill(killerCharId, mob.type).catch(err => console.error('bestiary_credit_error', err.message));
+}
+function aiDoIdle(ai, now) {
+  const state = maps.get(ai.map);
+  if (state && state.mobs.size) {
+    const mob = aiNearestMob(ai, state, ai.profile.aggroRadius);
+    if (mob) { aiTransition(ai, 'hunt', now, {targetMobId:mob.id}); return; }
+  }
+  // 'travel' (reatribuicao de zona) so pra IA de campo livre -- nunca
+  // pra quem esta preenchendo uma masmorra/TvT (ai.slot), senao ela
+  // abandonaria a instancia no meio da partida.
+  if (!ai.slot && Math.random() < .08) { aiTransition(ai, 'travel', now, {travelZone:AI_FIELD_ZONES[Math.floor(Math.random() * AI_FIELD_ZONES.length)]}); return; }
+  aiTransition(ai, 'wander', now, {wanderTargetX:Math.max(0, Math.min(MOB_WORLD_W, ai.x + (Math.random() * 400 - 200))), wanderTargetY:Math.max(0, Math.min(MOB_WORLD_H, ai.y + (Math.random() * 400 - 200)))});
+}
+function aiDoWander(ai, now) {
+  const remain = aiMoveToward(ai, ai.wanderTargetX ?? ai.x, ai.wanderTargetY ?? ai.y, AI_MOVE_SPEED);
+  if (remain <= 0) { aiTransition(ai, 'idle', now); return; }
+  const state = maps.get(ai.map);
+  if (state && state.mobs.size && Math.random() < .3) {
+    const mob = aiNearestMob(ai, state, ai.profile.aggroRadius);
+    if (mob) aiTransition(ai, 'hunt', now, {targetMobId:mob.id});
+  }
+}
+function aiDoTravel(ai, now) {
+  // Zonas de campo nao sao espacialmente contiguas no servidor (cada
+  // uma e um mapState() isolado) -- "viajar" e uma realocacao direta
+  // pro novo mapa, nao uma caminhada real entre elas. Limitacao
+  // documentada, nunca escondida.
+  ai.map = ai.travelZone || ai.homeZone; ai.homeZone = ai.map;
+  const anchor = aiSpawnAnchor(ai.map); ai.x = anchor.x; ai.y = anchor.y; ai.travelZone = null;
+  aiTransition(ai, 'idle', now);
+}
+function aiDoHunt(ai, now) {
+  const state = maps.get(ai.map), mob = state && state.mobs.get(ai.targetMobId);
+  if (!mob || mob.dead) { aiTransition(ai, 'idle', now); return; }
+  const range = attackRangeFor(ai, 'basic'), dist = Math.hypot(mob.x - ai.x, mob.y - ai.y);
+  if (dist <= range) { aiTransition(ai, 'combat', now); return; }
+  aiMoveToward(ai, mob.x, mob.y, AI_MOVE_SPEED);
+}
+function aiDoCombat(ai, now) {
+  const state = maps.get(ai.map), mob = state && state.mobs.get(ai.targetMobId);
+  if (!mob || mob.dead) { aiTransition(ai, 'idle', now); return; }
+  const dist = Math.hypot(mob.x - ai.x, mob.y - ai.y), range = attackRangeFor(ai, 'basic');
+  if (dist > range) { aiTransition(ai, 'hunt', now); return; }
+  if (ai.hp <= ai.maxHp * ai.profile.fleeHpRatio) { aiTransition(ai, 'retreat', now, {retreatUntil:now + 3000}); return; }
+  // MESMA formula/cooldown/teto de dano que resolveAttackDamage ja usa
+  // pra humanos (Fase 5.12) -- nunca uma formula de combate paralela pra IA.
+  const dmg = resolveAttackDamage(ai, {skill:'basic'}, now);
+  if (!dmg) return;
+  mob.hp = Math.max(0, mob.hp - dmg);
+  if (mob.hp <= 0 && !mob.dead) {
+    mob.dead = true;
+    mob.respawnAt = state.isDungeon ? 0 : (mob.boss ? Date.now() + 60000 : Date.now() + 30000);
+    if (state.isDungeon) dungeonHandleMobDeath(state, mob, now, null); // killerCharId null -- IA nunca credita Bestiario
+  }
+  broadcastMap(ai.map, {type:'mob_state', map:ai.map, mob, killerId:null});
+}
+function aiDoRetreat(ai, now) {
+  const state = maps.get(ai.map), mob = ai.targetMobId && state && state.mobs.get(ai.targetMobId);
+  if (mob) { const dx = ai.x - mob.x, dy = ai.y - mob.y, d = Math.hypot(dx, dy) || 1; aiMoveToward(ai, ai.x + dx / d * 200, ai.y + dy / d * 200, AI_MOVE_SPEED); }
+  if (now >= (ai.retreatUntil || 0)) { ai.targetMobId = null; aiTransition(ai, 'rest', now, {restUntil:now + ai.profile.restMs}); }
+}
+function aiDoRest(ai, now) {
+  if (ai.hp < ai.maxHp) ai.hp = Math.min(ai.maxHp, ai.hp + Math.round(ai.maxHp * .08));
+  if (now >= (ai.restUntil || 0)) aiTransition(ai, 'idle', now);
+}
+function aiDoRespawn(ai, now) {
+  ai.hp = ai.maxHp; ai.dead = false; ai.targetMobId = null;
+  if (ai.slot) {
+    const state = maps.get(ai.slot.instanceId);
+    if (!state) { aiDespawnEntity(ai.id); return; } // instancia ja acabou -- nunca deixa IA presa numa masmorra/TvT fantasma (limpeza rigorosa, sem leak)
+    ai.map = ai.slot.instanceId;
+    const anchor = state.layout ? state.layout.start : {x:MOB_WORLD_W / 2, y:MOB_WORLD_H / 2};
+    ai.x = anchor.x; ai.y = anchor.y;
+  } else {
+    const anchor = aiSpawnAnchor(ai.homeZone); ai.map = ai.homeZone; ai.x = anchor.x; ai.y = anchor.y;
+  }
+  aiTransition(ai, 'idle', now);
+}
+function aiStep(ai, now) {
+  if (ai.dead) { if (now >= ai.respawnAt) aiDoRespawn(ai, now); return; }
+  switch (ai.fsm) {
+    case 'wander': aiDoWander(ai, now); return;
+    case 'travel': aiDoTravel(ai, now); return;
+    case 'hunt': aiDoHunt(ai, now); return;
+    case 'combat': aiDoCombat(ai, now); return;
+    case 'retreat': aiDoRetreat(ai, now); return;
+    case 'rest': aiDoRest(ai, now); return;
+    case 'party': case 'queue': case 'dungeon': case 'tvt': return; // Fase 5.16 Tier 2 -- controlado por formDungeonGroup/TvT fill, nao pelo FSM de campo
+    default: aiDoIdle(ai, now); return;
+  }
+}
+// Roda junto do resto do tick de 1s (setInterval perto do fim do
+// arquivo) -- nunca um setInterval novo por entidade (zero timer pra
+// vazar por IA: aiDespawnEntity so remove do Map, nunca deixa nenhum
+// setTimeout/setInterval pendurado).
+function aiTick() {
+  const now = Date.now();
+  aiPopulationTick();
+  for (const ai of [...aiEntities.values()]) {
+    aiStep(ai, now);
+    if (!ai.slot) broadcast({type:'state', player:aiPublicPlayer(ai)});
+  }
+}
+// IA presente num mapa tambem conta pra IA de monstro de campo mirar
+// nela (mob_state/tickMobAI) -- combate de verdade nos dois sentidos,
+// nunca so a IA batendo sem nunca poder ser atingida. `ws=null` marca a
+// entrada como IA pra hitTarget() saber pular a checagem de posse via
+// `clients` (que so existe pra sockets reais) e nunca tentar `send()`
+// num socket que nao existe.
+function aiPresentOnMap(mapId) {
+  const out = [];
+  for (const ai of aiEntities.values()) if (ai.map === mapId && !ai.dead) out.push([null, ai]);
+  return out;
+}
+
 wss.on('connection', ws => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -3333,19 +3644,7 @@ wss.on('connection', ws => {
           // creditDungeonReward ja e um withCharLock+PATCH atomico
           // separado por personagem). Offline recebe do mesmo jeito (fica
           // salvo no banco), so nao ve a mensagem em tempo real.
-          if(mob.boss&&!state.bossDefeated){
-            state.bossDefeated=true;
-            for(const[memberCharId,member]of state.members){
-              if(!dungeonMemberEligible(member,now))continue;
-              creditDungeonReward(wsForChar(memberCharId)||DUNGEON_OFFLINE_WS,{charId:memberCharId,userId:member.userId},rollDungeonBossLoot(member.cls,mob.lvl));
-            }
-          }else if(!mob.boss){
-            for(const[memberCharId,member]of state.members){
-              if(!dungeonMemberEligible(member,now))continue;
-              creditDungeonReward(wsForChar(memberCharId)||DUNGEON_OFFLINE_WS,{charId:memberCharId,userId:member.userId},rollDungeonTrashLoot(mob.lvl,member.cls));
-            }
-          }
-          if(p.charId&&mob.type)creditBestiaryKill(p.charId,mob.type).catch(err=>console.error('bestiary_credit_error',err.message));
+          dungeonHandleMobDeath(state,mob,now,p.charId);
         }else if(mob.type){
           const stats=mobStats(mob.type,mob.lvl,mob.boss,mob.k);
           if(stats){
@@ -3463,6 +3762,7 @@ setInterval(()=>{
   for(const [charId,runtime] of characterRuntime)if(now-runtime.savedAt>30*60*1000)characterRuntime.delete(charId);
   dungeonCleanupTick();
   dungeonQueueTick();
+  aiTick();
 },1000).unref();
 
 setInterval(()=>{
@@ -3642,7 +3942,11 @@ function stepGoblin(mob, dt, present) {
 }
 // Dano global de monstro e aplicado no runtime do servidor; o cliente so
 // renderiza o HP final. O atraso de projetil revalida sessao/mapa/alvo.
-function hitTarget(target, mob, dmg) { if (!target) return null;const [ws,p]=target;if(clients.get(ws)!==p||p.map!==mob.map||p.dead)return null;const result=applyGlobalPlayerDamage(p,dmg);if(result)send(ws,{type:'mob_hit',map:mob.map,mobId:mob.id,dmg:result.damage,hp:result.hp,maxHp:result.maxHp,dead:result.dead,respawnAt:result.respawnAt});return result; }
+// Fase 5.16: IA tambem pode ser alvo de mob de campo -- combate de
+// verdade nos dois sentidos (aiEntities.get(p.id)===p confirma que e a
+// MESMA instancia de IA viva, mesmo espirito do clients.get(ws)!==p
+// pra jogador real). Nunca manda `send()` -- IA nao tem socket.
+function hitTarget(target, mob, dmg) { if (!target) return null;const [ws,p]=target;if(p.kind==='ai'){if(aiEntities.get(p.id)!==p||p.map!==mob.map||p.dead)return null;return applyGlobalPlayerDamage(p,dmg)}if(clients.get(ws)!==p||p.map!==mob.map||p.dead)return null;const result=applyGlobalPlayerDamage(p,dmg);if(result)send(ws,{type:'mob_hit',map:mob.map,mobId:mob.id,dmg:result.damage,hp:result.hp,maxHp:result.maxHp,dead:result.dead,respawnAt:result.respawnAt});return result; }
 function delayedHit(target, mob, dmg, delayMs) { if (target) setTimeout(() => hitTarget(target,mob,dmg),delayMs).unref(); }
 
 // ===== Fase 2, unidades 3-12: os 10 tipos restantes =====
@@ -4185,7 +4489,10 @@ function tickMobAI() {
   mobAiLastTick = now;
   const slices = Math.max(1, Math.ceil(elapsed / .05)), dt = elapsed / slices;
   for (const state of maps.values()) {
-    const present = playersOnMap(state.id);
+    // Fase 5.16: IA presente no mapa tambem conta como "gente pra
+    // mirar" -- mob reage/persegue/ataca IA igual a um jogador real,
+    // nunca uma entidade fantasma que so bate e nunca apanha.
+    const present = playersOnMap(state.id).concat(aiPresentOnMap(state.id));
     if (!present.length) continue;
     const moved = [];
     for (const mob of state.mobs.values()) {
@@ -4238,6 +4545,11 @@ module.exports = {
   ADMIN_PERMS, adminHasPerm, sanitizeAuditMetadata, activeAmong, resolveAdmin, kickUserSockets,
   // Fase 5.15 -- Portal Publico:
   publicCache,
+  // Fase 5.16 -- Aventureiros IA (nucleo puro + runtime em memoria, nunca Supabase):
+  aiEntities, aiSpawnEntity, aiDespawnEntity, aiPopulationTick, aiStep, aiTick,
+  aiPublicPlayer, aiPresentOnMap, buildAiSave, buildAiCombat, aiZoneLevelRange,
+  aiPersonalityProfile, aiSpawnAnchor, dungeonHandleMobDeath, aiDoCombat, aiDoIdle, aiDoHunt,
+  AI_MAX_POPULATION, AI_FIELD_ZONES, AI_CLASS_POOL, aiEnabled,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):

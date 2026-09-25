@@ -3530,8 +3530,13 @@ function drawRemote(p){
     }
     ctx.restore();
   }
-  ctx.font='700 13px "Pixelify Sans",ui-monospace,monospace';ctx.textAlign='center';ctx.lineWidth=3;ctx.strokeStyle='#15100b';ctx.fillStyle='#8ee8ff';
-  const label=p.name+' · Lv '+p.lvl;ctx.strokeText(label,p.x,p.y-fh-7);ctx.fillText(label,p.x,p.y-fh-7);
+  ctx.font='700 13px "Pixelify Sans",ui-monospace,monospace';ctx.textAlign='center';ctx.lineWidth=3;ctx.strokeStyle='#15100b';
+  // Fase 5.16: indicador discreto pra Aventureiro IA -- reusa 100% do
+  // mesmo desenho de jogador remoto (nenhum sprite/codigo novo), so a
+  // cor do rotulo e um sufixo "[IA]" mudam. Nunca falsifica o jogador
+  // como humano nem some do rotulo -- transparencia sempre visivel.
+  ctx.fillStyle=p.kind==='ai'?'#c9a6ff':'#8ee8ff';
+  const label=p.name+' · Lv '+p.lvl+(p.kind==='ai'?' [IA]':'');ctx.strokeText(label,p.x,p.y-fh-7);ctx.fillText(label,p.x,p.y-fh-7);
 }
 function drawSlime(s){
   const fw=SPR.slime.fw,fh=SPR.slime.fh,col=Math.floor(s.anim*5)%3,sc=SLIME_STATS[s.lvl].sc;
