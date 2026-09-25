@@ -2314,24 +2314,40 @@ const DUNGEON_IDLE_MS = 30 * 60 * 1000, DUNGEON_MAX_LIFE_MS = 2 * 60 * 60 * 1000
 // vez de inventar um tier de elite novo (fora do escopo desta fase, que e
 // so mapa/colisao/posicionamento -- ver LEIA-PRIMEIRO.md "Fase 5.13").
 const DUNGEON_ROOM_MOB_COUNTS = { sala1: [2, 3], sala2: [4, 6], sala3: [3, 4], sala4: [5, 7], sala5: [2, 2] };
-function createDungeonInstance(zone, ownerCharId, ownerUserId) {
+// Fase 5.13.1 -- Dungeon em Party: nucleo real de criacao de instancia,
+// aceita 1 a 4 membros reais (nunca confia em memberIds do cliente --
+// quem chama isto ja resolveu cada membro via activeCharacterForUser +
+// validou o desbloqueio real no banco, ver handleDungeonEnter).
+// createDungeonInstance(zone,charId,userId) continua existindo com a
+// MESMA assinatura de sempre (usada por todos os testes/chamadas solo
+// existentes) -- e so um wrapper fino sobre esta funcao com 1 membro.
+function buildDungeonInstance(zone, members) {
   const cfg = DUNGEON_CFG[zone];
-  if (!cfg) return null;
+  if (!cfg || !Array.isArray(members) || !members.length) return null;
   const seed = crypto.randomInt(1, 2147483647); // servidor escolhe -- cliente nunca influencia o layout/loot
   const layout = DUNGEON_GEN.dungeonLayout(seed);
   const instanceId = crypto.randomBytes(4).toString('hex');
   const mapId = zone + '_d#' + instanceId;
   const state = mapState(mapId);
+  const scale = DUNGEON_GEN.dungeonScaleFor(members.length);
+  const memberMap = new Map(members.map(m => [m.charId, {
+    userId: m.userId, cls: m.cls || 'guerreiro', online: true, joinedAt: Date.now(),
+    damageDone: 0, lastActivityAt: Date.now(),
+  }]));
   Object.assign(state, {
-    isDungeon: true, zone, seed, layout, ownerCharId, ownerUserId,
-    members: new Set([ownerCharId]), bossDefeated: false, bossId: null,
+    // ownerCharId/ownerUserId preservados (primeiro membro real) -- usados
+    // por dungeonCleanupTick e por qualquer codigo antigo que ainda
+    // espere um "dono" unico; members e sempre a fonte real de verdade.
+    isDungeon: true, zone, seed, layout, ownerCharId: members[0].charId, ownerUserId: members[0].userId,
+    members: memberMap, scale, bossDefeated: false, bossId: null,
     createdAt: Date.now(), lastActiveAt: Date.now(),
   });
   // Fase 5.13: roster distribuido por SALA NOMEADA (layout fixo), nao
   // mais por chance-por-celula de uma grade uniforme -- mesma fonte de
   // tipo/nivel por mob (cfg.trash via mobStats), so a distribuicao
   // espacial mudou. rnd() continua o mesmo stream mulberry(seed+1),
-  // determinístico por instancia.
+  // determinístico por instancia. Fase 5.13.1: HP escalado por `scale`
+  // (numero real de participantes) -- nunca mexe no dano do jogador.
   const rnd = DUNGEON_GEN.mulberry(seed + 1);
   let idx = 0;
   for (const roomId of layout.mobRooms) {
@@ -2344,14 +2360,18 @@ function createDungeonInstance(zone, ownerCharId, ownerUserId) {
       if (!stats) continue;
       const pt = DUNGEON_GEN.roomRandomPoint(room, rnd);
       const id = mapId + ':' + (idx++);
-      state.mobs.set(id, {id,maxhp:stats.hp,hp:stats.hp,dead:false,x:pt.x,y:pt.y,sx:pt.x,sy:pt.y,state:'idle',respawnAt:0,boss:false,type:pick.type,lvl:pick.lvl,k:pick.k,dun:true,wallRects:layout.rects});
+      const hp = Math.round(stats.hp * scale);
+      state.mobs.set(id, {id,maxhp:hp,hp,dead:false,x:pt.x,y:pt.y,sx:pt.x,sy:pt.y,state:'idle',respawnAt:0,boss:false,type:pick.type,lvl:pick.lvl,k:pick.k,dun:true,wallRects:layout.rects});
     }
   }
-  const bp = cfg.boss, bstats = mobStats(bp.type, bp.lvl, true, bp.k), bossHp = bstats ? Math.round(bstats.hp * 3) : 1000;
+  const bp = cfg.boss, bstats = mobStats(bp.type, bp.lvl, true, bp.k), bossHp = bstats ? Math.round(bstats.hp * 3 * scale) : 1000;
   const bossId = mapId + ':boss', bc = layout.boss;
   state.mobs.set(bossId, {id:bossId,maxhp:bossHp,hp:bossHp,dead:false,x:bc.x,y:bc.y,sx:bc.x,sy:bc.y,state:'idle',respawnAt:0,boss:true,type:bp.type,lvl:bp.lvl,k:bp.k,dun:true,wallRects:layout.rects});
   state.bossId = bossId;
   return state;
+}
+function createDungeonInstance(zone, ownerCharId, ownerUserId) {
+  return buildDungeonInstance(zone, [{charId: ownerCharId, userId: ownerUserId}]);
 }
 // Instancias que o personagem (charId) ja possui, por zona -- pra
 // reconexao/revisita reusar a MESMA instancia (mob morto continua morto)
@@ -2380,8 +2400,17 @@ function dungeonCleanupTick() {
     const idleFor = now - state.lastActiveAt, ageFor = now - state.createdAt;
     if (idleFor > DUNGEON_IDLE_MS || ageFor > DUNGEON_MAX_LIFE_MS) {
       maps.delete(mapId);
-      const owned = dungeonByOwner.get(state.ownerCharId);
-      if (owned && owned.get(state.zone) === mapId) owned.delete(state.zone);
+      // Fase 5.13.1: limpa dungeonByOwner de TODOS os membros reais da
+      // instancia (nao so o antigo "dono" unico) -- senao um membro que
+      // nao seja o primeiro da lista ficaria com uma entrada travada
+      // apontando pra um mapId que ja nao existe mais (nao quebra nada --
+      // ownedDungeonInstance ja se protege contra isso -- mas cresceria
+      // sem limite com o tempo).
+      const memberIds = state.members ? [...state.members.keys()] : [state.ownerCharId];
+      for (const charId of memberIds) {
+        const owned = dungeonByOwner.get(charId);
+        if (owned && owned.get(state.zone) === mapId) owned.delete(state.zone);
+      }
     }
   }
 }
@@ -2498,6 +2527,21 @@ async function handleWsJoin(ws, msg) {
     // cria instancia nova, nunca muda de time).
     const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);
     if(tvtMember&&tvtMember.userId===p.userId&&tvtInstance.state!=='ended'){tvtMember.online=true;p.map=tvtInstance.mapId;p.x=tvtMember.x;p.y=tvtMember.y;send(ws,{type:'tvt_enter',mapId:tvtInstance.mapId,team:tvtMember.team,spawn:{x:p.x,y:p.y},scoreLimit:tvtInstance.scoreLimit,expiresAt:tvtInstance.expiresAt,reconnect:true});send(ws,TVT.publicTvtState(tvtInstance))}
+    // Fase 5.13.1: mesma reconexao de World Boss/TvT -- mesmo userId+charId
+    // volta pra MESMA instancia de masmorra (solo ou party), nunca cria
+    // outra. dungeonByOwner pode ter mais de uma zona registrada pro
+    // mesmo personagem (visitas antigas ja limpas por dungeonCleanupTick),
+    // entao procura a que ainda estiver realmente viva.
+    if(p.charId){
+      const dOwned=dungeonByOwner.get(p.charId);
+      if(dOwned)for(const[dZone,dMapId]of dOwned){
+        const dState=maps.get(dMapId);
+        if(!dState||!dState.isDungeon)continue;
+        const dMember=dState.members.get(p.charId);
+        if(dMember&&dMember.userId===p.userId){dMember.online=true;dState.lastActiveAt=Date.now();p.map=dState.id;sendDungeonStateTo(ws,dState,{reconnect:true})}
+        break;
+      }
+    }
     broadcast({type:'player_join', player:publicPlayer(p)}, ws);
   } finally { joining.delete(ws); }
 }
@@ -2510,27 +2554,108 @@ const DUNGEON_UNLOCK_QUEST = { floresta: 3, cripta: 7, serra: 11, pantano: 15, t
 // local. Valida sessao (p.authed), confere o requisito real (quest OU
 // portal comprado, lido do banco -- nunca do que o cliente reivindica) e
 // so entao cria/reusa a instancia e muda p.map pra ela.
+// Acha o socket ATUAL de um charId (se online agora) -- mesmo padrao de
+// busca linear em `clients` ja usado por sendToWorldBossMember etc.
+function wsForChar(charId) {
+  for (const [ws2, p2] of clients) if (p2.charId === charId) return ws2;
+  return null;
+}
+// ws "morto" -- send() so checa readyState, entao isto deixa qualquer
+// funcao que manda mensagem pra um membro OFFLINE (ex.: creditDungeonReward
+// pra quem esta desconectado no momento da recompensa) rodar sem erro,
+// simplesmente sem entregar nada (a persistencia no banco acontece do
+// mesmo jeito -- so a notificacao em tempo real e que nao tem quem receba).
+const DUNGEON_OFFLINE_WS = Object.freeze({ readyState: 3 });
+// Fase 5.13.1: elegibilidade de recompensa por contribuicao real -- nunca
+// exige kill (o membro pode nunca ter desferido o golpe final em nada e
+// ainda assim ser elegivel por ter causado dano real em outros mobs, ou
+// por estar ativo recentemente). Mesmo espirito de isTvtEligible (Fase
+// 5.7): dano>0 OU atividade dentro da janela.
+const DUNGEON_ELIGIBLE_IDLE_MS = 90 * 1000;
+function dungeonMemberEligible(member, now) {
+  if (!member) return false;
+  if (member.damageDone > 0) return true;
+  return (now - member.lastActivityAt) < DUNGEON_ELIGIBLE_IDLE_MS;
+}
+function dungeonRosterPayload(state) {
+  return [...state.mobs.values()].map(m => ({id:m.id, type:m.type, lvl:m.lvl, k:m.k, boss:!!m.boss, x:Math.round(m.x), y:Math.round(m.y), maxhp:m.maxhp, hp:m.hp, dead:!!m.dead}));
+}
+function sendDungeonStateTo(ws, state, extra) {
+  send(ws, Object.assign({type:'dungeon_state', map:state.id, zone:state.zone, seed:state.seed, start:state.layout.start, roster:dungeonRosterPayload(state), bossDefeated:state.bossDefeated}, extra||{}));
+}
+// Fase 5.13.1: entrada agora suporta ate 4 jogadores reais de uma Party
+// (reaproveitando o sistema de Party existente, parties/memberParty --
+// nenhum sistema novo) alem do solo de sempre. So o LIDER da Party
+// consegue iniciar; o servidor resolve quem realmente esta online AGORA
+// com aquele personagem ativo (activeCharacterForUser, mesmo padrao ja
+// usado por registerWorldBossParty) -- nunca confia em memberIds que o
+// cliente mandasse. Cada membro resolvido tem o proprio requisito de
+// desbloqueio validado no banco (nunca herda do lider). Membros que nao
+// estavam online no momento do start simplesmente ficam de fora (late
+// join depois disso nao entra nessa instancia -- por design).
 async function handleDungeonEnter(ws, p, msg) {
   const zone = cleanText(msg.zone, 16);
   const cfg = DUNGEON_CFG[zone];
   if (!cfg) { send(ws, {type:'dungeon_error', error:'Masmorra inválida'}); return; }
   if (!p.authed || !p.userId || !p.charId) { send(ws, {type:'dungeon_error', error:'Entre com uma conta online para acessar masmorras'}); return; }
   try {
-    const rows = await supabase('characters', {query:`?select=save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
-    const row = rows[0];
-    if (!row) { send(ws, {type:'dungeon_error', error:'Personagem não encontrado'}); return; }
-    const save = sanitizeSave(row.save, p.lvl);
-    const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
-    if (!unlocked) { send(ws, {type:'dungeon_error', error:'Região ainda não liberada'}); return; }
-    let state = ownedDungeonInstance(p.charId, zone);
-    if (!state) {
-      state = createDungeonInstance(zone, p.charId, p.userId);
-      rememberDungeonInstance(p.charId, zone, state.id);
+    // Ja pertence a uma instancia ativa dessa zona (solo ou party, criada
+    // por ele ou por outro lider)? Reusa -- reconexao/reenvio de
+    // dungeon_enter nunca duplica instancia.
+    const existing = ownedDungeonInstance(p.charId, zone);
+    if (existing) {
+      const member = existing.members.get(p.charId);
+      if (member && member.userId === p.userId) {
+        member.online = true; existing.lastActiveAt = Date.now(); p.map = existing.id;
+        sendDungeonStateTo(ws, existing); return;
+      }
     }
-    state.lastActiveAt = Date.now();
-    p.map = state.id;
-    const roster = [...state.mobs.values()].map(m => ({id:m.id, type:m.type, lvl:m.lvl, k:m.k, boss:!!m.boss, x:Math.round(m.x), y:Math.round(m.y), maxhp:m.maxhp, hp:m.hp, dead:!!m.dead}));
-    send(ws, {type:'dungeon_state', map:state.id, zone, seed:state.seed, start:state.layout.start, roster, bossDefeated:state.bossDefeated});
+
+    const partyCode = memberParty.get(p.userId);
+    const party = partyCode && parties.get(partyCode);
+    const inRealParty = party && party.members.size > 1;
+    if (inRealParty && party.ownerId !== p.userId) {
+      send(ws, {type:'dungeon_error', error:'Apenas o líder do grupo pode iniciar a masmorra.'}); return;
+    }
+
+    // Resolve membros REAIS: so quem esta online agora com aquele
+    // personagem ativo, nunca o que o cliente afirmar. Solo = so ele mesmo.
+    const candidates = [];
+    if (inRealParty) {
+      for (const userId of party.members.keys()) {
+        const active = activeCharacterForUser(userId);
+        if (active) candidates.push({userId, charId: active.p.charId, cls: active.p.cls, ws: active.ws});
+      }
+    } else {
+      candidates.push({userId: p.userId, charId: p.charId, cls: p.cls, ws});
+    }
+
+    // Valida o desbloqueio de CADA candidato lendo o save real (nunca
+    // confia no que o cliente/estado em memoria diz) -- so quem tem a
+    // regiao liberada de verdade entra.
+    const validMembers = [];
+    for (const c of candidates) {
+      try {
+        const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(c.charId)}&user_id=eq.${encodeURIComponent(c.userId)}&limit=1`});
+        const row = rows[0]; if (!row) continue;
+        const save = sanitizeSave(row.save, row.lvl);
+        const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
+        if (unlocked) validMembers.push(c);
+      } catch (err) { console.error('dungeon_member_check_error', c.charId, err.message); }
+    }
+    if (!validMembers.length) { send(ws, {type:'dungeon_error', error: inRealParty ? 'Nenhum jogador do grupo tem essa região liberada.' : 'Região ainda não liberada'}); return; }
+    if (inRealParty && !validMembers.some(m => m.charId === p.charId)) {
+      // o proprio lider (quem pediu) nao esta liberado -- o grupo todo fica de fora dessa tentativa.
+      send(ws, {type:'dungeon_error', error:'Você ainda não liberou essa região.'}); return;
+    }
+
+    const state = buildDungeonInstance(zone, validMembers.map(m => ({charId:m.charId, userId:m.userId, cls:m.cls})));
+    if (!state) { send(ws, {type:'dungeon_error', error:'Não foi possível criar a instância.'}); return; }
+    for (const m of validMembers) {
+      rememberDungeonInstance(m.charId, zone, state.id);
+      const memberWs = m.ws || wsForChar(m.charId);
+      if (memberWs) { const memberP = clients.get(memberWs); if (memberP) memberP.map = state.id; sendDungeonStateTo(memberWs, state, inRealParty && validMembers.length > 1 ? {party:true} : undefined); }
+    }
   } catch (err) {
     console.error('dungeon_enter_error', err.message, err.status || '', err.detail || '');
     send(ws, {type:'dungeon_error', error:'Não foi possível entrar na masmorra. Tente novamente.'});
@@ -2698,6 +2823,12 @@ wss.on('connection', ws => {
       if(!dmg)return;
       state.hitGuard.set(mobId,{playerId:p.id,at:now});
       mob.hp=Math.max(0,mob.hp-dmg);
+      // Fase 5.13.1: registra contribuicao real de QUEM bateu (dano
+      // somado + ultima atividade) -- usado so pra elegibilidade de
+      // recompensa em grupo (dungeonMemberEligible), nunca pra alterar
+      // dano/HP/placar. Sem efeito em masmorra solo (so 1 membro, sempre
+      // elegivel de qualquer forma).
+      if(state.isDungeon){const selfMember=state.members.get(p.charId);if(selfMember){selfMember.damageDone+=dmg;selfMember.lastActivityAt=now}}
       if(mob.hp<=0){
         mob.dead=true;
         // Mob de masmorra nunca respawna dentro da instancia (mesmo
@@ -2710,11 +2841,24 @@ wss.on('connection', ws => {
           // recompensa uma vez (mob.dead sincrono antes de qualquer await
           // ja evita reentrancia pro MESMO mob; state.bossDefeated é uma
           // segunda trava explicita, mais facil de auditar/testar).
+          // Fase 5.13.1: LOOT INDIVIDUAL -- cada membro elegivel da
+          // instancia (nunca so quem desferiu o golpe final) recebe seu
+          // proprio roll independente, com o proprio cls (nao o de quem
+          // bateu) e proprio charId/userId (nunca duplica, cada
+          // creditDungeonReward ja e um withCharLock+PATCH atomico
+          // separado por personagem). Offline recebe do mesmo jeito (fica
+          // salvo no banco), so nao ve a mensagem em tempo real.
           if(mob.boss&&!state.bossDefeated){
             state.bossDefeated=true;
-            creditDungeonReward(ws,p,rollDungeonBossLoot(p.cls,mob.lvl));
+            for(const[memberCharId,member]of state.members){
+              if(!dungeonMemberEligible(member,now))continue;
+              creditDungeonReward(wsForChar(memberCharId)||DUNGEON_OFFLINE_WS,{charId:memberCharId,userId:member.userId},rollDungeonBossLoot(member.cls,mob.lvl));
+            }
           }else if(!mob.boss){
-            creditDungeonReward(ws,p,rollDungeonTrashLoot(mob.lvl,p.cls));
+            for(const[memberCharId,member]of state.members){
+              if(!dungeonMemberEligible(member,now))continue;
+              creditDungeonReward(wsForChar(memberCharId)||DUNGEON_OFFLINE_WS,{charId:memberCharId,userId:member.userId},rollDungeonTrashLoot(mob.lvl,member.cls));
+            }
           }
           if(p.charId&&mob.type)creditBestiaryKill(p.charId,mob.type).catch(err=>console.error('bestiary_credit_error',err.message));
         }else if(mob.type){
@@ -2802,6 +2946,11 @@ wss.on('connection', ws => {
     // pertencendo a instancia; reconectar com o mesmo userId/charId acha
     // ela de novo em handleWsJoin.
     const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);if(tvtMember)tvtMember.online=false;
+    // Fase 5.13.1: desconectar nao termina a masmorra nem afeta quem mais
+    // esta dentro -- so marca esse membro offline (mesma regra de
+    // World Boss/TvT). Reconectar acha a mesma instancia de novo (ver
+    // bloco de reconexao em handleWsJoin).
+    if(p.charId){const dOwned=dungeonByOwner.get(p.charId);if(dOwned)for(const dMapId of dOwned.values()){const dState=maps.get(dMapId);const dMember=dState&&dState.members.get(p.charId);if(dMember){dMember.online=false;break}}}
     clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
 });
 
@@ -3582,6 +3731,8 @@ module.exports = {
   sanitizeItem, sanitizeSave, lockOwnedItems, createGear, dedupeByUid, typeSlot, CLASS_ITEM_TYPES, EQ_SLOTS, GEAR_DATA,
   // Fase 5.2 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   startingSave, ECONOMY_LOCK_FIELDS, createDungeonInstance, dungeonCleanupTick,
+  // Fase 5.13.1 -- masmorra em party (nucleo puro, sem HTTP/WS/Supabase):
+  buildDungeonInstance, dungeonMemberEligible, DUNGEON_ELIGIBLE_IDLE_MS,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):
