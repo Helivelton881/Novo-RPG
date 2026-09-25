@@ -2987,6 +2987,9 @@ const stage=$('#stage'),ctx=stage.getContext('2d');
 const REMOTE=new Map();
 const RPROJ=[];
 let NET=null,NET_ID=null,NET_SESSION='',NET_MAP='',netSendT=0,netRetry=0;
+// Efemero por carregamento de pagina: distingue uma reconexao desta mesma
+// aba de outra aba/aparelho. Nao e credencial e nunca vai para storage.
+const CLIENT_INSTANCE_ID=(()=>{const b=new Uint8Array(16);crypto.getRandomValues(b);return Array.from(b,x=>x.toString(16).padStart(2,'0')).join('')})();
 // Hotfix 5.12.1: quando o servidor manda 'session_replaced' (a MESMA conta
 // entrou com o mesmo personagem em outro aparelho), o antigo socket nunca
 // pode tentar reconectar -- senao as duas maquinas ficam roubando a sessao
@@ -2998,6 +3001,7 @@ function showSessionReplacedModal(){
   running=false;
   const m=$('#sessionReplacedModal');if(m)m.classList.add('on');
 }
+function netCloseDisposition(code,replaced){return replaced||code===4001?'replaced':code===4003?'banned':'reconnect'}
 let EVENT_STATE=null,EVENT_CLOCK_OFFSET=0,WB_STATE=null;
 let IN_TVT=false,TVT_STATE=null,TVT_TEAM=null;
 let GUILD_STATE=false,GUILD_INVITES={incoming:[],outgoing:[]},GUILD_SEARCH=[],GUILD_SEARCH_Q='',GUILD_CHAT=[],guildUiTimer=0;
@@ -3078,15 +3082,15 @@ function netApplyMob(u,killerId){
 function netConnect(){
   if(!started||!CUR_CHAR||NET&&NET.readyState<2)return;
   const proto=location.protocol==='https:'?'wss:':'ws:';
-  NET=new WebSocket(proto+'//'+location.host+'/game');netLabel('Conectando...',false);
+  const ws=new WebSocket(proto+'//'+location.host+'/game');NET=ws;netLabel('Conectando...',false);
   // Fase 5.2: manda o token de sessao real junto do join -- o servidor
   // autentica (resolveUserByToken + confere ownership do charId) e passa a
   // ser a fonte de verdade de userId/charId/cls/lvl; o que mandamos aqui
   // pra esses 4 campos so importa pra visita anonima (sem token = sem
   // conta, comportamento de sempre). Reconectar (netConnect chamado de
   // novo no onclose) sempre manda um join novo, reautenticando do zero.
-  NET.onopen=()=>{netRetry=0;NET.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined,charId:(CUR_CHAR&&CUR_CHAR.id)||undefined,token:authToken()||undefined}))};
-  NET.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch(err){return}
+  ws.onopen=()=>{if(NET!==ws)return;netRetry=0;ws.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined,charId:(CUR_CHAR&&CUR_CHAR.id)||undefined,token:authToken()||undefined,clientInstanceId:CLIENT_INSTANCE_ID}))};
+  ws.onmessage=e=>{if(NET!==ws)return;let m;try{m=JSON.parse(e.data)}catch(err){return}
     if(m.type==='welcome'){NET_ID=m.id;NET_SESSION=m.sessionKey||'';if(Number.isFinite(m.hp))P.hp=m.hp;if(Number.isFinite(m.maxHp))P.maxhp=m.maxHp;P.dead=!!m.dead;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel((REMOTE.size+1)+' online',true);netJoinMap()}
     else if(m.type==='event_state'){EVENT_STATE=m;EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(scrOpen==='events')renderScr()}
     else if(m.type==='event_announcement'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();chatAdd('Sistema',m.message,true);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.message)}
@@ -3167,6 +3171,7 @@ function netConnect(){
       // novo (ver botao abaixo).
       sessionReplaced=true;
       clearTimeout(netRetry);
+      const t=$('#sessionReplacedText');if(t)t.textContent='Sua sessão foi substituída por outra conexão.';
       showSessionReplacedModal();
     }
     else if(m.type==='banned'){
@@ -3202,14 +3207,22 @@ function netConnect(){
       if(m.dropLost)toast('Mochila cheia — equipamento '+GEAR_DATA.RARITY[m.dropLost.rarity].label+' não foi coletado.');
     }
   };
-  NET.onclose=(ev)=>{
+  ws.onclose=(ev)=>{
+    // Callback de socket obsoleto: uma conexao mais nova ja e a dona de
+    // todo estado global. O socket antigo nao limpa estado nem reconecta.
+    if(NET!==ws)return;
     NET_ID=null;NET_SESSION='';NET_MAP='';REMOTE.clear();
-    if(sessionReplaced){netLabel('Sessão encerrada',false);return} // Hotfix 5.12.1: nunca reconecta nesse caso
+    const disposition=netCloseDisposition(ev&&ev.code,sessionReplaced);
+    if(disposition==='replaced'){
+      sessionReplaced=true;clearTimeout(netRetry);
+      const t=$('#sessionReplacedText');if(t)t.textContent='Sua sessão foi substituída por outra conexão.';
+      netLabel('Sessão encerrada',false);showSessionReplacedModal();return;
+    }
     // Fase 5.16 (achado na revisao pre-merge): rede de seguranca pelo
     // codigo de fechamento -- mesmo que a mensagem 'banned' tenha se
     // perdido numa corrida entre o send() do servidor e o close(), o
     // codigo 4003 sozinho ja e suficiente pra nunca reconectar um banido.
-    if(ev&&ev.code===4003){
+    if(disposition==='banned'){
       sessionReplaced=true;
       const t=$('#sessionReplacedText');
       if(t)t.textContent='Sua conta foi banida.';
@@ -3218,7 +3231,7 @@ function netConnect(){
     }
     netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500);
   };
-  NET.onerror=()=>NET.close();
+  ws.onerror=()=>{if(NET!==ws)return;ws.close()};
 }
 // W_.netMap (Fase 5.2): id de mapa que o SERVIDOR conhece pra masmorra --
 // `<zona>_d#<instancia>`, diferente de W_.name (que continua `<zona>_d`,

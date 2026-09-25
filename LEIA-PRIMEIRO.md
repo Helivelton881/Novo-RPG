@@ -1708,3 +1708,11 @@ Reduzir o cap não mata combate: cada population tick remove gradualmente no má
 A aba **Living World** em `admin.html` atualiza aproximadamente a cada 5 segundos e mostra humanos, campo/cap, Dungeon, TvT, total, mapas, FSM e a tabela runtime (nome, classe, nível, mapa, HP, tipo e ID abreviado). Alterações ficam ocultas para cargos read-only e o botão de despawn em massa exige confirmação visual.
 
 `test/living-world-admin.test.js` cobre matriz RBAC, defaults/hard limits, migration/RLS, pause/resume, caps global e por mapa, toggles independentes, isolamento de Dungeon/TvT em despawn/rebalance, status, auditoria e ausência de caminhos de economia. A serialização é por processo Node; uma futura escala horizontal com múltiplas instâncias exigiria lock/transação no banco. Rebalance converge numa chamada, mas somente com entidades seguras; uma IA em combate fica onde está até sair de combate.
+
+# HOTFIX — SESSION_REPLACED / LOOP DE RECONEXÃO
+
+O close WebSocket `4001` agora é terminal por si só: mesmo se a mensagem `session_replaced` se perder antes do fechamento, o cliente cancela retry, para o jogo e mostra “Sua sessão foi substituída por outra conexão.” Close `4003` continua terminal para ban; queda normal, inclusive `1006`, continua reconectando.
+
+`netConnect` captura cada WebSocket em `ws` e todos os quatro callbacks (`open`, `message`, `close`, `error`) ignoram eventos quando `NET !== ws`. Assim, um socket antigo nunca limpa IDs/REMOTE, agenda retry ou abre modal depois que uma conexão nova assumiu.
+
+Cada carregamento da página gera um `CLIENT_INSTANCE_ID` criptograficamente aleatório, somente em memória, enviado no `join`. Ele não vai para `localStorage` e não autentica nada. O servidor aceita apenas 16–80 caracteres alfanuméricos/`_`/`-`: mesmo ID significa reconnect da própria aba (socket antigo fecha silenciosamente em `4000`); ID diferente significa outra aba/aparelho (mensagem + `4001`). O log `session_replace` contém somente `charId`, IDs runtime das conexões e `sameClientInstance`, nunca token/sessionKey/senha. As sessões de autenticação existentes não são apagadas por este hotfix.
