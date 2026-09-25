@@ -1811,3 +1811,41 @@ O teste que proibia ramificação (`'sequencia de conexoes forma um unico caminh
 A validação ao vivo usou um servidor local sem Supabase configurado (`window.__G.buildMasmorra` direto, sem WebSocket/autenticação real) — não foi possível reproduzir uma entrada 100% real via `dungeon_enter` autenticado nesta sessão (consulta a dados reais de produção foi bloqueada pelo classificador de auto mode como leitura sensível de produção, corretamente). A geometria/colisão e o pipeline de renderização testados são exatamente os mesmos usados no fluxo real (mesma `buildMasmorra`, mesmo `DUNGEON_GEN`), então a confiança é alta, mas uma validação manual final por um jogador real em produção continua recomendada — ver relatório final da Fase 5.16.3.
 
 Fidelidade à referência pintada é necessariamente parcial: sem motor de iluminação real (sombras projetadas, gradientes suaves, reflexos), o resultado é a melhor aproximação de ATMOSFERA (luz quente, paredes grossas, sala do chefe marcante) dentro de um motor de sprites de canvas com sombreamento chapado — não uma reprodução pixel a pixel. Alguns elementos do guia de arte não têm equivalente procedural pronto no jogo (teias de aranha, correntes, urnas, caixotes distintos de barril) e foram conscientemente omitidos em vez de inventar arte nova fora do padrão "reusa o que já existe" desta fase.
+
+# FASE 5.16.4 — LIVING WORLD: MOVIMENTO NATURAL + COMBATE FLUIDO
+
+Relato de produção: Aventureiros IA "andando como se estivessem teleportando", ataque "parece travado". Investigação começou observando o WebSocket bruto ao vivo (produção, depois reproduzido localmente contra o `setInterval` real de `server.js`) antes de qualquer mudança de código, medindo em vez de assumir.
+
+## Bug real 1 — IA congelava pra sempre (não era só "sem interpolação")
+
+Medindo o WebSocket bruto contra produção por 30s: as 13 IA ativas mostraram posição **idêntica** em todas as mensagens `state` (uma por segundo, cadência confirmada). Reproduzido localmente rodando o `setInterval` real de `aiTick` (não uma simulação síncrona) por 4 minutos com 40 IA: **22 de 40 travadas** após 60s, todas em `fsm:'wander'`, todas a 1–4px do próprio `wanderTarget`.
+
+Causa raiz: `aiMoveToward` devolve um contrato "`<=0` significa chegou" (`aiDoWander` decide sair do wander checando `remain<=0`), mas o ramo "já perto o bastante" (`dist<4`) devolvia a distância residual **positiva** (`return dist`) em vez de `0`. Uma vez que a distância restante de uma fiada de movimento caía abaixo de 4px — algo que acontece naturalmente com bastante frequência dado `AI_MOVE_SPEED=85` e alvos aleatórios — `aiDoWander` nunca via `remain<=0`, nunca transicionava pra `idle`, e como esse mesmo ramo também nunca atualiza `x`/`y` (só marca `moving=false`), a IA ficava parada ali pra sempre. `aiDoHunt`/`aiDoRetreat` não são afetados (não usam o valor de retorno).
+
+Corrigido com uma mudança de uma linha (`return 0`) e confirmado com o mesmo teste de 4 minutos: **0 de 40 travadas em todos os checkpoints** (60/120/180/240s).
+
+## Bug real 2 — ataque nunca animava (não era "atraso", era ausência total)
+
+`ai.atkT`/`ai.atkAng` nunca eram escritos em lugar nenhum do código-fonte — `aiPublicPlayer` sempre mandava `atkT:0`. Como `drawRemote` só ativa a animação de ataque quando `atkT>0`, nenhuma IA jamais mostrou uma animação de golpe. "Ataque parece travado" era literal.
+
+Solução (arquitetura pedida explicitamente): em vez de depender do snapshot periódico de posição (que só mostraria um único frame congelado por segundo mesmo que `atkT` fosse setado ali), `aiDoCombat` agora emite um evento dedicado `ai_attack` (`id`, `map`, `angle`) no instante exato de cada golpe bem-sucedido. O cliente toca a animação inteira **localmente** a partir desse gatilho (`atkT=.3`, decaído frame a frame em `netLockRemote`), nunca dependendo de receber múltiplos pacotes durante os 0.3s do golpe. Dano continua 100% resolvido no servidor via `mob_state`/`mob_hit` de sempre — o evento é só visual, nunca carrega `dmg`/`hp`.
+
+## Interpolação de movimento client-side (mesmo padrão já usado pra mobs)
+
+`netLockMobs` já implementava exatamente o padrão pedido (`serverX`/`serverY` autoritativo vs `x`/`y` de render, `k=1-exp(-18*dt)`, snap em saltos >240px) — só nunca tinha sido aplicado a jogador remoto/Aventureiro IA. `applyRemoteUpdate` (substitui o `REMOTE.set(id, Object.assign(...))` direto) agora separa autoridade de render: entidade nova ou salto grande sempre snapa; movimento normal preserva a posição de render atual pra `netLockRemote` (novo, espelha `netLockMobs`) interpolar suavemente a cada frame. Confirmado ao vivo: amostrando a posição de render a cada 100ms, ela converge gradualmente até cada novo `serverX`/`serverY` ao longo de vários frames — nunca pula.
+
+## Contador simplificado e nome sem sufixo
+
+`netCountsLabel()` volta a mostrar só `"N online"` (pedido explícito do usuário) — nunca mais separa "jogador"/"IA" na interface pública do jogo. `drawRemote` não escreve mais nenhum sufixo identificador no rótulo do nome (só `"Nome · Lv N"`) — a cor sutil por `kind` (lilás/ciano) continua, por não ser texto e nunca ter sido pedida sua remoção. **Nada disso mexeu no Admin** (`/api/admin/living-world`, `/api/admin/dashboard`, `/api/admin/ai` continuam separando humano/IA/Dungeon-IA/TvT-IA) nem no Portal Público — `kind:'ai'` nunca saiu do protocolo/runtime, é usado por economia/Admin/Dungeon/TvT/segurança/rewards exatamente como antes.
+
+`AI_NAME_POOL` ampliado de 20 pra 40 nomes (inclui os sugeridos: Thoran, Elyra, Valen, Seraph, Draven, Lyanna, Nyra, Theron, Mirella, e mais). `aiPickName()` evita duplicidade simultânea de verdade (confere contra `aiEntities` ativos antes de escolher) — o sufixo numérico (`"Kael43"`) só volta a acontecer se todo o pool de 40 nomes estiver em uso ao mesmo tempo (exigiria a população quase no teto duro de 40).
+
+## Verificação
+
+`node -c server.js`, checagem de sintaxe isolada do `<script>` de `index.html`, `npm test` (616 testes / 439 passando / 0 falhando / 177 pulados) e `git diff --check` confirmados a cada rodada. Numérico/comportamental: extração e execução real (não só inspeção de texto) de `applyRemoteUpdate`/`netLockRemote`/`netCountsLabel` de dentro de `index.html`, cobrindo snap-em-entidade-nova, nunca-snap-em-movimento-normal, snap-em-salto-grande, nunca-corta-animação-de-ataque, interpolação dependente de `dt`, e ausência de qualquer palavra proibida no contador.
+
+**VERIFICADO NO NAVEGADOR** (pane embutido, real contra produção e contra servidor local — extensão Chrome do usuário não estava conectada nesta sessão, relatado explicitamente em vez de assumido): (a) IA congelada reproduzida ao vivo em produção via WebSocket bruto antes de qualquer mudança; (b) fix de congelamento confirmado rodando o `setInterval` real de produção por 4 minutos, 0/40 travadas; (c) interpolação de posição confirmada amostrando a posição de render a cada 100ms — convergência gradual, nunca salto; (d) animação de ataque confirmada — ciclos completos de `atkT` (0.27→0.15→0.07), ângulo correto pro alvo, ~1s entre golpes (cooldown); (e) contador confirmado mostrando `"14 online"` (nunca "jogador"/"IA"); (f) nome confirmado sem sufixo numérico e sem `[IA]` no rótulo, ao vivo.
+
+## Limitações conhecidas
+
+A extensão Claude in Chrome não estava conectada nesta sessão (relatado ao usuário, não contornado) — toda verificação visual usou o navegador embutido (pane), que é automação de navegador real (Chromium), só não é o Chrome pessoal do usuário. Testes de performance formais com população simulada de 10/20/30 (pedidos como item opcional da missão) não foram executados nesta rodada — o teste de 4 minutos com 40 IA (o teto duro do sistema) já rodou sem sinal de degradação (sem erro, sem lag perceptível no `setInterval` de 1s, broadcasts consistentes), mas não mediu CPU/memória/event-loop-lag formalmente.
