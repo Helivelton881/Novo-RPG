@@ -80,6 +80,33 @@ test('Fase 5.16.2 -- map-ID consistency: aiSpawnEntity(zone).map e aiPublicPlaye
   S.aiEntities.clear();
 });
 
+test('Fase 5.16.2 -- IA social da vila: aiSpawnEntity(\'vila\') funciona, respeita VILLAGE_SOCIAL_CAP (separado do fieldWorldCap), e aiPopulationTick mantem a vila povoada sem afetar as zonas de campo', () => {
+  S.aiEntities.clear();
+  for (let i = 0; i < S.VILLAGE_SOCIAL_CAP + 2; i++) S.aiSpawnEntity('vila');
+  assert.equal(S.villageAiEntities().length, S.VILLAGE_SOCIAL_CAP, 'nunca deveria passar do teto social da vila, mesmo pedindo mais que isso');
+  S.aiEntities.clear();
+  for (let i = 0; i < S.VILLAGE_SOCIAL_CAP + 3; i++) S.aiPopulationTick(); // um de cada vez por tick, igual a reposicao de campo -- nunca instantaneo
+  assert.equal(S.villageAiEntities().length, S.VILLAGE_SOCIAL_CAP, 'aiPopulationTick deveria povoar a vila ate o teto ao longo de alguns ticks de 1s, sem setInterval novo, e sem nunca passar do teto');
+  for (const ai of S.villageAiEntities()) assert.equal(ai.map, 'vila');
+  S.aiEntities.clear();
+});
+
+test('Fase 5.16.2 -- IA social da vila NUNCA entra em combate: fsm fica restrito a idle/wander/rest mesmo apos muitos ticks (guard de travel bloqueado pra quem mora na vila)', () => {
+  S.aiEntities.clear();
+  const ai = S.aiSpawnEntity('vila');
+  assert.equal(ai.map, 'vila');
+  let now = Date.now();
+  for (let i = 0; i < 500; i++) { now += 1000; S.aiStep(ai, now); assert.ok(['idle','wander','rest'].includes(ai.fsm), `fsm inesperado pra IA social da vila: ${ai.fsm} (nunca deveria sair de idle/wander/rest)`); assert.equal(ai.map, 'vila', 'IA social da vila nunca deveria trocar de mapa (guard de travel)'); }
+  S.aiEntities.clear();
+});
+
+test('Fase 5.16.2 -- aiSpawnAnchor(\'vila\') ancora perto do ponto real de spawn/respawn da vila (720,1258), nunca dentro da area de mobs de campo', () => {
+  for (let i = 0; i < 20; i++) {
+    const a = S.aiSpawnAnchor('vila');
+    assert.ok(Math.hypot(a.x - 720, a.y - 1258) <= 200, 'ancora da vila deveria ficar perto do ponto real de spawn/respawn (720,1258)');
+  }
+});
+
 test('Fase 5.16.2 -- aiSpawnAnchor: ancora perto do centroide dos mobs da zona, nunca num outlier isolado (bias de descobribilidade)', () => {
   S.maps.set('__ai_test_anchor__', {id:'__ai_test_anchor__', mobs:new Map(), hitGuard:new Map()});
   const state = S.maps.get('__ai_test_anchor__');

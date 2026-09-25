@@ -3489,6 +3489,15 @@ function persistLivingWorldConfig(actorUserId,changes) {
 // desligando em runtime dentro do mesmo processo.
 function aiEnabled() { return process.env.AI_ENABLED !== '0'; }
 const AI_FIELD_ZONES = ['floresta','cripta','serra','pantano','torre','ilhas','vulcao']; // nunca vila (hub social, sem mobs) nem masmorra/TvT diretamente (essas sao FILL, ver adiante)
+// Fase 5.16.2: populacao social da Vila -- conceito deliberadamente
+// separado do fieldWorldCap/perMapCap (arquitetura simples: teto fixo
+// proprio, pequeno, nunca configuravel pelo admin como os de campo).
+// So idle/wander/rest (garantido pelo guard em aiDoIdle que impede
+// 'travel' pra fora da vila) -- nunca 'hunt'/'combat' porque a Vila
+// nunca tem mobs (state.mobs.size===0), entao aiDoIdle/aiDoWander nunca
+// encontram alvo pra perseguir.
+const VILLAGE_SOCIAL_CAP = 3;
+const VILLAGE_ANCHOR = {x:720, y:1258}; // mesmo ponto real de spawn/respawn/retorno da vila (ver startingSave/global_respawn/scroll-of-return)
 const AI_CLASS_POOL = [...ALLOWED_CLASS];
 const AI_NAME_POOL = ['Aldric','Branwen','Cedric','Dara','Eamon','Fiora','Gareth','Helka','Ivor','Junia','Kael','Lyra','Milo','Nessa','Orin','Petra','Quill','Rowan','Senna','Talon'];
 const AI_PERSONALITY_KINDS = ['agressivo','cauteloso','equilibrado'];
@@ -3536,10 +3545,11 @@ function buildAiCombat(cls, lvl, name) {
 }
 const aiEntities = new Map(); // aiId -> entity (runtime-only, nunca Supabase)
 function fieldAiEntities(){return[...aiEntities.values()].filter(ai=>!ai.slot&&AI_FIELD_ZONES.includes(ai.map));}
+function villageAiEntities(){return[...aiEntities.values()].filter(ai=>!ai.slot&&ai.map==='vila');}
 function instanceAiCounts(){let dungeon=0,tvt=0;for(const ai of aiEntities.values()){if(ai.slot?.kind==='dungeon')dungeon++;else if(ai.slot?.kind==='tvt')tvt++;}return{dungeon,tvt};}
 function fieldAiCounts(){const counts=Object.fromEntries(AI_FIELD_ZONES.map(z=>[z,0]));for(const ai of fieldAiEntities())counts[ai.map]++;return counts;}
-function isSafeFieldAi(ai){return!!ai&&!ai.slot&&AI_FIELD_ZONES.includes(ai.map)&&['idle','wander','rest'].includes(ai.fsm)&&!ai.dead;}
-function aiRuntimeType(ai){return ai.slot?.kind==='dungeon'?'DUNGEON':ai.slot?.kind==='tvt'?'TVT':'FIELD';}
+function isSafeFieldAi(ai){return!!ai&&!ai.slot&&(AI_FIELD_ZONES.includes(ai.map)||ai.map==='vila')&&['idle','wander','rest'].includes(ai.fsm)&&!ai.dead;}
+function aiRuntimeType(ai){return ai.slot?.kind==='dungeon'?'DUNGEON':ai.slot?.kind==='tvt'?'TVT':ai.map==='vila'?'VILLAGE':'FIELD';}
 function livingWorldStatus(){
   const field=fieldAiEntities(),instances=instanceAiCounts(),perMap=fieldAiCounts(),fsmStates={};
   for(const ai of aiEntities.values())fsmStates[ai.fsm]=(fsmStates[ai.fsm]||0)+1;
@@ -3549,9 +3559,15 @@ function livingWorldStatus(){
     configuredFieldSpawnEnabled:livingWorldConfig.fieldSpawnEnabled,
     dungeonFillEnabled:livingWorldConfig.dungeonFillEnabled,tvtFillEnabled:livingWorldConfig.tvtFillEnabled,
     field:{count:field.length,cap:livingWorldConfig.fieldWorldCap,perMapCap:livingWorldConfig.perMapCap,capReached:field.length>=livingWorldConfig.fieldWorldCap},
+    // Fase 5.16.2: populacao social da vila, visibilidade propria no
+    // diagnostico admin (antes so aparecia diluida em totalAi, sem uma
+    // linha propria -- perMap so cobre AI_FIELD_ZONES de proposito).
+    village:{count:villageAiEntities().length,cap:VILLAGE_SOCIAL_CAP},
     instances,totalAi:aiEntities.size,humanOnline,worldPopulation:humanOnline+aiEntities.size,perMap,fsmStates,
     hardLimits:{fieldWorldCap:FIELD_AI_HARD_MAX,perMapCap:PER_MAP_HARD_MAX},
-    entities:[...aiEntities.values()].map(ai=>({id:ai.id,runtimeId:ai.id,kind:'ai',name:ai.name,cls:ai.cls,lvl:ai.lvl,map:ai.map,fsm:ai.fsm,hp:ai.hp,maxHp:ai.maxHp,dead:ai.dead,slot:ai.slot,type:aiRuntimeType(ai),canDespawn:isSafeFieldAi(ai)})),
+    // x/y adicionados pro diagnostico admin (Fase 5.16.2) -- ja existiam
+    // no runtime, so nunca tinham sido expostos na tabela de entidades.
+    entities:[...aiEntities.values()].map(ai=>({id:ai.id,runtimeId:ai.id,kind:'ai',name:ai.name,cls:ai.cls,lvl:ai.lvl,map:ai.map,x:Math.round(ai.x),y:Math.round(ai.y),fsm:ai.fsm,hp:ai.hp,maxHp:ai.maxHp,dead:ai.dead,slot:ai.slot,type:aiRuntimeType(ai),canDespawn:isSafeFieldAi(ai)})),
   };
 }
 function aiPublicPlayer(ai) {
@@ -3572,6 +3588,7 @@ function aiPublicPlayer(ai) {
 // verdade (mapa de campo continua sem coordenadas de start conhecidas
 // no server, so o cliente sabe), so evita os extremos.
 function aiSpawnAnchor(zone) {
+  if (zone === 'vila') return {x:VILLAGE_ANCHOR.x + (Math.random() * 160 - 80), y:VILLAGE_ANCHOR.y + (Math.random() * 160 - 80)};
   const state = maps.get(zone);
   if (state && state.mobs.size) {
     const mobs = [...state.mobs.values()];
@@ -3584,9 +3601,14 @@ function aiSpawnAnchor(zone) {
   return {x:MOB_WORLD_W * (.3 + Math.random() * .4), y:MOB_WORLD_H * (.3 + Math.random() * .4)};
 }
 function aiSpawnEntity(zone) {
-  if (!AI_FIELD_ZONES.includes(zone)) return null;
-  const field=fieldAiEntities(),counts=fieldAiCounts();
-  if(field.length>=livingWorldConfig.fieldWorldCap||counts[zone]>=livingWorldConfig.perMapCap)return null;
+  const isVillage = zone === 'vila';
+  if (!isVillage && !AI_FIELD_ZONES.includes(zone)) return null;
+  if (isVillage) {
+    if (villageAiEntities().length >= VILLAGE_SOCIAL_CAP) return null;
+  } else {
+    const field=fieldAiEntities(),counts=fieldAiCounts();
+    if(field.length>=livingWorldConfig.fieldWorldCap||counts[zone]>=livingWorldConfig.perMapCap)return null;
+  }
   const cls = AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
   const [lo, hi] = aiZoneLevelRange(zone);
   const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
@@ -3638,13 +3660,22 @@ function rebalanceFieldAi(){
 function aiPopulationTick() {
   if(!aiEnabled())return;
   const field=fieldAiEntities(),counts=fieldAiCounts();
-  if(field.length>livingWorldConfig.fieldWorldCap){despawnFieldAi();return;}
-  const overMap=AI_FIELD_ZONES.find(z=>counts[z]>livingWorldConfig.perMapCap);
-  if(overMap){const candidate=field.find(ai=>ai.map===overMap&&isSafeFieldAi(ai));if(candidate)aiDespawnEntity(candidate.id);return;}
-  if(!livingWorldConfig.fieldSpawnEnabled||field.length>=livingWorldConfig.fieldWorldCap)return;
-  const eligible=AI_FIELD_ZONES.filter(z=>counts[z]<livingWorldConfig.perMapCap);if(!eligible.length)return;
-  const zone = eligible.reduce((min, z) => counts[z] < counts[min] ? z : min, eligible[0]);
-  aiSpawnEntity(zone);
+  if(field.length>livingWorldConfig.fieldWorldCap){despawnFieldAi();}
+  else {
+    const overMap=AI_FIELD_ZONES.find(z=>counts[z]>livingWorldConfig.perMapCap);
+    if(overMap){const candidate=field.find(ai=>ai.map===overMap&&isSafeFieldAi(ai));if(candidate)aiDespawnEntity(candidate.id);}
+    else if(livingWorldConfig.fieldSpawnEnabled&&field.length<livingWorldConfig.fieldWorldCap){
+      const eligible=AI_FIELD_ZONES.filter(z=>counts[z]<livingWorldConfig.perMapCap);
+      if(eligible.length){const zone = eligible.reduce((min, z) => counts[z] < counts[min] ? z : min, eligible[0]); aiSpawnEntity(zone);}
+    }
+  }
+  // Fase 5.16.2: mantem a populacao social da vila separada, no mesmo
+  // tick de 1s (nunca um setInterval novo). Usa o mesmo gate
+  // fieldSpawnEnabled do admin (spawn de campo desligado tambem
+  // desliga a reposicao social -- um unico botao "Living World on/off"
+  // continua controlando tudo, sem uma segunda chave que o admin
+  // precisaria descobrir).
+  if (livingWorldConfig.fieldSpawnEnabled && villageAiEntities().length < VILLAGE_SOCIAL_CAP) aiSpawnEntity('vila');
 }
 function aiTransition(ai, next, now, extra) { ai.fsm = next; ai.fsmUntil = 0; if (extra) Object.assign(ai, extra); }
 function aiMoveToward(ai, tx, ty, speed) {
@@ -3698,8 +3729,12 @@ function aiDoIdle(ai, now) {
   }
   // 'travel' (reatribuicao de zona) so pra IA de campo livre -- nunca
   // pra quem esta preenchendo uma masmorra/TvT (ai.slot), senao ela
-  // abandonaria a instancia no meio da partida.
-  if (!ai.slot && Math.random() < .08) { aiTransition(ai, 'travel', now, {travelZone:AI_FIELD_ZONES[Math.floor(Math.random() * AI_FIELD_ZONES.length)]}); return; }
+  // abandonaria a instancia no meio da partida. Tambem nunca pra IA
+  // social da vila (Fase 5.16.2): o pool de destino e sempre
+  // AI_FIELD_ZONES (zonas de combate) -- sem este guard, uma IA social
+  // ocasionalmente "viajaria" pra fora da vila e entraria em combate,
+  // quebrando a garantia de nunca combate pra esse grupo.
+  if (!ai.slot && AI_FIELD_ZONES.includes(ai.map) && Math.random() < .08) { aiTransition(ai, 'travel', now, {travelZone:AI_FIELD_ZONES[Math.floor(Math.random() * AI_FIELD_ZONES.length)]}); return; }
   aiTransition(ai, 'wander', now, {wanderTargetX:Math.max(0, Math.min(MOB_WORLD_W, ai.x + (Math.random() * 400 - 200))), wanderTargetY:Math.max(0, Math.min(MOB_WORLD_H, ai.y + (Math.random() * 400 - 200)))});
 }
 function aiDoWander(ai, now) {
@@ -4981,6 +5016,7 @@ module.exports = {
   FIELD_AI_HARD_MAX, PER_MAP_HARD_MAX, LIVING_WORLD_DEFAULTS, livingWorldConfig,
   normalizeLivingWorldSettings, applyLivingWorldConfig, loadLivingWorldConfig, persistLivingWorldConfig,
   fieldAiEntities, fieldAiCounts, instanceAiCounts, isSafeFieldAi, despawnFieldAi, rebalanceFieldAi, livingWorldStatus,
+  villageAiEntities, VILLAGE_SOCIAL_CAP, VILLAGE_ANCHOR,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):

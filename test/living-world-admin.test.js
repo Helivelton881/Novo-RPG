@@ -79,6 +79,24 @@ test('status separa campo/instancias/total e expõe FSM sem misturar humano',()=
   assert.equal(d.entities.find(x=>x.runtimeId===field.id).type,'FIELD');assert.equal(d.entities.find(x=>x.runtimeId===dungeon.id).type,'DUNGEON');
 });
 
+test('Fase 5.16.2 -- status expõe a população social da vila separada do campo, com type VILLAGE e x/y no diagnóstico de cada entidade',()=>{
+  S.applyLivingWorldConfig({fieldWorldCap:10,perMapCap:10});
+  const field=S.aiSpawnEntity('floresta'),village=S.aiSpawnEntity('vila');
+  const d=S.livingWorldStatus();
+  assert.equal(d.village.count,1);assert.equal(d.village.cap,S.VILLAGE_SOCIAL_CAP);
+  assert.equal(d.totalAi,2,'totalAi deveria contar a IA da vila tambem, nao so campo/instancia');
+  const villageRow=d.entities.find(x=>x.runtimeId===village.id);
+  assert.equal(villageRow.type,'VILLAGE');assert.equal(villageRow.map,'vila');
+  for(const row of d.entities){assert.equal(typeof row.x,'number');assert.equal(typeof row.y,'number');}
+  assert.equal(d.entities.find(x=>x.runtimeId===field.id).type,'FIELD');
+});
+
+test('Fase 5.16.2 -- pause bloqueia tambem a reposição social da vila (mesmo toggle fieldSpawnEnabled do painel)',()=>{
+  process.env.AI_ENABLED='1';S.applyLivingWorldConfig({fieldSpawnEnabled:false,dungeonFillEnabled:true,tvtFillEnabled:true,fieldWorldCap:10,perMapCap:4});
+  S.aiPopulationTick();assert.equal(S.villageAiEntities().length,0);
+  S.applyLivingWorldConfig({...S.livingWorldConfig,fieldSpawnEnabled:true});S.aiPopulationTick();assert.equal(S.villageAiEntities().length,1);
+});
+
 test('audit sanitiza segredos e rotas mutaveis nao contêm caminhos de economia',()=>{
   const safe=S.sanitizeAuditMetadata({oldCap:20,newCap:10,runtimeId:'ai_x',token:'nope',session:'nope'});
   assert.deepEqual(safe,{oldCap:20,newCap:10,runtimeId:'ai_x'});
