@@ -68,7 +68,7 @@ test('IA de monstro: slime persegue jogador dentro do alcance de aggro (posicao 
   conn.close();
 });
 
-test('dano de monstro: mob_hit chega ao jogador com o valor exato da formula real (nao um numero arbitrario)', async () => {
+test('dano de monstro: mob_hit chega mitigado e com HP autoritativo', async () => {
   const conn = await joinWs(srv, { lvl: 1 });
   conn.ws.send(JSON.stringify({ type: 'state', map: 'vila', x: 2000, y: 100, dir: 0, moving: false, lvl: 1 }));
   await sleep(60);
@@ -80,7 +80,8 @@ test('dano de monstro: mob_hit chega ao jogador com o valor exato da formula rea
   const slime = st.mobs[0];
   conn.ws.send(JSON.stringify({ type: 'state', map: 'vila', x: slime.x + 15, y: slime.y, dir: 0, moving: false, lvl: 1 }));
   const hit = await waitFor(conn.msgs, m => m.type === 'mob_hit', 6000);
-  assert.equal(hit.dmg, 6, 'dano de contato do slime nivel 1 deveria ser exatamente 6 (SLIME_STATS[1].dmg), veio ' + hit.dmg);
+  assert.equal(hit.dmg, 4, 'dano bruto 6 deve ser mitigado pela defesa real do guerreiro, veio ' + hit.dmg);
+  assert.equal(hit.hp,hit.maxHp-hit.dmg,'servidor deve enviar o HP final, nao deixar o cliente calcula-lo');
   conn.close();
 });
 
@@ -110,6 +111,7 @@ test('respawn: apos o tempo agendado, o monstro reaparece com hp cheio (espera r
   const mobs = await joinFloresta(conn);
   const deadMsg = await killMob(conn, mobs[7]);
   assert.ok(deadMsg, 'monstro nao morreu (pre-condicao do teste)');
+  conn.ws.send(JSON.stringify({ type: 'state', map: 'floresta', x: 2800, y: 2000, dir: 0, moving: false, lvl: 99 }));
   const waitMs = Math.max(500, deadMsg.mob.respawnAt - Date.now() + 1500);
   const before = conn.msgs.length;
   await sleep(waitMs);
