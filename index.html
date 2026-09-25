@@ -1472,6 +1472,10 @@ function hurtPlayer(dmg,from){
 function heal(v){if(P.burn){P.burn=null;floater(P.x,P.y-116,'Apagado','#ffd45a')}if(P.poison){P.poison=null;floater(P.x,P.y-104,'Purificado','#b6ff8a')}if(P.bleed){P.bleed=null;floater(P.x,P.y-92,'Estancou','#7dff7d')}const h=Math.min(v,P.maxhp-P.hp);P.hp+=h;floater(P.x,P.y-70,'+'+Math.round(h),'#7dff7d')}
 function useC(k){
   if(P[k]<=0){toast(k==='pv'?'Sem poções de vida':k==='pa'?'Sem poções de mana':k==='ap'?'Sem maçãs':'Sem pergaminhos');return false}
+  if(CUR_CHAR&&authToken()){
+    shopTransact('use_item',{key:k}).then(res=>{if(!res.ok){toast(res.error);return}const e=res.itemEffect||{};if(e.type==='hp'){P.hp=e.hp;floater(P.x,P.y-70,'+'+Math.round(e.amount||0),'#7dff7d');sfx.drink()}else if(e.type==='mp'){const h=Math.min(e.amount||30,P.maxmp-P.mp);P.mp+=h;floater(P.x,P.y-70,'+'+Math.round(h),'#7db8ff');sfx.drink()}hud()});
+    return true;
+  }
   if(k==='pv'||k==='ap'){if(P.hp>=P.maxhp){toast('Sua vida já está cheia');return false}P[k]--;heal(k==='pv'?45:25);sfx.drink()}
   else if(k==='pa'){if(P.mp>=P.maxmp){toast('Sua mana já está cheia');return false}P.pa--;const h=Math.min(30,P.maxmp-P.mp);P.mp+=h;floater(P.x,P.y-70,'+'+Math.round(h),'#7db8ff');sfx.drink()}
   else if(k==='scr'){if(W_.name==='vila'){toast('Você já está na vila');return false}P.scr--;closeInv();travel('vila')}
@@ -1482,7 +1486,6 @@ function useC(k){
   // shopTransact ja reconcilia P inteiro com a resposta do servidor
   // (mesmo padrao "silencioso" do kill_reward). Sem conta online, nada
   // muda -- só o cálculo local de sempre.
-  if(CUR_CHAR&&authToken())shopTransact('use_item',{key:k});
   hud();return true;
 }
 function useSlot(i){barPress(i-1)}
@@ -1850,7 +1853,7 @@ function castSkill(id){
 // auto-cura na interface (mesma UX que o resto do jogo ja usa pra heal),
 // entao sempre o proprio charId; mirar aliado fica pra melhoria futura de
 // UI (o SERVIDOR ja suporta aliado real via TVT.resolveTvtIntent, testado).
-function netCastSkill(id,r){if(NET&&NET.readyState===1)NET.send(JSON.stringify({type:'cast_skill',map:W_?W_.name:'vila',id,sk:r,atk:P.atk,targetId:(IN_TVT&&id==='heal'&&CUR_CHAR)?CUR_CHAR.id:undefined}))}
+function netCastSkill(id,r){if(NET&&NET.readyState===1)NET.send(JSON.stringify({type:'cast_skill',map:W_?W_.name:'vila',id,targetId:(IN_TVT&&id==='heal'&&CUR_CHAR)?CUR_CHAR.id:undefined}))}
 function skillUpdate(dt){
   if(P.bleed){const b=P.bleed;b.t-=dt;b.k=(b.k||0)+dt;if(b.k>=1){b.k-=1;if(!P.dead){P.hp=Math.max(1,P.hp-b.dmg);P.calm=0;floater(P.x,P.y-70,'Sangrando -'+b.dmg,'#d63a3a')}}if(b.t<=0||P.dead)P.bleed=null}
   if(P.burn){const b=P.burn;b.t-=dt;b.k=(b.k||0)+dt;if(b.k>=.5){b.k-=.5;if(!P.dead){P.hp=Math.max(1,P.hp-b.dmg);P.calm=0;floater(P.x,P.y-70,'Queimando -'+b.dmg,'#ff8a3c')}}if(b.t<=0||P.dead)P.burn=null}
@@ -2969,7 +2972,7 @@ const keys={};let started=false;
 const stage=$('#stage'),ctx=stage.getContext('2d');
 const REMOTE=new Map();
 const RPROJ=[];
-let NET=null,NET_ID=null,NET_MAP='',netSendT=0,netRetry=0;
+let NET=null,NET_ID=null,NET_SESSION='',NET_MAP='',netSendT=0,netRetry=0;
 let EVENT_STATE=null,EVENT_CLOCK_OFFSET=0,WB_STATE=null;
 let IN_TVT=false,TVT_STATE=null,TVT_TEAM=null;
 let GUILD_STATE=false,GUILD_INVITES={incoming:[],outgoing:[]},GUILD_SEARCH=[],GUILD_SEARCH_Q='',GUILD_CHAT=[],guildUiTimer=0;
@@ -3059,7 +3062,7 @@ function netConnect(){
   // novo no onclose) sempre manda um join novo, reautenticando do zero.
   NET.onopen=()=>{netRetry=0;NET.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined,charId:(CUR_CHAR&&CUR_CHAR.id)||undefined,token:authToken()||undefined}))};
   NET.onmessage=e=>{let m;try{m=JSON.parse(e.data)}catch(err){return}
-    if(m.type==='welcome'){NET_ID=m.id;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel((REMOTE.size+1)+' online',true);netJoinMap()}
+    if(m.type==='welcome'){NET_ID=m.id;NET_SESSION=m.sessionKey||'';if(Number.isFinite(m.hp))P.hp=m.hp;if(Number.isFinite(m.maxHp))P.maxhp=m.maxHp;P.dead=!!m.dead;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel((REMOTE.size+1)+' online',true);netJoinMap()}
     else if(m.type==='event_state'){EVENT_STATE=m;EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(scrOpen==='events')renderScr()}
     else if(m.type==='event_announcement'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();chatAdd('Sistema',m.message,true);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.message)}
     else if(m.type==='event_registration'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(!m.ok)toast(m.error==='EVENT_UNAVAILABLE'?'Evento ainda não disponível':m.error==='AUTH_REQUIRED'?'Entre com uma conta online para se inscrever':'Não foi possível alterar a inscrição');else toast(m.action==='unregister'?'Inscrição cancelada':m.alreadyRegistered?'Você já está inscrito':'Inscrição realizada')}
@@ -3089,16 +3092,20 @@ function netConnect(){
     else if(m.type==='map_state'&&m.map===netMapId()){for(const u of m.mobs||[])netApplyMob(u,null)}
     else if(m.type==='mob_state'&&m.map===netMapId())netApplyMob(m.mob,m.killerId);
     else if(m.type==='mob_positions'&&m.map===netMapId())for(const u of m.mobs||[]){const x=netMobById(u.id),sx=Number(u.x),sy=Number(u.y);if(x&&!x.dead&&Number.isFinite(sx)&&Number.isFinite(sy)){x.serverX=sx;x.serverY=sy;x.netState=u.state||x.netState;x.state=x.netState;for(const k of MOB_NET_VISUAL_FIELDS)if(Object.prototype.hasOwnProperty.call(u,k)){const v=u[k];if((typeof v==='number'&&Number.isFinite(v))||typeof v==='string'||typeof v==='boolean')x[k]=v}}}
-    else if(m.type==='mob_hit'&&m.map===netMapId()){const x=netMobById(m.mobId);hurtPlayer(m.dmg,x?{x:x.x,y:x.y}:null)}
+    else if(m.type==='mob_hit'&&m.map===netMapId()){const x=netMobById(m.mobId);if(Number.isFinite(m.hp)){P.hp=m.hp;P.maxhp=m.maxHp||P.maxhp;P.dead=!!m.dead;P.inv=.7;P.hurtT=.25;floater(P.x,P.y-70,'-'+m.dmg,'#ff6a5a');sfx.hurt();if(P.dead){P.deadT=0;stopAuto();toast('Você desmaiou...')}}else hurtPlayer(m.dmg,x?{x:x.x,y:x.y}:null)}
     else if(m.type==='projectile'&&m.map===netMapId()&&m.ownerId!==NET_ID){const p=m.projectile;if(p&&!RPROJ.some(x=>x.id===p.id))RPROJ.push(Object.assign({remote:true},p))}
     else if(m.type==='projectile_end'&&m.map===netMapId()&&m.ownerId!==NET_ID){const i=RPROJ.findIndex(x=>x.id===m.id);if(i>=0)RPROJ.splice(i,1);if(m.boom)EFX.push({kind:'boom',x:m.x,y:m.y+22,t:0,life:.35,r:70,col:'255,140,40'})}
     else if(m.type==='chat'){chatAdd(m.from,m.text);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.from+': '+m.text)}
     else if(m.type==='guild_chat'){GUILD_CHAT.push({from:m.from,text:m.text});if(GUILD_CHAT.length>60)GUILD_CHAT.shift();if(scrOpen==='guild'){renderScr();const l=$('#gChatLog');if(l)l.scrollTop=l.scrollHeight}}
     else if(m.type==='guild_removed'){GUILD_STATE=null;GUILD_CHAT=[];toast(m.reason==='dissolved'?'Sua guilda foi dissolvida':'Você foi removido da guilda');if(scrOpen==='guild')requestGuildState()}
     else if(m.type==='player_hit'&&m.map===netMapId()){
-      if(m.targetId===NET_ID){const atkP=REMOTE.get(m.attackerId);hurtPlayer(m.dmg,atkP?{x:atkP.x,y:atkP.y}:null)}
+      if(m.targetId===NET_ID){if(Number.isFinite(m.hp)){P.hp=m.hp;P.maxhp=m.maxHp||P.maxhp;P.dead=!!m.dead;floater(P.x,P.y-70,'-'+m.dmg,'#ff6a5a');if(P.dead){P.deadT=0;stopAuto();toast('Você desmaiou...')}}else{const atkP=REMOTE.get(m.attackerId);hurtPlayer(m.dmg,atkP?{x:atkP.x,y:atkP.y}:null)}}
       else{const tp=REMOTE.get(m.targetId);if(tp)floater(tp.x,tp.y-70,'-'+m.dmg,'#ff6a5a')}
     }
+    else if(m.type==='global_respawn'){if(W_!==worlds.vila)setWorld(worlds.vila);P.dead=false;P.deadT=0;P.x=m.x;P.y=m.y;P.hp=m.hp;P.maxhp=m.maxHp||P.maxhp;P.inv=1.5;toast('A Sacerdotisa trouxe você de volta')}
+    else if(m.type==='player_vitals'){P.hp=m.hp;P.maxhp=m.maxHp||P.maxhp;P.dead=!!m.dead}
+    else if(m.type==='position_resync'&&m.map===netMapId()){P.x=m.x;P.y=m.y}
+    else if(m.type==='server_teleport'&&m.map==='vila'&&W_!==worlds.vila)travel('vila')
     else if(m.type==='kill_reward'){
       // reconciliacao silenciosa: o cliente ja mostrou o feedback local
       // (gainXp/toast) no momento do abate; isso so corrige o numero final
@@ -3130,7 +3137,7 @@ function netConnect(){
       if(m.dropLost)toast('Mochila cheia — equipamento '+GEAR_DATA.RARITY[m.dropLost.rarity].label+' não foi coletado.');
     }
   };
-  NET.onclose=()=>{NET_ID=null;NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};
+  NET.onclose=()=>{NET_ID=null;NET_SESSION='';NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};
   NET.onerror=()=>NET.close();
 }
 // W_.netMap (Fase 5.2): id de mapa que o SERVIDOR conhece pra masmorra --
@@ -3143,7 +3150,7 @@ function netUpdate(dt){
   if(!NET||NET.readyState!==1)return;
   netSendT-=dt;if(netSendT<=0){netSendT=.09;NET.send(JSON.stringify({type:'state',map:netMapId(),x:P.x,y:P.y,dir:P.dir,moving:P.moving,lvl:P.lvl,atkT:Math.max(0,P.atkT||0),atkAng:P.atkAng||0}));if(W_&&NET_MAP!==netMapId())netJoinMap()}
 }
-function netMobDamage(m,damage,skill,splash){if(NET&&NET.readyState===1&&m.netId){NET.send(JSON.stringify({type:'mob_damage',map:netMapId(),id:m.netId,skill:skill||'basic',atk:P.atk,splash:!!splash}));return true}return false}
+function netMobDamage(m,damage,skill,splash){if(NET&&NET.readyState===1&&m.netId){NET.send(JSON.stringify({type:'mob_damage',map:netMapId(),id:m.netId,skill:skill||'basic',splash:!!splash}));return true}return false}
 // Fase 5.7: dentro do TvT, PvP passa a valer mesmo sendo um mapa
 // instanciado (W_.netMap setado) -- por isso o ||IN_TVT aqui. Fora do TvT,
 // nada muda (dungeon/World Boss continuam sem PvP, exatamente como antes).
@@ -3151,7 +3158,7 @@ function pvpOn(){return !!(W_&&W_.name!=='vila'&&!W_.netMap)||IN_TVT}
 // Dentro do TvT o alvo e identificado pelo CHARID real (publicPlayer agora
 // inclui isso, ver server.js) -- fora do TvT continua sendo o id efemero
 // da conexao (rp.id), como sempre foi (PvP normal nao precisa de charId).
-function netPlayerDamage(rp,skill,splash){if(!pvpOn()||!NET||NET.readyState!==1||!rp||!rp.id)return;const targetId=IN_TVT?(rp.charId||rp.id):rp.id;NET.send(JSON.stringify({type:'player_damage',map:netMapId(),targetId,skill:skill||'basic',atk:P.atk,splash:!!splash}))}
+function netPlayerDamage(rp,skill,splash){if(!pvpOn()||!NET||NET.readyState!==1||!rp||!rp.id)return;const targetId=IN_TVT?(rp.charId||rp.id):rp.id;NET.send(JSON.stringify({type:'player_damage',map:netMapId(),targetId,skill:skill||'basic',splash:!!splash}))}
 function remotesInMap(){const l=[];for(const p of REMOTE.values())if(p.map===netMapId())l.push(p);return l}
 function netProjectile(p){if(!NET||NET.readyState!==1||!W_)return;p.nid=NET_ID+':p'+(++netProjectileSeq);NET.send(JSON.stringify({type:'projectile',map:netMapId(),id:p.nid,kind:p.kind,x:p.x,y:p.y,vx:p.vx,vy:p.vy,life:p.life,r:p.r,pierce:p.pierce}))}
 function netProjectileEnd(p){if(NET&&NET.readyState===1&&p.nid)NET.send(JSON.stringify({type:'projectile_end',map:netMapId(),id:p.nid,x:p.x,y:p.y,boom:!!p.splash}))}
@@ -3270,6 +3277,7 @@ function update(dt){
   if(dlg)return;
   if(P.dead){
     if(WB_STATE){P.deadT+=dt;return}
+    if(NET&&NET.readyState===1){P.deadT+=dt;return}
     P.deadT+=dt;
     if(P.deadT>2.2){
       if(W_!==worlds.vila){setWorld(worlds.vila);drops.length=0;waves.length=0}
@@ -3293,7 +3301,7 @@ function update(dt){
   if(P.push){const q=P.push;q.t-=dt;const mx=q.vx*dt,my=q.vy*dt;if(!blocked(P.x+mx,P.y,10,10))P.x+=mx;if(!blocked(P.x,P.y+my,10,10))P.y+=my;if(q.t<=0)P.push=null}
   if(P.kbx||P.kby){moveEnt(P,P.kbx*dt,P.kby*dt,10,10);P.kbx*=.82;P.kby*=.82;if(Math.abs(P.kbx)<8)P.kbx=0;if(Math.abs(P.kby)<8)P.kby=0}
   // regeneração
-  P.calm+=dt;if(P.calm>6&&P.hp<P.maxhp)P.hp=Math.min(P.maxhp,P.hp+dt*CLS.hpRg*1.8);
+  P.calm+=dt;if((!NET||NET.readyState!==1)&&P.calm>6&&P.hp<P.maxhp)P.hp=Math.min(P.maxhp,P.hp+dt*CLS.hpRg*1.8);
   if(P.mp<P.maxmp)P.mp=Math.min(P.maxmp,P.mp+dt*CLS.mpRg*1.25);
   // portal
   portalCool-=dt;
@@ -3711,7 +3719,7 @@ function importLegacy(key){
   }catch(e){}
 }
 async function authRequest(url,{method='GET',body,token}={}){
-  const r=await fetch(url,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});
+  const r=await fetch(url,{method,headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{}),...(NET_SESSION?{'X-Game-Session':NET_SESSION}:{})},body:body?JSON.stringify(body):undefined});
   let data={};try{data=await r.json()}catch(e){}
   if(!r.ok)throw new Error(data.error||'Nao foi possivel conectar ao servidor');
   return data;
@@ -3784,7 +3792,7 @@ async function shopTransact(action,params){
     const r=await authRequest('/api/characters/'+CUR_CHAR.id+'/shop',{method:'POST',token:authToken(),body:Object.assign({action},params)});
     applyShopResult(r.character);
     if(Array.isArray(r.shopSold))shopSold=r.shopSold;
-    return{ok:true,enchant:r.enchant||null};
+    return{ok:true,enchant:r.enchant||null,itemEffect:r.itemEffect||null};
   }catch(e){return{ok:false,error:e.message||'Não foi possível concluir'}}
 }
 /* ---- Fase 5.8: Guildas / Cla ---- */
