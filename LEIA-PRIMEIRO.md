@@ -1370,3 +1370,46 @@ Os 6 testes puros rodam de verdade nesta sessão (sandbox sem credenciais Supaba
 - **TTK (time-to-kill) não medido em produção real** — sem ambiente de carga/grupo real disponível nesta sessão; os multiplicadores de escala usados são os valores de partida pedidos explicitamente (1.55×/2.05×/2.50×), não uma calibração validada por playtesting.
 - **Os 8 testes de integração real (Party+WebSocket) não foram executados nesta sessão** — ver "Verificação" acima. Escritos e prontos, mas pendentes de confirmação com Supabase real antes do merge.
 - **Nenhuma migração de banco** — toda a mudança é em memória (`server.js`/`game-data/dungeon-generation.js`); o formato salvo em `characters.save` (gold/gem/bag/eq) não mudou.
+
+# FASE 5.13.2 — MATCHMAKING DE DUNGEON
+
+**Escopo**: fila de matchmaking somente-humano pra formar grupos de masmorra automaticamente (preenchimento por IA fica pra Fase 5.16 — aqui só existe o campo `allowAiFill`, guardado por entrada mas nunca lido por nada que spawne IA). Fila em memória, sem tabela, mesmo espírito efêmero de Party/instância de masmorra. A entrada direta de sempre (sozinho ou com a Party atual, Fase 5.13.1) continua funcionando sem nenhuma mudança — matchmaking é uma opção **a mais**, nunca uma substituição.
+
+## Estrutura
+
+`dungeonQueue` (`Map<zone, Map<userId, {charId,cls,queuedAt,allowAiFill,soloOptIn,disconnectedAt}>>`) e `userQueueZone` (`Map<userId, zone>`, garante nunca duas entradas simultâneas pro mesmo usuário — entrar numa fila nova sempre remove qualquer entrada anterior primeiro, `dungeonQueueLeaveInternal`). Chaveado por `userId`, não `charId` — mesma granularidade de Party e `activeCharacterForUser`, porque quem importa pro pareamento é a conta ativa agora, não um personagem específico guardado em memória.
+
+## Tamanho preferido (4), fallback por tempo de espera (3, depois 2), solo só com opt-in
+
+`dungeonQueueTick()` roda a cada 1s (junto do resto da limpeza periódica). Pra cada zona, mede quantos estão realmente disponíveis (online, sem tolerância de desconexão ativa) e decide o maior grupo viável: 4 ou mais na fila fecha **na hora** (não precisa esperar nada); exatamente 3 só fecha depois de `DUNGEON_QUEUE_FALLBACK_3_MS` (25s) de espera do mais antigo; exatamente 2 só depois de `DUNGEON_QUEUE_FALLBACK_2_MS` (45s); sozinho **nunca** fecha, a menos que o próprio jogador tenha marcado `soloOptIn:true` na entrada — e mesmo assim só depois de `DUNGEON_QUEUE_FALLBACK_SOLO_MS` (60s). Se sobrar mais gente que o grupo fechado (ex.: 5 na fila), o loop continua tentando fechar outro grupo com quem restou, no mesmo tick.
+
+## Diversidade de classe sem bloquear ninguém
+
+`dungeonQueuePickGroup(entries, n)` sempre inclui quem está esperando há mais tempo (justiça por ordem de chegada), depois prioriza entradas com uma classe ainda não escolhida no grupo, e só preenche o resto com quem sobrar (mais antigo primeiro) se a diversidade se esgotar — nunca deixa um grupo incompleto ou atrasado só por falta de variedade de classe.
+
+## Tolerância de desconexão
+
+Cair da fila (rede instável, troca de aba) não remove a posição na hora — `disconnectedAt` é marcado no fechamento do WebSocket e a entrada continua na fila, mas **nunca** entra num grupo formado enquanto isso (o tick filtra por `!disconnectedAt` antes de contar quem está disponível). Reconectar com o mesmo `userId` dentro de `DUNGEON_QUEUE_DISCONNECT_GRACE_MS` (20s) limpa o flag e a espera acumulada continua valendo; passado esse prazo sem reconectar, a entrada é removida de vez no próximo tick.
+
+## Pareamento vira uma Party de verdade
+
+`formDungeonGroup(zone, group)` revalida o desbloqueio de **cada** membro com uma leitura fresca do banco (o check feito na entrada da fila pode ter ficado velho) — quem não está mais liberado simplesmente não entra no grupo final. Membros validados (2+) são desligados de qualquer Party manual anterior (`leaveParty`) e uma Party nova é montada pra eles com o mesmo sistema da Fase 5.13.1 (`parties`/`memberParty`, nunca uma estrutura paralela) — o mais antigo da fila vira o dono. A masmorra é então criada e cada membro online recebe `dungeon_queue_matched` seguido do `dungeon_state` normal, pelo mesmo `buildDungeonInstance`/`sendDungeonStateTo` de sempre. **Simplificação deliberada**: o nome exibido na Party montada pelo matchmaking usa o nome do personagem (`p.name`, já disponível na conexão), não o username da conta (que exigiria uma consulta extra ao Supabase só pra isso) — cosmético, sem efeito em nenhuma lógica de posse/permissão.
+
+## Cliente (`index.html`)
+
+Botão "Buscar Grupo (matchmaking)" na tela da masmorra (`scrMasmorra`), ao lado do "Entrar" de sempre (que continua igual). Enquanto na fila, o botão de entrada direta fica desabilitado e um status (`X/4 jogador(es) reais, aguardando há Ys`) aparece com um botão "Cancelar busca" — o contador de segundos é fixado no momento da última atualização do servidor (join/leave), não um relógio ticando em tempo real no cliente (ver limitações). `dungeon_queue_matched` mostra um toast ("Grupo encontrado!") e prepara a mesma transição de tela (`$('#fade')`, `traveling=true`) que a entrada direta já usava, deixando o `dungeon_state` que chega logo em seguida cair no mesmo `applyDungeonState` de sempre — nenhum código de transição novo foi necessário.
+
+## Testes
+
+`test/dungeon-queue.test.js` (novo arquivo): **11 testes puros** (sempre rodam, sem Supabase, sem esperar os prazos reais de 25s/45s/60s — os timestamps `queuedAt`/`disconnectedAt` são forjados no passado via manipulação direta dos `Map`s exportados) cobrindo cada limiar de fallback (4 fecha na hora; 3 não fecha antes de 25s e fecha depois; 2 não fecha antes de 45s e fecha depois; solo nunca fecha sem opt-in, fecha só depois de 60s com opt-in), a tolerância de desconexão (nunca entra num grupo dentro da tolerância, é removido depois dela) e a limpeza de fila/zona vazia — mais **5 testes de integração real via WebSocket** (`{skip:!hasSupabase()}`, mesma convenção do resto da suite): entrar/sair da fila, 4 jogadores pareando quase imediatamente e virando uma Party real, sozinho nunca pareando sem opt-in, reentrada na mesma zona não duplicando, e diversidade de classe garantindo que a única classe diferente (mago entre 4 guerreiros) entra no primeiro grupo fechado. A lógica de renderização do cliente (`scrMasmorra`, os dois estados — fora e dentro da fila) foi verificada isolando a função com estado forjado (Node, fora do navegador) e conferindo a string HTML gerada nos dois casos, sem precisar de um servidor real rodando.
+
+## Verificação
+
+Os 11 testes puros rodam de verdade nesta sessão e passam — cobrem exaustivamente a aritmética de fallback (a parte mais fácil de errar). Os 5 testes de integração via WebSocket foram escritos pra exercitar o fluxo completo (`dungeon_queue_join`/`dungeon_queue_leave` reais, nunca bypass) mas não puderam ser executados aqui pela mesma razão já documentada na Fase 5.13.1 (sem `SUPABASE_URL`/`SUPABASE_SECRET_KEY` neste sandbox). **Recomenda-se rodar `npm test` com Supabase de TESTE antes do merge**, junto com os 8 pendentes da Fase 5.13.1.
+
+## Limitações conhecidas
+
+- **Contador de espera não atualiza em tempo real no cliente** — fica parado no valor de quando o servidor confirmou a entrada/saída da fila, só muda de novo se o jogador reabrir o painel (o que dispara `renderScr()` com `Date.now()` fresco só quando um novo `dungeon_queue_state` chega do servidor). Um relógio local ticando seria puramente cosmético; não implementado pra não adicionar estado novo além do pedido.
+- **Sem persistência entre sessões** — sair do jogo remove a entrada da fila como qualquer desconexão (com a mesma tolerância de 20s); não existe "voltar pra fila de onde parei" depois de fechar a aba de propósito.
+- **`allowAiFill` e `soloOptIn` preparados mas sem UI dedicada pra ligar/desligar** — o cliente atual nunca manda `allowAiFill` (fica sempre `false`) nem `soloOptIn` (fica sempre `false`, então o fallback solo nunca dispara na prática hoje); os campos existem no protocolo servidor-cliente exatamente como pedido ("flag allowAiFill preparada, IA não spawna ainda"), prontos pra Fase 5.16 ligar preenchimento por IA e pra uma fase futura de UI adicionar as opções, sem precisar mexer no núcleo da fila de novo.
+- **Nenhuma migração de banco** — toda a fila é em memória; nada foi persistido no Supabase.
