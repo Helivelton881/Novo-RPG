@@ -2689,7 +2689,7 @@ async function startTvtEvent(event,registrations){
       for(let i=0;i<aiNeeded;i++){
         const cls=AI_CLASS_POOL[Math.floor(Math.random()*AI_CLASS_POOL.length)];
         const aiSave=buildAiSave(cls,avgLvl);
-        const name=AI_NAME_POOL[Math.floor(Math.random()*AI_NAME_POOL.length)]+Math.floor(10+Math.random()*90);
+        const name=aiPickName();
         const snapshot=WORLD_BOSS.combatSnapshot({userId:null,charId:null,name,cls,lvl:avgLvl,save:aiSave});
         const charId='ai_'+crypto.randomBytes(4).toString('hex');
         aiMembers.push({userId:null,charId,name:snapshot.name,cls,lvl:avgLvl,save:aiSave,snapshot,powerScore:TVT.powerScore(snapshot,aiSave.eq),kind:'ai'});
@@ -3399,7 +3399,7 @@ async function formDungeonGroup(zone, group) {
   const state = buildDungeonInstance(zone, [...validMembers, ...aiFillMembers]);
   if (!state) return;
   for (const m of aiFillMembers) {
-    const aiName = AI_NAME_POOL[Math.floor(Math.random() * AI_NAME_POOL.length)] + Math.floor(10 + Math.random() * 90);
+    const aiName = aiPickName();
     const combat = buildAiCombat(m.cls, m.lvl, aiName);
     const entity = {
       id:m.charId, kind:'ai', name:combat.name, cls:m.cls, lvl:m.lvl, map:state.id,
@@ -3534,7 +3534,27 @@ const AI_FIELD_ZONES = ['floresta','cripta','serra','pantano','torre','ilhas','v
 const VILLAGE_SOCIAL_CAP = 3;
 const VILLAGE_ANCHOR = {x:720, y:1258}; // mesmo ponto real de spawn/respawn/retorno da vila (ver startingSave/global_respawn/scroll-of-return)
 const AI_CLASS_POOL = [...ALLOWED_CLASS];
-const AI_NAME_POOL = ['Aldric','Branwen','Cedric','Dara','Eamon','Fiora','Gareth','Helka','Ivor','Junia','Kael','Lyra','Milo','Nessa','Orin','Petra','Quill','Rowan','Senna','Talon'];
+// Fase 5.16.4 (pedido explicito do usuario): nomes de MMORPG naturais,
+// sem o padrao "Nome+numero" que denunciava geracao artificial assim que
+// aparecia (ex.: "Kael43"/"Arthus37"). Pool ampliado (quase o dobro,
+// reduz repeticao) + aiPickName() evita duplicidade simultanea de
+// verdade (confere contra aiEntities ativos antes de escolher) -- so cai
+// de volta pro sufixo numerico se TODO o pool ja estiver em uso ao mesmo
+// tempo (exigiria quase 40 Aventureiros ativos simultaneamente, o teto
+// duro do sistema).
+const AI_NAME_POOL = [
+  'Aldric','Branwen','Cedric','Dara','Eamon','Fiora','Gareth','Helka','Ivor','Junia',
+  'Kael','Lyra','Milo','Nessa','Orin','Petra','Quill','Rowan','Senna','Talon',
+  'Thoran','Elyra','Valen','Seraph','Draven','Lyanna','Nyra','Theron','Mirella','Alaric',
+  'Brynn','Corwin','Delia','Eirian','Faelan','Gwyneth','Hadrian','Isolde','Joran','Kira',
+];
+function aiPickName() {
+  const active = new Set([...aiEntities.values()].map(a => a.name.replace(/\d+$/, '')));
+  const free = AI_NAME_POOL.filter(n => !active.has(n));
+  const pool = free.length ? free : AI_NAME_POOL;
+  const base = pool[Math.floor(Math.random() * pool.length)];
+  return free.length ? base : (base + Math.floor(10 + Math.random() * 90));
+}
 const AI_PERSONALITY_KINDS = ['agressivo','cauteloso','equilibrado'];
 const AI_MOVE_SPEED = 85; // px por tick -- comparavel a velocidade real de jogador
 function aiPersonalityProfile(kind) {
@@ -3647,7 +3667,7 @@ function aiSpawnEntity(zone) {
   const cls = AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
   const [lo, hi] = aiZoneLevelRange(zone);
   const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
-  const name = AI_NAME_POOL[Math.floor(Math.random() * AI_NAME_POOL.length)] + Math.floor(10 + Math.random() * 90);
+  const name = aiPickName();
   const combat = buildAiCombat(cls, lvl, name);
   const anchor = aiSpawnAnchor(zone);
   const personality = AI_PERSONALITY_KINDS[Math.floor(Math.random() * AI_PERSONALITY_KINDS.length)];
@@ -3713,9 +3733,21 @@ function aiPopulationTick() {
   if (livingWorldConfig.fieldSpawnEnabled && villageAiEntities().length < VILLAGE_SOCIAL_CAP) aiSpawnEntity('vila');
 }
 function aiTransition(ai, next, now, extra) { ai.fsm = next; ai.fsmUntil = 0; if (extra) Object.assign(ai, extra); }
+// Fase 5.16.4 (bug real de producao, achado medindo o WebSocket bruto ao
+// vivo -- posicoes de IA idênticas por dezenas de segundos seguidas):
+// esta funcao contratualmente devolve "<=0 quando chegou, >0 quando falta
+// andar" (aiDoWander depende exatamente disso pra saber a hora de sair do
+// wander). O ramo "ja perto o bastante" devolvia `dist` (0 a ~4, sempre
+// POSITIVO a menos que dist seja exatamente 0) em vez de 0 -- quebrava o
+// contrato so nesse ramo. aiDoWander nunca via remain<=0, nunca
+// transicionava pra 'idle', e como esse ramo tambem nunca move
+// (ai.moving so vira false, x/y ficam parados), a IA congelava pra
+// sempre em fsm:'wander' assim que a distancia restante caia abaixo de 4px
+// numa fiada -- confirmado ao vivo: apos 60s reais, 22 de 40 IA presas,
+// TODAS em wander, todas a ~1-4px do proprio alvo de wander.
 function aiMoveToward(ai, tx, ty, speed) {
   const dx = tx - ai.x, dy = ty - ai.y, dist = Math.hypot(dx, dy);
-  if (dist < 4) { ai.moving = false; return dist; }
+  if (dist < 4) { ai.moving = false; return 0; }
   const step = Math.min(dist, speed);
   ai.x = Math.max(0, Math.min(MOB_WORLD_W, ai.x + dx / dist * step));
   ai.y = Math.max(0, Math.min(MOB_WORLD_H, ai.y + dy / dist * step));
@@ -3807,6 +3839,18 @@ function aiDoCombat(ai, now) {
   // pra humanos (Fase 5.12) -- nunca uma formula de combate paralela pra IA.
   const dmg = resolveAttackDamage(ai, {skill:'basic'}, now);
   if (!dmg) return;
+  // Fase 5.16.4 (bug real: "ataque parece travado"): ai.atkT/atkAng NUNCA
+  // eram setados em lugar nenhum -- aiPublicPlayer sempre mandava atkT:0,
+  // entao a animacao de ataque do cliente (que so liga quando atkT>0)
+  // nunca disparava pra nenhuma IA. Em vez de depender do snapshot
+  // periodico de 1s (que so mostraria um unico frame congelado por
+  // segundo mesmo se atkT fosse setado), manda um evento explicito
+  // ai_attack -- o cliente toca a animacao inteira localmente a partir
+  // dele (mesma duracao que o ataque de jogador remoto ja usa), nunca
+  // depende de receber varios pacotes durante os 0.3s do golpe. Dano
+  // continua 100% resolvido aqui, no servidor -- o evento e so visual.
+  const atkAng = Math.atan2(mob.y - ai.y, mob.x - ai.x);
+  broadcastMap(ai.map, {type:'ai_attack', id:ai.id, map:ai.map, angle:atkAng});
   mob.hp = Math.max(0, mob.hp - dmg);
   if (mob.hp <= 0 && !mob.dead) {
     mob.dead = true;
@@ -5055,8 +5099,9 @@ module.exports = {
   aiEntities, aiSpawnEntity, aiDespawnEntity, aiPopulationTick, aiStep, aiTick,
   aiPublicPlayer, aiPresentOnMap, buildAiSave, buildAiCombat, aiZoneLevelRange,
   aiPersonalityProfile, aiSpawnAnchor, dungeonHandleMobDeath, aiDoCombat, aiDoIdle, aiDoHunt, aiDoTvt,
+  aiDoWander, aiMoveToward,
   formDungeonGroup, tvtFillTargetSize, tvtAiFillTargetSize, dungeonAiFillEnabled,
-  AI_MAX_POPULATION, AI_FIELD_ZONES, AI_CLASS_POOL, aiEnabled,
+  AI_MAX_POPULATION, AI_FIELD_ZONES, AI_CLASS_POOL, aiEnabled, AI_NAME_POOL, aiPickName,
   FIELD_AI_HARD_MAX, PER_MAP_HARD_MAX, LIVING_WORLD_DEFAULTS, livingWorldConfig,
   normalizeLivingWorldSettings, applyLivingWorldConfig, loadLivingWorldConfig, persistLivingWorldConfig,
   fieldAiEntities, fieldAiCounts, instanceAiCounts, isSafeFieldAi, despawnFieldAi, rebalanceFieldAi, livingWorldStatus,
