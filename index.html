@@ -6031,7 +6031,7 @@ function paintRect(tx0,ty0,tx1,ty1,k){
   const X0=tx0*T,Y0=ty0*T,X1=tx1*T,Y1=ty1*T;
   for(let cy=Math.max(0,Math.floor(Y0/2));cy<=Math.min(CHn-1,Math.floor(Y1/2));cy++)for(let cx=Math.max(0,Math.floor(X0/2));cx<=Math.min(CWn-1,Math.floor(X1/2));cx++)kind[cy*CWn+cx]=k;
 }
-const MASMORRA_CELL=7,MASMORRA_PASS=3,MASMORRA_WALL=1;
+const MASMORRA_WALL=1;
 const DUN_CACHE={};
 function dunSprite(col,row,scale=.5){
   if(!DUN_IMG)return null;
