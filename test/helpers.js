@@ -14,10 +14,20 @@ function hasSupabase() {
 }
 
 // Sobe server.js como processo filho numa porta dedicada e espera responder.
-async function startServer(port) {
+// envOverrides permite ligar algo desligado por padrao pra um arquivo
+// especifico (ex.: { AI_ENABLED: '1' } em test/ai.test.js pra exercitar
+// o fluxo real de WS/broadcast -- nunca o padrao, ver abaixo).
+async function startServer(port, envOverrides) {
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     cwd: ROOT,
-    env: Object.assign({}, process.env, { PORT: String(port) }),
+    // AI_ENABLED=0 (Fase 5.16): desliga o spawn automatico de
+    // Aventureiros IA em todo servidor de teste -- nenhuma suite espera
+    // um ator nao controlado aparecendo sozinho no mapa compartilhado
+    // de um teste (ja causou uma falha intermitente em
+    // monster-movement.test.js antes desta linha existir). Testes que
+    // exercitam IA de verdade (test/ai.test.js) chamam aiSpawnEntity()
+    // direto, ou reativam explicitamente via envOverrides.
+    env: Object.assign({}, process.env, { PORT: String(port), AI_ENABLED: '0' }, envOverrides || {}),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

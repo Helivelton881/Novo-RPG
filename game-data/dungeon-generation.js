@@ -179,12 +179,23 @@ function dungeonLayout(seed) {
   return buildFixedDungeonLayout();
 }
 
+// Fase 5.13.1 -- Dungeon em Party: multiplicador de HP de mob/chefe por
+// numero de participantes REAIS na instancia (nunca por membro nominal da
+// Party -- so quem realmente entrou). Ponto de partida pedido
+// explicitamente; ajustavel depois medindo TTK real. Nunca mexe no dano
+// que o jogador causa (isso continua vindo so do snapshot de combate de
+// cada personagem, Fase 5.12) -- so a resistencia do lado do monstro.
+const DUNGEON_PARTY_SCALE = Object.freeze({ 1: 1.00, 2: 1.55, 3: 2.05, 4: 2.50 });
+function dungeonScaleFor(memberCount) {
+  const n = Math.max(1, Math.min(4, Math.round(Number(memberCount) || 1)));
+  return DUNGEON_PARTY_SCALE[n] || 1;
+}
+
 const DUNGEON_GEN_DATA = {
-  mulberry, mazeGen, cellCenter: undefined, dungeonLayout, T, WALL,
+  mulberry, mazeGen, dungeonLayout, T, WALL,
   DUNGEON_ROOMS_V2, DUNGEON_CONNECTIONS_V2, DUNGEON_MOB_ROOMS_V2,
-  roomCenter, roomRandomPoint,
+  roomCenter, roomRandomPoint, DUNGEON_PARTY_SCALE, dungeonScaleFor,
 };
-delete DUNGEON_GEN_DATA.cellCenter; // nunca existiu de verdade no V2 (era so da grade antiga); nao exportar undefined
 if (typeof module !== 'undefined' && module.exports) module.exports = DUNGEON_GEN_DATA;
 else if (typeof window !== 'undefined') window.DUNGEON_GEN = DUNGEON_GEN_DATA;
 

@@ -964,6 +964,12 @@ async function handleAuth(req, res, pathname) {
       const rows=await supabase('users',{query:`?select=id,username,password_hash&username=eq.${encodeURIComponent(username)}&limit=1`});
       const user=rows[0];
       if(!user||!(await verifyPassword(password,user.password_hash))){json(res,401,{error:'Usuário ou senha incorretos'});return true}
+      // Fase 5.14: ban persistente e verificado ANTES de emitir sessao --
+      // nunca deixa logar de novo enquanto o ban estiver ativo (permanente
+      // ou com prazo ainda nao vencido). Mesma checagem se repete no WS
+      // (handleWsJoin) pra cobrir quem ja tinha sessao valida antes do ban.
+      const ban=await activeBanFor(user.id);
+      if(ban){json(res,403,{error:'Conta banida'+(ban.reason?': '+ban.reason:'')+(ban.expires_at?' (ate '+new Date(ban.expires_at).toLocaleString('pt-BR')+')':' (permanente)')});return true}
       const update={last_login:new Date().toISOString()};
       if(/^\$2[aby]\$/.test(user.password_hash))update.password_hash=await hashPassword(password);
       await supabase('users',{method:'PATCH',query:`?id=eq.${encodeURIComponent(user.id)}`,body:update,prefer:'return=minimal'});
@@ -1532,6 +1538,394 @@ async function handleParty(req, res, pathname) {
   } catch (err) {
     console.error('party_error', err.message);
     if (!res.headersSent) json(res,500,{error:'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+// ===== Fase 5.14: Admin + Observabilidade =====
+// RBAC de 4 niveis (owner > admin > moderator > support), auth SEMPRE
+// server-side (mesmo Bearer token de sessao de sempre -- resolveUser --
+// mais uma leitura fresca de admin_roles a CADA requisicao, nunca um
+// cargo guardado no cliente/localStorage). Matriz de permissao
+// centralizada: cada rota do painel checa uma permissao nomeada, nunca
+// compara `role==='admin'` espalhado pelo codigo.
+const ADMIN_PERMS = Object.freeze({
+  owner:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','manage_roles','view_guilds','view_events','view_security_log','manage_news'],
+  admin:     ['view_dashboard','search_players','kick','mute','ban','unban','view_economy','view_guilds','view_events','view_security_log','manage_news'],
+  moderator: ['view_dashboard','search_players','kick','mute','ban','unban','view_guilds','view_events'],
+  support:   ['view_dashboard','search_players','view_guilds','view_events'],
+});
+function adminHasPerm(role, perm) { return !!(ADMIN_PERMS[role] || []).includes(perm); }
+// Hierarquia de cargo (corrigido apos revisao pre-merge, achado real):
+// nada impedia um moderator de banir/mutar/expulsar um admin ou o
+// proprio owner -- so a permissao nomeada (kick/ban/mute) era checada,
+// nunca o cargo do ALVO. Agora toda acao sobre outra conta exige que o
+// alvo tenha um cargo estritamente MENOR que o do ator (ou nenhum
+// cargo -- rank -1, sempre alvo valido). owner nunca e bloqueado agindo
+// sobre ninguem.
+const ADMIN_RANK = Object.freeze({owner:3, admin:2, moderator:1, support:0});
+async function targetAdminRank(userId) {
+  const rows = await supabase('admin_roles', {query:`?select=role&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
+  return rows[0] ? (ADMIN_RANK[rows[0].role] ?? 0) : -1;
+}
+async function canActOnTarget(actor, targetUserId) {
+  const targetRank = await targetAdminRank(targetUserId);
+  return targetRank < (ADMIN_RANK[actor.role] ?? -1);
+}
+async function resolveAdmin(req) {
+  const user = await resolveUser(req);
+  if (!user) return null;
+  const rows = await supabase('admin_roles', {query:`?select=role&user_id=eq.${encodeURIComponent(user.id)}&limit=1`});
+  const row = rows[0];
+  return row ? {...user, role: row.role} : null;
+}
+function activeAmong(rows) {
+  const now = Date.now();
+  return rows.find(r => !r.revoked_at && (!r.expires_at || new Date(r.expires_at).getTime() > now)) || null;
+}
+// Achado na revisao pre-merge: limit=5 podia esconder um ban PERMANENTE
+// antigo atras de 5 bans/mutes temporarios mais recentes ja vencidos --
+// filtra revoked_at=is.null no proprio banco (so linhas ainda "abertas"
+// contam de verdade) antes de paginar, entao o limite so protege contra
+// um numero anormal de linhas abertas, nunca esconde a que importa.
+async function activeBanFor(userId) {
+  const rows = await supabase('player_bans', {query:`?select=id,reason,expires_at,revoked_at&user_id=eq.${encodeURIComponent(userId)}&revoked_at=is.null&order=created_at.desc&limit=20`});
+  return activeAmong(rows);
+}
+async function activeMuteFor(userId) {
+  const rows = await supabase('player_mutes', {query:`?select=id,reason,expires_at,revoked_at&user_id=eq.${encodeURIComponent(userId)}&revoked_at=is.null&order=created_at.desc&limit=20`});
+  return activeAmong(rows);
+}
+// Lista de campos que NUNCA entram no audit log, mesmo que alguem passe
+// por engano dentro de `metadata` -- checagem por substring do nome do
+// campo (case-insensitive), nao uma lista fechada de chaves exatas.
+const ADMIN_AUDIT_NEVER_LOG = ['password','token','service_role','session'];
+function sanitizeAuditMetadata(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(meta)) {
+    if (ADMIN_AUDIT_NEVER_LOG.some(f => k.toLowerCase().includes(f))) continue;
+    out[k] = v;
+  }
+  return out;
+}
+async function writeAdminAudit(actorUserId, action, {targetUserId, targetCharacterId, reason, metadata} = {}) {
+  try {
+    await supabase('admin_audit_log', {method:'POST', body:{
+      actor_user_id: actorUserId || null, action, target_user_id: targetUserId || null,
+      target_character_id: targetCharacterId || null, reason: reason || null,
+      metadata: sanitizeAuditMetadata(metadata),
+    }, prefer:'return=minimal'});
+  } catch (err) { console.error('admin_audit_log_error', err.message); }
+}
+// Fecha AGORA toda conexao WS ativa de uma conta -- usado por kick e como
+// efeito colateral de ban (nunca deixa quem acabou de ser banido
+// continuar jogando ate a proxima reconexao).
+function kickUserSockets(userId, code, reason, message) {
+  const set = accountSockets.get(userId);
+  if (!set) return 0;
+  let n = 0;
+  for (const ws of [...set]) { try { if (message) send(ws, message); ws.close(code, reason); n++; } catch { /* socket ja fechando */ } }
+  return n;
+}
+async function handleAdmin(req, res, pathname) {
+  if (!pathname.startsWith('/api/admin')) return false;
+  try {
+    const admin = await resolveAdmin(req);
+    if (!admin) { json(res,403,{error:'Acesso restrito'}); return true; }
+
+    if (pathname === '/api/admin/me' && req.method === 'GET') {
+      json(res,200,{admin:{userId:admin.id,username:admin.username,role:admin.role,permissions:ADMIN_PERMS[admin.role]||[]}}); return true;
+    }
+
+    if (pathname === '/api/admin/dashboard' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_dashboard')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const onlineTotal = new Set([...clients.values()].filter(p=>p.authed).map(p=>p.userId)).size;
+      // Achado na revisao pre-merge: o dashboard mandava recentAudit pra
+      // QUALQUER cargo com view_dashboard (inclusive support, que nunca
+      // tem view_security_log) -- vazava o log de auditoria por uma
+      // rota que nao deveria expor isso. So busca/inclui quando o cargo
+      // realmente tem a permissao certa.
+      const canSeeAudit = adminHasPerm(admin.role,'view_security_log');
+      const [bansOpen, mutesOpen, recentAudit] = await Promise.all([
+        supabase('player_bans', {query:'?select=id,expires_at&revoked_at=is.null'}),
+        supabase('player_mutes', {query:'?select=id,expires_at&revoked_at=is.null'}),
+        canSeeAudit ? supabase('admin_audit_log', {query:'?select=id,action,actor_user_id,target_user_id,reason,created_at&order=created_at.desc&limit=25'}) : Promise.resolve([]),
+      ]);
+      // ban/mute com prazo ja vencido ainda aparece como "revoked_at is
+      // null" no banco (nunca reescrevemos a linha so por ela ter
+      // expirado -- expiracao e sempre calculada na leitura, nunca um job
+      // de fundo apagando historico) -- so conta como ATIVO agora quem
+      // nao tem prazo (permanente) ou cujo prazo ainda nao passou.
+      const now = Date.now();
+      const stillActive = row => !row.expires_at || new Date(row.expires_at).getTime() > now;
+      // Fase 5.16: IA sempre separada e marcada -- nunca somada ao
+      // `online` humano em nenhum lugar, nunca escondida do admin.
+      json(res,200,{
+        online: onlineTotal, aiOnline: aiEntities.size, bansOpen: bansOpen.filter(stillActive).length, mutesOpen: mutesOpen.filter(stillActive).length,
+        recentAudit, serverNow: now,
+      }); return true;
+    }
+    if (pathname === '/api/admin/ai' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_dashboard')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const byZone = {};
+      for (const ai of aiEntities.values()) byZone[ai.map] = (byZone[ai.map] || 0) + 1;
+      json(res,200,{
+        total: aiEntities.size, maxPopulation: AI_MAX_POPULATION, byZone,
+        entities: [...aiEntities.values()].map(ai => ({id:ai.id, kind:'ai', name:ai.name, cls:ai.cls, lvl:ai.lvl, map:ai.map, fsm:ai.fsm, hp:ai.hp, maxHp:ai.maxHp, dead:ai.dead, slot:ai.slot})),
+      }); return true;
+    }
+
+    if (pathname === '/api/admin/players' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'search_players')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const q = cleanText(new URL(req.url,'http://localhost').searchParams.get('q')||'', 32);
+      if (q.length < 2) { json(res,200,{players:[]}); return true; }
+      const rows = await supabase('characters', {query:`?select=id,name,cls,lvl,user_id,users(username)&name=ilike.${encodeURIComponent('%'+q+'%')}&limit=20`});
+      const players = await Promise.all(rows.map(async r => {
+        const u = Array.isArray(r.users) ? r.users[0] : r.users;
+        const [ban, mute] = await Promise.all([activeBanFor(r.user_id), activeMuteFor(r.user_id)]);
+        return {charId:r.id, name:r.name, cls:r.cls, lvl:r.lvl, userId:r.user_id, username:u?u.username:'?', online:isAccountOnline(r.user_id), banned:!!ban, muted:!!mute};
+      }));
+      json(res,200,{players}); return true;
+    }
+
+    if (pathname === '/api/admin/kick' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'kick')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200)||'Sem motivo informado';
+      if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
+      if (!(await canActOnTarget(admin, targetUserId))) { json(res,403,{error:'Não é possível agir sobre uma conta com cargo igual ou superior ao seu.'}); return true; }
+      // Achado na revisao pre-merge: kickUserSockets so fechava o
+      // socket, nunca avisava o cliente do motivo -- o jogador so via
+      // uma reconexao de 2.5s sem explicacao nenhuma. Manda a mensagem
+      // 'kicked' antes do close, pro cliente mostrar um aviso real.
+      const n = kickUserSockets(targetUserId, 4004, 'Expulso por um administrador', {type:'kicked', reason});
+      await writeAdminAudit(admin.id, 'kick', {targetUserId, reason, metadata:{socketsClosed:n}});
+      json(res,200,{ok:true, socketsClosed:n}); return true;
+    }
+
+    if (pathname === '/api/admin/ban' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'ban')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200);
+      const durationMs = Number.isFinite(Number(input.durationMs)) && Number(input.durationMs) > 0 ? Number(input.durationMs) : null;
+      if (!targetUserId || !reason) { json(res,400,{error:'userId e reason obrigatórios'}); return true; }
+      if (!(await canActOnTarget(admin, targetUserId))) { json(res,403,{error:'Não é possível agir sobre uma conta com cargo igual ou superior ao seu.'}); return true; }
+      const expiresAt = durationMs ? new Date(Date.now()+durationMs).toISOString() : null;
+      await supabase('player_bans', {method:'POST', body:{user_id:targetUserId, reason, banned_by:admin.id, expires_at:expiresAt}, prefer:'return=minimal'});
+      // Achado na revisao pre-merge: banir so fechava o socket ativo, mas
+      // o token de sessao (ate 30 dias) continuava valido pra qualquer
+      // rota HTTP que nao exige WS aberto (Mercado, guilda, salvar
+      // personagem). Apaga TODAS as sessoes da conta na hora -- forca
+      // reautenticacao (que agora falha, ver o check de ban no login).
+      try { await supabase('sessions', {method:'DELETE', query:`?user_id=eq.${encodeURIComponent(targetUserId)}`}); } catch (err) { console.error('ban_session_purge_error', err.message); }
+      // Mesmo achado do kick acima -- manda 'banned' antes do close, pro
+      // cliente saber o motivo/prazo em vez de so tentar reconectar.
+      const n = kickUserSockets(targetUserId, 4003, 'Banido', {type:'banned', reason, expiresAt});
+      await writeAdminAudit(admin.id, 'ban', {targetUserId, reason, metadata:{expiresAt, socketsClosed:n}});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/unban' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'unban')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64);
+      if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
+      await supabase('player_bans', {method:'PATCH', query:`?user_id=eq.${encodeURIComponent(targetUserId)}&revoked_at=is.null`, body:{revoked_at:new Date().toISOString(), revoked_by:admin.id}, prefer:'return=minimal'});
+      await writeAdminAudit(admin.id, 'unban', {targetUserId});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/mute' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'mute')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200);
+      const durationMs = Number.isFinite(Number(input.durationMs)) && Number(input.durationMs) > 0 ? Number(input.durationMs) : null;
+      if (!targetUserId || !reason) { json(res,400,{error:'userId e reason obrigatórios'}); return true; }
+      if (!(await canActOnTarget(admin, targetUserId))) { json(res,403,{error:'Não é possível agir sobre uma conta com cargo igual ou superior ao seu.'}); return true; }
+      const expiresAt = durationMs ? new Date(Date.now()+durationMs).toISOString() : null;
+      await supabase('player_mutes', {method:'POST', body:{user_id:targetUserId, reason, muted_by:admin.id, expires_at:expiresAt}, prefer:'return=minimal'});
+      // aplica em tempo real pra quem ja esta conectado -- nunca precisa
+      // reconectar pra o mute comecar a valer.
+      const set = accountSockets.get(targetUserId);
+      if (set) for (const ws2 of set) { const p2 = clients.get(ws2); if (p2) { p2.muted = true; p2.muteReason = reason; } }
+      await writeAdminAudit(admin.id, 'mute', {targetUserId, reason, metadata:{expiresAt}});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/unmute' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'unban')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64);
+      if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
+      await supabase('player_mutes', {method:'PATCH', query:`?user_id=eq.${encodeURIComponent(targetUserId)}&revoked_at=is.null`, body:{revoked_at:new Date().toISOString(), revoked_by:admin.id}, prefer:'return=minimal'});
+      const set = accountSockets.get(targetUserId);
+      if (set) for (const ws2 of set) { const p2 = clients.get(ws2); if (p2) { p2.muted = false; p2.muteReason = null; } }
+      await writeAdminAudit(admin.id, 'unmute', {targetUserId});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/roles' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'manage_roles')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const rows = await supabase('admin_roles', {query:'?select=user_id,role,granted_at,users(username)&order=granted_at.asc'});
+      json(res,200,{roles:rows.map(r=>({userId:r.user_id, role:r.role, grantedAt:r.granted_at, username:(Array.isArray(r.users)?r.users[0]:r.users)?.username||'?'}))}); return true;
+    }
+    if (pathname === '/api/admin/roles' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_roles')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64), role = cleanText(input.role,16);
+      if (!targetUserId || !Object.keys(ADMIN_PERMS).includes(role)) { json(res,400,{error:'userId e role válidos são obrigatórios'}); return true; }
+      // withCharLock (mesmo mutex de sempre, reusado por uma chave fixa)
+      // serializa toda escrita em admin_roles dentro desta instancia --
+      // fecha a corrida entre "ler quantos owners existem" e "escrever"
+      // que duas chamadas concorrentes (grant+revoke, ou dois revokes)
+      // conseguiam explorar antes. So protege dentro desta instancia
+      // Node (mesma limitacao ja documentada de withCharLock/economia).
+      const result = await withCharLock('__admin_roles__', async () => {
+        const owners = await supabase('admin_roles', {query:'?select=user_id&role=eq.owner'});
+        if (role !== 'owner' && owners.length <= 1 && owners.some(o => o.user_id === targetUserId)) {
+          return {ok:false, error:'Não é possível rebaixar o último owner.'};
+        }
+        await supabase('admin_roles', {method:'POST', query:'?on_conflict=user_id', body:{user_id:targetUserId, role, granted_by:admin.id}, prefer:'resolution=merge-duplicates,return=minimal'});
+        return {ok:true};
+      });
+      if (!result.ok) { json(res,400,{error:result.error}); return true; }
+      await writeAdminAudit(admin.id, 'role_grant', {targetUserId, metadata:{role}});
+      json(res,200,{ok:true}); return true;
+    }
+    if (pathname === '/api/admin/roles/revoke' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_roles')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), targetUserId = cleanText(input.userId,64);
+      if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
+      // nunca deixa o ultimo owner se auto-revogar (ou ser revogado) --
+      // travaria o painel inteiro sem ninguem pra conceder cargo de novo.
+      // Mesmo lock de /api/admin/roles (POST) -- fecha a corrida de dois
+      // owners se revogando ao mesmo tempo.
+      const result = await withCharLock('__admin_roles__', async () => {
+        const owners = await supabase('admin_roles', {query:'?select=user_id&role=eq.owner'});
+        if (owners.length <= 1 && owners.some(o => o.user_id === targetUserId)) return {ok:false, error:'Não é possível remover o último owner.'};
+        await supabase('admin_roles', {method:'DELETE', query:`?user_id=eq.${encodeURIComponent(targetUserId)}`});
+        return {ok:true};
+      });
+      if (!result.ok) { json(res,400,{error:result.error}); return true; }
+      await writeAdminAudit(admin.id, 'role_revoke', {targetUserId});
+      json(res,200,{ok:true}); return true;
+    }
+
+    if (pathname === '/api/admin/economy' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_economy')) { json(res,403,{error:'Sem permissão'}); return true; }
+      // Visao SOMENTE LEITURA -- soma o que ja esta no banco, nunca altera
+      // nada. Nenhuma acao corretiva (dar/tirar ouro) foi implementada
+      // nesta fase de proposito: o pedido e explicito que nunca vire um
+      // "console de cheat"; uma acao corretiva futura, se pedida, exige
+      // seu proprio fluxo auditado com motivo obrigatorio.
+      const rows = await supabase('characters', {query:'?select=save'});
+      let totalGold=0, totalGem=0; for (const r of rows) { const s=r.save||{}; totalGold += Number(s.gold)||0; totalGem += Number(s.gem)||0; }
+      const [listings, transactions] = await Promise.all([
+        supabase('market_listings', {query:'?select=id&status=eq.active'}),
+        supabase('market_transactions', {query:'?select=id'}),
+      ]);
+      json(res,200,{totalGold, totalGem, charactersCounted:rows.length, activeListings:listings.length, totalTransactions:transactions.length}); return true;
+    }
+
+    if (pathname === '/api/admin/guilds' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_guilds')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const rows = await supabase('guilds', {query:'?select=id,name,tag,created_at&order=created_at.desc&limit=50'});
+      json(res,200,{guilds:rows}); return true;
+    }
+    if (pathname === '/api/admin/events' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_events')) { json(res,403,{error:'Sem permissão'}); return true; }
+      json(res,200,{upcoming: EVENT_DATA.scheduleAfter(Date.now(), 6)}); return true;
+    }
+    if (pathname === '/api/admin/audit' && req.method === 'GET') {
+      if (!adminHasPerm(admin.role,'view_security_log')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const rows = await supabase('admin_audit_log', {query:'?select=id,actor_user_id,action,target_user_id,target_character_id,reason,metadata,created_at&order=created_at.desc&limit=100'});
+      json(res,200,{audit:rows}); return true;
+    }
+
+    // Fase 5.15: noticias do Portal Publico -- gerenciadas so por
+    // admin/owner (nunca moderator/support). Leitura publica fica em
+    // /api/public/news (handlePublic), sem exigir nenhum cargo.
+    if (pathname === '/api/admin/news' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_news')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), title = cleanText(input.title,120), body = cleanText(input.body,4000);
+      if (!title || !body) { json(res,400,{error:'title e body obrigatórios'}); return true; }
+      await supabase('portal_news', {method:'POST', body:{title, body, author_user_id:admin.id}, prefer:'return=minimal'});
+      publicCache.clear();
+      await writeAdminAudit(admin.id, 'news_publish', {metadata:{title}});
+      json(res,200,{ok:true}); return true;
+    }
+    if (pathname === '/api/admin/news/delete' && req.method === 'POST') {
+      if (!adminHasPerm(admin.role,'manage_news')) { json(res,403,{error:'Sem permissão'}); return true; }
+      const input = await readJson(req), id = cleanText(input.id,64);
+      if (!id) { json(res,400,{error:'id obrigatório'}); return true; }
+      await supabase('portal_news', {method:'DELETE', query:`?id=eq.${encodeURIComponent(id)}`});
+      publicCache.clear();
+      await writeAdminAudit(admin.id, 'news_delete', {metadata:{id}});
+      json(res,200,{ok:true}); return true;
+    }
+
+    json(res,404,{error:'Rota não encontrada'}); return true;
+  } catch (err) {
+    console.error('admin_error', err.message);
+    if (!res.headersSent) json(res,500,{error:'Não foi possível concluir. Tente novamente.'});
+    return true;
+  }
+}
+
+// ===== Fase 5.15: Portal Publico =====
+// API 100% publica (sem auth) pro site /portal -- privacidade estrita:
+// nunca user_id/email/save/token/session/cargo-de-admin/moderacao
+// privada, so o que já é seguro por natureza (contagens, nomes
+// públicos, agenda de eventos). Cache curto (mesma fabrica de cache TTL
+// da Fase 5.10, RANKINGS.createRankCache -- 45s, dentro da janela de
+// 30-60s pedida) evita bater no Supabase a cada visitante.
+const publicCache = RANKINGS.createRankCache();
+async function cachedPublic(key, fn) {
+  const hit = publicCache.get(key);
+  if (hit) return hit;
+  const value = await fn();
+  publicCache.set(key, value);
+  return value;
+}
+async function handlePublic(req, res, pathname) {
+  if (!pathname.startsWith('/api/public')) return false;
+  try {
+    if (pathname === '/api/public/status' && req.method === 'GET') {
+      const data = await cachedPublic('status', async () => {
+        const onlineHuman = new Set([...clients.values()].filter(p=>p.authed).map(p=>p.userId)).size;
+        // Fase 5.16: contagem de IA real agora (aiEntities.size) -- nunca
+        // misturada com onlineHuman (fontes totalmente separadas: clients
+        // vs aiEntities), o total de humanos online nunca e inflado nem
+        // reduzido pela presenca de IA.
+        const worldBossActive = [...worldBossInstances.values()].some(i => i.state !== 'ended');
+        const nextEvents = EVENT_DATA.scheduleAfter(Date.now(), 4);
+        const nextWorldBoss = nextEvents.find(e => e.type === 'world_boss');
+        const nextTvt = nextEvents.find(e => e.type === 'team_vs_team');
+        let guildsCount = 0;
+        try { const rows = await supabase('guilds', {query:'?select=id'}); guildsCount = rows.length; } catch { /* Supabase fora do ar nunca derruba o status publico */ }
+        return {
+          population: {human: onlineHuman, ai: aiEntities.size},
+          worldBossActive,
+          nextWorldBossAt: nextWorldBoss ? nextWorldBoss.startAt : null,
+          nextTvtAt: nextTvt ? nextTvt.startAt : null,
+          guildsCount,
+        };
+      });
+      res.writeHead(200, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=30'});
+      res.end(JSON.stringify(data)); return true;
+    }
+    if (pathname === '/api/public/events' && req.method === 'GET') {
+      const data = await cachedPublic('events', async () => ({upcoming: EVENT_DATA.scheduleAfter(Date.now(), 8)}));
+      res.writeHead(200, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=30'});
+      res.end(JSON.stringify(data)); return true;
+    }
+    if (pathname === '/api/public/news' && req.method === 'GET') {
+      const data = await cachedPublic('news', async () => {
+        const rows = await supabase('portal_news', {query:'?select=id,title,body,published_at&order=published_at.desc&limit=20'});
+        return {news: rows};
+      });
+      res.writeHead(200, {'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=60'});
+      res.end(JSON.stringify(data)); return true;
+    }
+    json(res,404,{error:'Rota não encontrada'}); return true;
+  } catch (err) {
+    console.error('public_error', err.message);
+    if (!res.headersSent) json(res,503,{error:'Portal temporariamente indisponível.'});
     return true;
   }
 }
@@ -2183,36 +2577,92 @@ async function loadTvtCharacter(userId,charId){
 // de TvT que o EventManager (generico) nao sabe (World Boss nunca precisou
 // disso, party ja e sempre exatamente 4).
 function tvtRegistrationFull(eventId){const entries=eventManager.registrations.get(eventId);return!!entries&&entries.size>=TVT.TVT_MAX_PLAYERS}
+// Fase 5.16 (AI TvT Fill): tamanho final do time (sempre par, sempre
+// pelo menos TVT_MIN_PLAYERS, nunca acima de TVT_MAX_PLAYERS) dado
+// quantos humanos reais foram carregados com sucesso -- nucleo puro,
+// testavel sem Supabase/instancia nenhuma.
+function tvtFillTargetSize(humanCount) {
+  let size = Math.max(TVT.TVT_MIN_PLAYERS, humanCount);
+  if (size % 2 !== 0) size++;
+  return Math.min(size, TVT.TVT_MAX_PLAYERS);
+}
 async function startTvtEvent(event,registrations){
   try{
     const regs=[...registrations.values()].sort((a,b)=>a.registeredAt-b.registeredAt);
-    if(regs.length<TVT.TVT_MIN_PLAYERS){for(const r of regs)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: mínimo de 4 jogadores.'});return}
-    const capped=regs.slice(0,TVT.TVT_MAX_PLAYERS);
-    const usable=capped.length%2===0?capped:capped.slice(0,capped.length-1);
-    const reserve=capped.slice(usable.length);
+    if(!regs.length)return; // ninguem se inscreveu -- nunca gera uma partida so de IA
+    const capped=regs.slice(0,TVT.TVT_MAX_PLAYERS), reserve=regs.slice(TVT.TVT_MAX_PLAYERS);
     for(const r of reserve)sendToWorldBossMember(r,{type:'tvt_reserve',message:'Você ficou como reserva nesta rodada.'});
     const loaded=[];
-    for(const r of usable){
+    for(const r of capped){
       const active=activeCharacterForUser(r.userId);if(!active||active.p.charId!==r.charId)continue;
       try{const data=await loadTvtCharacter(r.userId,r.charId);if(data)loaded.push({userId:r.userId,charId:r.charId,name:data.row.name||data.save.name,cls:data.row.cls,lvl:data.row.lvl,save:data.save,snapshot:data.snapshot,powerScore:TVT.powerScore(data.snapshot,data.eq)});}
       catch(err){console.error('tvt_load_error',r.charId,err.message)}
     }
-    if(loaded.length<TVT.TVT_MIN_PLAYERS){for(const r of usable)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: mínimo de 4 jogadores.'});return}
-    const evenLoaded=loaded.length%2===0?loaded:loaded.slice(0,loaded.length-1);
+    if(!loaded.length){for(const r of capped)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: nenhum jogador disponível.'});return}
+    // Fase 5.16 (AI TvT Fill): reservas humanas ja tratadas acima, ANTES
+    // de qualquer IA existir -- prioridade humana real, nao so um
+    // comentario. So preenche com IA a quantidade que falta pra fechar
+    // um time par com pelo menos TVT_MIN_PLAYERS -- nunca reduz humanos
+    // reais pra caber num numero par (o corte por imparidade de antes
+    // foi removido: agora a IA fecha a diferenca em vez de descartar um
+    // humano que se inscreveu). Nivel da IA = media dos humanos reais
+    // carregados, pra ficar equilibrado (nem fraco nem forte demais).
+    const targetSize=tvtFillTargetSize(loaded.length);
+    const aiNeeded=Math.max(0,targetSize-loaded.length);
+    const aiMembers=[];
+    if(aiNeeded>0){
+      const avgLvl=Math.round(loaded.reduce((s,m)=>s+m.lvl,0)/loaded.length)||20;
+      for(let i=0;i<aiNeeded;i++){
+        const cls=AI_CLASS_POOL[Math.floor(Math.random()*AI_CLASS_POOL.length)];
+        const aiSave=buildAiSave(cls,avgLvl);
+        const name=AI_NAME_POOL[Math.floor(Math.random()*AI_NAME_POOL.length)]+Math.floor(10+Math.random()*90);
+        const snapshot=WORLD_BOSS.combatSnapshot({userId:null,charId:null,name,cls,lvl:avgLvl,save:aiSave});
+        const charId='ai_'+crypto.randomBytes(4).toString('hex');
+        aiMembers.push({userId:null,charId,name:snapshot.name,cls,lvl:avgLvl,save:aiSave,snapshot,powerScore:TVT.powerScore(snapshot,aiSave.eq),kind:'ai'});
+      }
+    }
+    const evenLoaded=[...loaded,...aiMembers];
     const teams=TVT.balanceTvtTeams(evenLoaded);
+    if(!teams){for(const r of capped)sendToWorldBossMember(r,{type:'tvt_cancelled',message:'Team vs Team cancelado: não foi possível formar times.'});return}
     const byCharId=new Map(evenLoaded.map(m=>[m.charId,m]));
     const members=[];
-    for(const team of TVT.TVT_TEAM_IDS)for(const charId of teams[team]){const m=byCharId.get(charId);members.push({userId:m.userId,charId:m.charId,name:m.name,cls:m.cls,lvl:m.lvl,team,snapshot:m.snapshot});}
+    for(const team of TVT.TVT_TEAM_IDS)for(const charId of teams[team]){const m=byCharId.get(charId);members.push({userId:m.userId,charId:m.charId,name:m.name,cls:m.cls,lvl:m.lvl,team,snapshot:m.snapshot,kind:m.kind});}
     const instance=TVT.createTvtInstance({eventId:event.id,members});
     tvtInstances.set(instance.mapId,instance);
     const state=mapState(instance.mapId);state.isTvt=true;state.tvt=instance;
     for(const member of instance.players.values()){
+      if(member.kind==='ai'){
+        // Fase 5.16: spawna a entidade de IA de verdade (runtime) ja no
+        // slot atribuido -- nunca uma conta persistente, nunca aparece
+        // em reserva humana nenhuma. NUNCA respeita AI_MAX_POPULATION
+        // aqui (bug corrigido apos revisao pre-merge): esse membro ja
+        // foi contado em balanceTvtTeams/instance.players antes deste
+        // loop -- pular o spawn aqui criaria um "fantasma" (ocupa vaga
+        // de time, nunca se move/luta). Preenchimento de fila e uma
+        // resposta direta a um pedido humano real, sempre tem
+        // prioridade sobre o teto ambiental de IA de campo (que
+        // continua valendo em aiPopulationTick); alem disso ja e
+        // limitado sozinho por TVT_MAX_PLAYERS.
+        const personality=AI_PERSONALITY_KINDS[Math.floor(Math.random()*AI_PERSONALITY_KINDS.length)];
+        const entity={
+          id:member.charId,kind:'ai',name:member.name,cls:member.cls,lvl:member.lvl,map:instance.mapId,
+          x:member.x,y:member.y,dir:0,moving:false,atkT:0,atkAng:0,
+          hp:member.hp,maxHp:member.maxHp,dead:false,respawnAt:0,
+          combat:member.snapshot,basicCdUntil:0,buffUntil:0,pendingSkill:{},lastDamageAt:0,evadeUntil:0,shieldUntil:0,shield:0,
+          fsm:'tvt',fsmUntil:0,targetMobId:null,homeZone:AI_FIELD_ZONES[0],
+          personality,profile:aiPersonalityProfile(personality),slot:{kind:'tvt',instanceId:instance.mapId,team:member.team},
+          tvtTargetId:null,tvtEngageAt:0,createdAt:Date.now(),
+        };
+        aiEntities.set(entity.id,entity);
+        broadcast({type:'player_join',player:aiPublicPlayer(entity)});
+        continue;
+      }
       const active=activeCharacterForUser(member.userId);if(!active)continue;
       instance.previousLocations.set(member.charId,{map:active.p.map,x:active.p.x,y:active.p.y});
       tvtByChar.set(member.charId,instance.mapId);
       for(const[ws,p]of clients)if(p.userId===member.userId&&p.charId===member.charId){p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{type:'tvt_enter',mapId:instance.mapId,team:member.team,spawn:{x:member.x,y:member.y},scoreLimit:instance.scoreLimit,expiresAt:instance.expiresAt});}
     }
-    console.log('tvt_instance_start',instance.id,instance.mapId,[...instance.players.values()].map(p=>p.team+':'+p.charId).join(','));
+    console.log('tvt_instance_start',instance.id,instance.mapId,[...instance.players.values()].map(p=>p.team+':'+p.charId+(p.kind==='ai'?'(ia)':'')).join(','));
   }catch(err){console.error('tvt_start_error',event.id,err.message)}
 }
 function tvtPublicSync(instance){broadcastMap(instance.mapId,TVT.publicTvtState(instance))}
@@ -2220,6 +2670,7 @@ async function grantTvtRewards(instance){
   if(instance.rewardsGranted)return;instance.rewardsGranted=true;
   const now=Date.now();
   for(const member of instance.players.values()){
+    if(member.kind==='ai')continue; // Fase 5.16, REGRA ABSOLUTA: IA nunca recebe recompensa/XP/rank_stats de TvT
     if(!TVT.isTvtEligible(member,instance,now))continue;
     try{
       await withCharLock(member.charId,async()=>{
@@ -2250,6 +2701,11 @@ function finishTvtInstance(instance,reason,winner){
       send(ws,{type:'tvt_exit',reason,winner:instance.winner,score:instance.score,outcome:TVT.outcomeForTeam(member.team,instance.winner),map:p.map,x:p.x,y:p.y});
     }
     tvtByChar.delete(member.charId);
+    // Fase 5.16: qualquer IA que preencheu esta partida e removida de
+    // vez quando ela acaba -- nunca fica presa apontando pra um TvT que
+    // ja terminou (limpeza rigorosa, sem leak, mesmo espirito da limpeza
+    // de masmorra).
+    if(member.kind==='ai')aiDespawnEntity(member.charId);
   }
   maps.delete(instance.mapId);tvtInstances.delete(instance.mapId);
   console.log('tvt_instance_end',instance.id,reason,instance.winner||'draw');
@@ -2314,24 +2770,40 @@ const DUNGEON_IDLE_MS = 30 * 60 * 1000, DUNGEON_MAX_LIFE_MS = 2 * 60 * 60 * 1000
 // vez de inventar um tier de elite novo (fora do escopo desta fase, que e
 // so mapa/colisao/posicionamento -- ver LEIA-PRIMEIRO.md "Fase 5.13").
 const DUNGEON_ROOM_MOB_COUNTS = { sala1: [2, 3], sala2: [4, 6], sala3: [3, 4], sala4: [5, 7], sala5: [2, 2] };
-function createDungeonInstance(zone, ownerCharId, ownerUserId) {
+// Fase 5.13.1 -- Dungeon em Party: nucleo real de criacao de instancia,
+// aceita 1 a 4 membros reais (nunca confia em memberIds do cliente --
+// quem chama isto ja resolveu cada membro via activeCharacterForUser +
+// validou o desbloqueio real no banco, ver handleDungeonEnter).
+// createDungeonInstance(zone,charId,userId) continua existindo com a
+// MESMA assinatura de sempre (usada por todos os testes/chamadas solo
+// existentes) -- e so um wrapper fino sobre esta funcao com 1 membro.
+function buildDungeonInstance(zone, members) {
   const cfg = DUNGEON_CFG[zone];
-  if (!cfg) return null;
+  if (!cfg || !Array.isArray(members) || !members.length) return null;
   const seed = crypto.randomInt(1, 2147483647); // servidor escolhe -- cliente nunca influencia o layout/loot
   const layout = DUNGEON_GEN.dungeonLayout(seed);
   const instanceId = crypto.randomBytes(4).toString('hex');
   const mapId = zone + '_d#' + instanceId;
   const state = mapState(mapId);
+  const scale = DUNGEON_GEN.dungeonScaleFor(members.length);
+  const memberMap = new Map(members.map(m => [m.charId, {
+    userId: m.userId, cls: m.cls || 'guerreiro', online: true, joinedAt: Date.now(),
+    damageDone: 0, lastActivityAt: Date.now(), kind: m.kind || 'human', // Fase 5.16: marca membro de IA (dungeonHandleMobDeath usa pra nunca creditar)
+  }]));
   Object.assign(state, {
-    isDungeon: true, zone, seed, layout, ownerCharId, ownerUserId,
-    members: new Set([ownerCharId]), bossDefeated: false, bossId: null,
+    // ownerCharId/ownerUserId preservados (primeiro membro real) -- usados
+    // por dungeonCleanupTick e por qualquer codigo antigo que ainda
+    // espere um "dono" unico; members e sempre a fonte real de verdade.
+    isDungeon: true, zone, seed, layout, ownerCharId: members[0].charId, ownerUserId: members[0].userId,
+    members: memberMap, scale, bossDefeated: false, bossId: null,
     createdAt: Date.now(), lastActiveAt: Date.now(),
   });
   // Fase 5.13: roster distribuido por SALA NOMEADA (layout fixo), nao
   // mais por chance-por-celula de uma grade uniforme -- mesma fonte de
   // tipo/nivel por mob (cfg.trash via mobStats), so a distribuicao
   // espacial mudou. rnd() continua o mesmo stream mulberry(seed+1),
-  // determinístico por instancia.
+  // determinístico por instancia. Fase 5.13.1: HP escalado por `scale`
+  // (numero real de participantes) -- nunca mexe no dano do jogador.
   const rnd = DUNGEON_GEN.mulberry(seed + 1);
   let idx = 0;
   for (const roomId of layout.mobRooms) {
@@ -2344,14 +2816,18 @@ function createDungeonInstance(zone, ownerCharId, ownerUserId) {
       if (!stats) continue;
       const pt = DUNGEON_GEN.roomRandomPoint(room, rnd);
       const id = mapId + ':' + (idx++);
-      state.mobs.set(id, {id,maxhp:stats.hp,hp:stats.hp,dead:false,x:pt.x,y:pt.y,sx:pt.x,sy:pt.y,state:'idle',respawnAt:0,boss:false,type:pick.type,lvl:pick.lvl,k:pick.k,dun:true,wallRects:layout.rects});
+      const hp = Math.round(stats.hp * scale);
+      state.mobs.set(id, {id,maxhp:hp,hp,dead:false,x:pt.x,y:pt.y,sx:pt.x,sy:pt.y,state:'idle',respawnAt:0,boss:false,type:pick.type,lvl:pick.lvl,k:pick.k,dun:true,wallRects:layout.rects});
     }
   }
-  const bp = cfg.boss, bstats = mobStats(bp.type, bp.lvl, true, bp.k), bossHp = bstats ? Math.round(bstats.hp * 3) : 1000;
+  const bp = cfg.boss, bstats = mobStats(bp.type, bp.lvl, true, bp.k), bossHp = bstats ? Math.round(bstats.hp * 3 * scale) : 1000;
   const bossId = mapId + ':boss', bc = layout.boss;
   state.mobs.set(bossId, {id:bossId,maxhp:bossHp,hp:bossHp,dead:false,x:bc.x,y:bc.y,sx:bc.x,sy:bc.y,state:'idle',respawnAt:0,boss:true,type:bp.type,lvl:bp.lvl,k:bp.k,dun:true,wallRects:layout.rects});
   state.bossId = bossId;
   return state;
+}
+function createDungeonInstance(zone, ownerCharId, ownerUserId) {
+  return buildDungeonInstance(zone, [{charId: ownerCharId, userId: ownerUserId}]);
 }
 // Instancias que o personagem (charId) ja possui, por zona -- pra
 // reconexao/revisita reusar a MESMA instancia (mob morto continua morto)
@@ -2380,8 +2856,22 @@ function dungeonCleanupTick() {
     const idleFor = now - state.lastActiveAt, ageFor = now - state.createdAt;
     if (idleFor > DUNGEON_IDLE_MS || ageFor > DUNGEON_MAX_LIFE_MS) {
       maps.delete(mapId);
-      const owned = dungeonByOwner.get(state.ownerCharId);
-      if (owned && owned.get(state.zone) === mapId) owned.delete(state.zone);
+      // Fase 5.13.1: limpa dungeonByOwner de TODOS os membros reais da
+      // instancia (nao so o antigo "dono" unico) -- senao um membro que
+      // nao seja o primeiro da lista ficaria com uma entrada travada
+      // apontando pra um mapId que ja nao existe mais (nao quebra nada --
+      // ownedDungeonInstance ja se protege contra isso -- mas cresceria
+      // sem limite com o tempo).
+      const memberIds = state.members ? [...state.members.keys()] : [state.ownerCharId];
+      for (const charId of memberIds) {
+        const owned = dungeonByOwner.get(charId);
+        if (owned && owned.get(state.zone) === mapId) owned.delete(state.zone);
+      }
+      // Fase 5.16: qualquer IA que estivesse preenchendo esta instancia
+      // (ai.slot.instanceId===mapId) e removida de vez -- nunca fica
+      // presa apontando pra uma masmorra que ja nao existe mais
+      // (limpeza rigorosa de referencias, sem leak).
+      for (const ai of [...aiEntities.values()]) if (ai.slot && ai.slot.instanceId === mapId) aiDespawnEntity(ai.id);
     }
   }
 }
@@ -2410,7 +2900,9 @@ const server = http.createServer(async (req, res) => {
   if (handleRankings(req, res, pathname)) return;
   if (await handleMarket(req, res, pathname)) return;
   if (handleEvents(req, res, pathname)) return;
-  const rel = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
+  if (await handleAdmin(req, res, pathname)) return;
+  if (await handlePublic(req, res, pathname)) return;
+  const rel = pathname === '/' ? 'index.html' : pathname === '/admin' || pathname === '/admin/' ? 'admin.html' : pathname === '/portal' || pathname === '/portal/' ? 'portal.html' : pathname.replace(/^\/+/, '');
   const file = path.resolve(ROOT, rel);
   if (!file.startsWith(ROOT + path.sep)) { res.writeHead(403); return res.end('Forbidden'); }
   fs.stat(file, (err, stat) => {
@@ -2465,6 +2957,16 @@ async function handleWsJoin(ws, msg) {
         }
       } catch (err) { console.error('ws_join_auth_error', err.message); userId = null; charRow = null; }
     }
+    // Fase 5.14: ban persistente tambem e checado aqui -- cobre quem ja
+    // tinha uma sessao valida (token) emitida ANTES de ser banido (o
+    // check no login so pega quem tenta logar DEPOIS). Nunca degrada pra
+    // anonimo: fecha a conexao de verdade, com o motivo explicito.
+    if (userId) {
+      try {
+        const ban = await activeBanFor(userId);
+        if (ban) { send(ws, {type:'banned', reason:ban.reason, expiresAt:ban.expires_at||null}); ws.close(4003, 'Banido'); return; }
+      } catch (err) { console.error('ws_join_ban_check_error', err.message); }
+    }
     if (clients.get(ws)) return; // ja tratado por outra mensagem enquanto este join aguardava o Supabase
     const claimedCls=ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',claimedLvl=Math.max(1,Math.min(99,Number(msg.lvl)||1));
     const realSave = charRow ? sanitizeSave(charRow.save,charRow.lvl) : startingSave(claimedCls,cleanText(msg.name,14)||'Herói');
@@ -2488,6 +2990,10 @@ async function handleWsJoin(ws, msg) {
     // carrega a filiacao real do banco no join/reconnect pra rotear
     // guild_chat sem bater no banco a cada mensagem.
     if (p.charId) { try { const brief = await loadCharGuildBrief(p.charId); if (brief) { p.guildId=brief.guildId; p.guildRole=brief.role; p.guildTag=brief.tag; p.guildName=brief.name; } } catch (err) { console.error('ws_join_guild_error', err.message); } }
+    // Fase 5.14: mute persistente -- checado no join (cobre quem entrou
+    // DEPOIS do mute) e reforcado de novo em tempo real por
+    // handleAdminMute pra quem ja estava conectado.
+    if (userId) { try { const mute = await activeMuteFor(userId); p.muted = !!mute; p.muteReason = mute ? mute.reason : null; } catch (err) { console.error('ws_join_mute_check_error', err.message); } }
     if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
     send(ws, {type:'welcome', id:p.id, sessionKey:p.sessionKey, hp:p.hp, maxHp:p.maxHp, dead:p.dead, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
     send(ws, eventStatePayload(p));
@@ -2498,6 +3004,25 @@ async function handleWsJoin(ws, msg) {
     // cria instancia nova, nunca muda de time).
     const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);
     if(tvtMember&&tvtMember.userId===p.userId&&tvtInstance.state!=='ended'){tvtMember.online=true;p.map=tvtInstance.mapId;p.x=tvtMember.x;p.y=tvtMember.y;send(ws,{type:'tvt_enter',mapId:tvtInstance.mapId,team:tvtMember.team,spawn:{x:p.x,y:p.y},scoreLimit:tvtInstance.scoreLimit,expiresAt:tvtInstance.expiresAt,reconnect:true});send(ws,TVT.publicTvtState(tvtInstance))}
+    // Fase 5.13.1: mesma reconexao de World Boss/TvT -- mesmo userId+charId
+    // volta pra MESMA instancia de masmorra (solo ou party), nunca cria
+    // outra. dungeonByOwner pode ter mais de uma zona registrada pro
+    // mesmo personagem (visitas antigas ja limpas por dungeonCleanupTick),
+    // entao procura a que ainda estiver realmente viva.
+    if(p.charId){
+      const dOwned=dungeonByOwner.get(p.charId);
+      if(dOwned)for(const[dZone,dMapId]of dOwned){
+        const dState=maps.get(dMapId);
+        if(!dState||!dState.isDungeon)continue;
+        const dMember=dState.members.get(p.charId);
+        if(dMember&&dMember.userId===p.userId){dMember.online=true;dState.lastActiveAt=Date.now();p.map=dState.id;sendDungeonStateTo(ws,dState,{reconnect:true})}
+        break;
+      }
+    }
+    // Fase 5.13.2: reconectar dentro da tolerancia de desconexao da fila
+    // de matchmaking limpa o disconnectedAt -- volta a valer pra formar
+    // grupo de novo, sem perder a posicao/tempo de espera acumulado.
+    if(p.userId){const qz=userQueueZone.get(p.userId);const qe=qz&&dungeonQueue.get(qz)?.get(p.userId);if(qe)qe.disconnectedAt=0}
     broadcast({type:'player_join', player:publicPlayer(p)}, ws);
   } finally { joining.delete(ws); }
 }
@@ -2510,32 +3035,687 @@ const DUNGEON_UNLOCK_QUEST = { floresta: 3, cripta: 7, serra: 11, pantano: 15, t
 // local. Valida sessao (p.authed), confere o requisito real (quest OU
 // portal comprado, lido do banco -- nunca do que o cliente reivindica) e
 // so entao cria/reusa a instancia e muda p.map pra ela.
+// Acha o socket ATUAL de um charId (se online agora) -- mesmo padrao de
+// busca linear em `clients` ja usado por sendToWorldBossMember etc.
+function wsForChar(charId) {
+  for (const [ws2, p2] of clients) if (p2.charId === charId) return ws2;
+  return null;
+}
+// ws "morto" -- send() so checa readyState, entao isto deixa qualquer
+// funcao que manda mensagem pra um membro OFFLINE (ex.: creditDungeonReward
+// pra quem esta desconectado no momento da recompensa) rodar sem erro,
+// simplesmente sem entregar nada (a persistencia no banco acontece do
+// mesmo jeito -- so a notificacao em tempo real e que nao tem quem receba).
+const DUNGEON_OFFLINE_WS = Object.freeze({ readyState: 3 });
+// Fase 5.13.1: elegibilidade de recompensa por contribuicao real -- nunca
+// exige kill (o membro pode nunca ter desferido o golpe final em nada e
+// ainda assim ser elegivel por ter causado dano real em outros mobs, ou
+// por estar ativo recentemente). Mesmo espirito de isTvtEligible (Fase
+// 5.7): dano>0 OU atividade dentro da janela.
+const DUNGEON_ELIGIBLE_IDLE_MS = 90 * 1000;
+function dungeonMemberEligible(member, now) {
+  if (!member) return false;
+  if (member.damageDone > 0) return true;
+  return (now - member.lastActivityAt) < DUNGEON_ELIGIBLE_IDLE_MS;
+}
+function dungeonRosterPayload(state) {
+  return [...state.mobs.values()].map(m => ({id:m.id, type:m.type, lvl:m.lvl, k:m.k, boss:!!m.boss, x:Math.round(m.x), y:Math.round(m.y), maxhp:m.maxhp, hp:m.hp, dead:!!m.dead}));
+}
+function sendDungeonStateTo(ws, state, extra) {
+  send(ws, Object.assign({type:'dungeon_state', map:state.id, zone:state.zone, seed:state.seed, start:state.layout.start, roster:dungeonRosterPayload(state), bossDefeated:state.bossDefeated}, extra||{}));
+}
+// Fase 5.13.1: entrada agora suporta ate 4 jogadores reais de uma Party
+// (reaproveitando o sistema de Party existente, parties/memberParty --
+// nenhum sistema novo) alem do solo de sempre. So o LIDER da Party
+// consegue iniciar; o servidor resolve quem realmente esta online AGORA
+// com aquele personagem ativo (activeCharacterForUser, mesmo padrao ja
+// usado por registerWorldBossParty) -- nunca confia em memberIds que o
+// cliente mandasse. Cada membro resolvido tem o proprio requisito de
+// desbloqueio validado no banco (nunca herda do lider). Membros que nao
+// estavam online no momento do start simplesmente ficam de fora (late
+// join depois disso nao entra nessa instancia -- por design).
+// Achado na revisao pre-merge: um lider de Party podia efetivamente
+// "sequestrar" um membro que ja estivesse numa partida de TvT/World
+// Boss ativa (ou ja em outra masmorra de zona diferente), teleportando
+// ele no meio da outra partida sem nenhuma checagem. Nunca a mesma
+// zona que o proprio charId esta tentando (re)entrar agora --
+// ownedDungeonInstance ja trata reconexao normal antes de qualquer
+// chamada a esta funcao.
+function charBusyElsewhere(charId, zone) {
+  if (tvtByChar.get(charId)) return true;
+  if (worldBossByChar.get(charId)) return true;
+  const owned = dungeonByOwner.get(charId);
+  if (owned) for (const [dZone, dMapId] of owned) {
+    if (dZone === zone) continue;
+    const dState = maps.get(dMapId);
+    if (dState && dState.isDungeon) return true;
+  }
+  return false;
+}
 async function handleDungeonEnter(ws, p, msg) {
   const zone = cleanText(msg.zone, 16);
   const cfg = DUNGEON_CFG[zone];
   if (!cfg) { send(ws, {type:'dungeon_error', error:'Masmorra inválida'}); return; }
   if (!p.authed || !p.userId || !p.charId) { send(ws, {type:'dungeon_error', error:'Entre com uma conta online para acessar masmorras'}); return; }
+  dungeonQueueLeaveInternal(p.userId); // entrada manual/direta cancela qualquer fila de matchmaking pendente (nunca fica em dois estados ao mesmo tempo)
   try {
-    const rows = await supabase('characters', {query:`?select=save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
-    const row = rows[0];
-    if (!row) { send(ws, {type:'dungeon_error', error:'Personagem não encontrado'}); return; }
-    const save = sanitizeSave(row.save, p.lvl);
-    const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
-    if (!unlocked) { send(ws, {type:'dungeon_error', error:'Região ainda não liberada'}); return; }
-    let state = ownedDungeonInstance(p.charId, zone);
-    if (!state) {
-      state = createDungeonInstance(zone, p.charId, p.userId);
-      rememberDungeonInstance(p.charId, zone, state.id);
+    // Ja pertence a uma instancia ativa dessa zona (solo ou party, criada
+    // por ele ou por outro lider)? Reusa -- reconexao/reenvio de
+    // dungeon_enter nunca duplica instancia.
+    const existing = ownedDungeonInstance(p.charId, zone);
+    if (existing) {
+      const member = existing.members.get(p.charId);
+      if (member && member.userId === p.userId) {
+        member.online = true; existing.lastActiveAt = Date.now(); p.map = existing.id;
+        sendDungeonStateTo(ws, existing); return;
+      }
     }
-    state.lastActiveAt = Date.now();
-    p.map = state.id;
-    const roster = [...state.mobs.values()].map(m => ({id:m.id, type:m.type, lvl:m.lvl, k:m.k, boss:!!m.boss, x:Math.round(m.x), y:Math.round(m.y), maxhp:m.maxhp, hp:m.hp, dead:!!m.dead}));
-    send(ws, {type:'dungeon_state', map:state.id, zone, seed:state.seed, start:state.layout.start, roster, bossDefeated:state.bossDefeated});
+
+    const partyCode = memberParty.get(p.userId);
+    const party = partyCode && parties.get(partyCode);
+    const inRealParty = party && party.members.size > 1;
+    if (inRealParty && party.ownerId !== p.userId) {
+      send(ws, {type:'dungeon_error', error:'Apenas o líder do grupo pode iniciar a masmorra.'}); return;
+    }
+
+    // Resolve membros REAIS: so quem esta online agora com aquele
+    // personagem ativo, nunca o que o cliente afirmar. Solo = so ele mesmo.
+    const candidates = [];
+    if (inRealParty) {
+      for (const userId of party.members.keys()) {
+        const active = activeCharacterForUser(userId);
+        if (active && !charBusyElsewhere(active.p.charId, zone)) candidates.push({userId, charId: active.p.charId, cls: active.p.cls, ws: active.ws});
+      }
+    } else if (!charBusyElsewhere(p.charId, zone)) {
+      candidates.push({userId: p.userId, charId: p.charId, cls: p.cls, ws});
+    }
+
+    // Valida o desbloqueio de CADA candidato lendo o save real (nunca
+    // confia no que o cliente/estado em memoria diz) -- so quem tem a
+    // regiao liberada de verdade entra.
+    const validMembers = [];
+    for (const c of candidates) {
+      try {
+        const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(c.charId)}&user_id=eq.${encodeURIComponent(c.userId)}&limit=1`});
+        const row = rows[0]; if (!row) continue;
+        const save = sanitizeSave(row.save, row.lvl);
+        const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
+        if (unlocked) validMembers.push(c);
+      } catch (err) { console.error('dungeon_member_check_error', c.charId, err.message); }
+    }
+    if (!validMembers.length) { send(ws, {type:'dungeon_error', error: inRealParty ? 'Nenhum jogador do grupo tem essa região liberada.' : 'Região ainda não liberada'}); return; }
+    if (inRealParty && !validMembers.some(m => m.charId === p.charId)) {
+      // o proprio lider (quem pediu) nao esta liberado -- o grupo todo fica de fora dessa tentativa.
+      send(ws, {type:'dungeon_error', error:'Você ainda não liberou essa região.'}); return;
+    }
+
+    const state = buildDungeonInstance(zone, validMembers.map(m => ({charId:m.charId, userId:m.userId, cls:m.cls})));
+    if (!state) { send(ws, {type:'dungeon_error', error:'Não foi possível criar a instância.'}); return; }
+    for (const m of validMembers) {
+      rememberDungeonInstance(m.charId, zone, state.id);
+      const memberWs = m.ws || wsForChar(m.charId);
+      if (memberWs) { const memberP = clients.get(memberWs); if (memberP) memberP.map = state.id; sendDungeonStateTo(memberWs, state, inRealParty && validMembers.length > 1 ? {party:true} : undefined); }
+    }
   } catch (err) {
     console.error('dungeon_enter_error', err.message, err.status || '', err.detail || '');
     send(ws, {type:'dungeon_error', error:'Não foi possível entrar na masmorra. Tente novamente.'});
   }
 }
+
+// ===== Fase 5.13.2: Matchmaking de Dungeon =====
+// Fila em memoria (efemera, como Party/masmorra -- sem tabela), somente
+// humanos: preenchimento por IA fica pra Fase 5.16 (o campo allowAiFill
+// so e guardado aqui, nunca lido por nada que spawne IA nesta fase).
+// Chaveada por userId (mesma granularidade de Party/activeCharacterForUser),
+// nunca charId -- um personagem "e" a conta ativa no momento do match.
+const DUNGEON_QUEUE_PREFERRED_SIZE = 4;
+const DUNGEON_QUEUE_FALLBACK_3_MS = 25000; // so 3 na fila ha esse tempo -> fecha com 3
+const DUNGEON_QUEUE_FALLBACK_2_MS = 45000; // so 2 na fila ha esse tempo -> fecha com 2
+const DUNGEON_QUEUE_FALLBACK_SOLO_MS = 60000; // sozinho ha esse tempo E soloOptIn -> entra sozinho
+const DUNGEON_QUEUE_DISCONNECT_GRACE_MS = 20000; // desconectar na fila nao remove na hora (rede instavel) -- so depois desse prazo sem reconectar
+const dungeonQueue = new Map(); // zone -> Map<userId, {charId,cls,queuedAt,allowAiFill,soloOptIn,disconnectedAt}>
+const userQueueZone = new Map(); // userId -> zone (nunca duas entradas simultaneas pro mesmo usuario)
+function dungeonQueueLeaveInternal(userId) {
+  const zone = userQueueZone.get(userId);
+  if (zone) { const q = dungeonQueue.get(zone); if (q) { q.delete(userId); if (!q.size) dungeonQueue.delete(zone); } }
+  userQueueZone.delete(userId);
+}
+function dungeonQueueStatusPayload(userId) {
+  const zone = userQueueZone.get(userId);
+  const entry = zone && dungeonQueue.get(zone)?.get(userId);
+  if (!zone || !entry) return {type:'dungeon_queue_state', inQueue:false};
+  const q = dungeonQueue.get(zone);
+  const size = [...q.values()].filter(e => !e.disconnectedAt).length;
+  return {type:'dungeon_queue_state', inQueue:true, zone, queuedAt:entry.queuedAt, size, preferredSize:DUNGEON_QUEUE_PREFERRED_SIZE};
+}
+async function handleDungeonQueueJoin(ws, p, msg) {
+  const zone = cleanText(msg.zone, 16);
+  const cfg = DUNGEON_CFG[zone];
+  if (!cfg) { send(ws, {type:'dungeon_queue_error', error:'Masmorra inválida'}); return; }
+  if (!p.authed || !p.userId || !p.charId) { send(ws, {type:'dungeon_queue_error', error:'Entre com uma conta online para usar o matchmaking'}); return; }
+  try {
+    const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
+    const row = rows[0];
+    if (!row) { send(ws, {type:'dungeon_queue_error', error:'Personagem não encontrado'}); return; }
+    const save = sanitizeSave(row.save, row.lvl);
+    const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
+    if (!unlocked) { send(ws, {type:'dungeon_queue_error', error:'Região ainda não liberada'}); return; }
+  } catch (err) {
+    console.error('dungeon_queue_join_check_error', err.message);
+    send(ws, {type:'dungeon_queue_error', error:'Não foi possível entrar na fila. Tente novamente.'}); return;
+  }
+  dungeonQueueLeaveInternal(p.userId);
+  if (!dungeonQueue.has(zone)) dungeonQueue.set(zone, new Map());
+  dungeonQueue.get(zone).set(p.userId, {charId:p.charId, cls:p.cls, queuedAt:Date.now(), allowAiFill:!!msg.allowAiFill, soloOptIn:!!msg.soloOptIn, disconnectedAt:0});
+  userQueueZone.set(p.userId, zone);
+  send(ws, dungeonQueueStatusPayload(p.userId));
+}
+function handleDungeonQueueLeave(ws, p) {
+  if (p.userId) dungeonQueueLeaveInternal(p.userId);
+  send(ws, {type:'dungeon_queue_state', inQueue:false});
+}
+// Preferencia de diversidade de classe, sem bloquear indefinidamente: o
+// mais antigo da fila sempre entra (justica por ordem de chegada); depois
+// disso prioriza quem tem uma classe ainda nao escolhida no grupo, e so
+// preenche o resto com quem sobrar (mais antigo primeiro) se a diversidade
+// se esgotar -- nunca deixa o grupo incompleto so por falta de variedade.
+function dungeonQueuePickGroup(entries, n) {
+  const picked = [entries[0]];
+  const usedClasses = new Set([entries[0][1].cls]);
+  const rest = entries.slice(1);
+  for (let i = 0; i < rest.length && picked.length < n; i++) {
+    if (!usedClasses.has(rest[i][1].cls)) { picked.push(rest[i]); usedClasses.add(rest[i][1].cls); rest.splice(i, 1); i--; }
+  }
+  for (let i = 0; i < rest.length && picked.length < n; i++) picked.push(rest[i]);
+  return picked;
+}
+// Fecha um grupo encontrado pelo matchmaking: revalida desbloqueio de
+// CADA membro no banco (o check da entrada na fila pode ter ficado
+// velho), monta uma Party de verdade pra eles (reusa o mesmo sistema da
+// Fase 5.13.1 -- nunca uma estrutura paralela; membro que já estivesse
+// numa Party manual é desligado dela, o pareamento sempre monta um grupo
+// novo só pra essa partida) e entra na masmorra pelo mesmo
+// buildDungeonInstance/sendDungeonStateTo de sempre.
+async function formDungeonGroup(zone, group) {
+  const validMembers = [];
+  for (const [userId, e] of group) {
+    try {
+      const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(e.charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
+      const row = rows[0]; if (!row) continue;
+      const save = sanitizeSave(row.save, row.lvl);
+      const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
+      // Mesmo achado de handleDungeonEnter: nunca pareia alguem que ja
+      // esta ocupado numa partida de TvT/World Boss/outra masmorra --
+      // simplesmente nao entra no grupo formado, sem erro (a fila
+      // continua com a entrada dele ate ele estar livre de novo, ou o
+      // proprio tick remove por outro motivo).
+      if (unlocked && !charBusyElsewhere(e.charId, zone)) validMembers.push({userId, charId:e.charId, cls:e.cls});
+    } catch (err) { console.error('dungeon_queue_match_check_error', userId, err.message); }
+  }
+  if (!validMembers.length) return;
+  if (validMembers.length > 1) {
+    for (const m of validMembers) leaveParty(m.userId);
+    let code; do { code = genPartyCode(); } while (parties.has(code));
+    const membersMap = new Map();
+    for (const m of validMembers) { const active = activeCharacterForUser(m.userId); membersMap.set(m.userId, (active && active.p.name) || 'Aventureiro'); }
+    parties.set(code, {ownerId: validMembers[0].userId, members: membersMap});
+    for (const m of validMembers) memberParty.set(m.userId, code);
+  }
+  // Fase 5.16 (AI Dungeon Fill): so preenche com IA se ALGUEM do grupo
+  // original pediu allowAiFill -- humanos sempre resolvidos e validados
+  // primeiro (acima), IA so ocupa a vaga que sobrar ate 4, classe
+  // consciente (prioriza uma classe que o grupo ainda nao tem). IA nunca
+  // vira membro persistente de Party nenhuma -- so entra em
+  // state.members (memoria, da instancia), nunca em parties/memberParty.
+  const anyAllowAiFill = group.some(([, e]) => e.allowAiFill);
+  const aiFillMembers = [];
+  if (anyAllowAiFill && validMembers.length < DUNGEON_QUEUE_PREFERRED_SIZE) {
+    const [lo, hi] = aiZoneLevelRange(zone);
+    // NUNCA respeita AI_MAX_POPULATION aqui (bug corrigido apos revisao
+    // pre-merge): em producao, a IA de campo ambiental fica permanentemente
+    // no teto (aiPopulationTick sempre repovoa) -- se o preenchimento de
+    // fila respeitasse o mesmo teto, allowAiFill nunca funcionaria de
+    // verdade. Resposta direta a um pedido humano real sempre tem
+    // prioridade; alem disso ja e limitado sozinho a no maximo 4 (slots).
+    const slots = DUNGEON_QUEUE_PREFERRED_SIZE - validMembers.length;
+    for (let i = 0; i < slots; i++) {
+      const haveClasses = new Set([...validMembers.map(m => m.cls), ...aiFillMembers.map(m => m.cls)]);
+      const cls = AI_CLASS_POOL.find(c => !haveClasses.has(c)) || AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
+      const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
+      aiFillMembers.push({charId:'ai_' + crypto.randomBytes(4).toString('hex'), userId:null, cls, lvl, kind:'ai'});
+    }
+  }
+  const state = buildDungeonInstance(zone, [...validMembers, ...aiFillMembers]);
+  if (!state) return;
+  for (const m of aiFillMembers) {
+    const aiName = AI_NAME_POOL[Math.floor(Math.random() * AI_NAME_POOL.length)] + Math.floor(10 + Math.random() * 90);
+    const combat = buildAiCombat(m.cls, m.lvl, aiName);
+    const entity = {
+      id:m.charId, kind:'ai', name:combat.name, cls:m.cls, lvl:m.lvl, map:state.id,
+      x:state.layout.start.x, y:state.layout.start.y, dir:0, moving:false, atkT:0, atkAng:0,
+      hp:combat.maxHp, maxHp:combat.maxHp, dead:false, respawnAt:0,
+      combat, basicCdUntil:0, buffUntil:0, pendingSkill:{}, lastDamageAt:0, evadeUntil:0, shieldUntil:0, shield:0,
+      fsm:'idle', fsmUntil:0, targetMobId:null, homeZone:AI_FIELD_ZONES.includes(zone) ? zone : AI_FIELD_ZONES[0],
+      personality:AI_PERSONALITY_KINDS[Math.floor(Math.random() * AI_PERSONALITY_KINDS.length)],
+      profile:null, slot:{kind:'dungeon', instanceId:state.id}, createdAt:Date.now(),
+    };
+    entity.profile = aiPersonalityProfile(entity.personality);
+    aiEntities.set(entity.id, entity);
+    broadcast({type:'player_join', player:aiPublicPlayer(entity)});
+  }
+  for (const m of validMembers) {
+    rememberDungeonInstance(m.charId, zone, state.id);
+    const memberWs = wsForChar(m.charId);
+    if (memberWs) {
+      const memberP = clients.get(memberWs); if (memberP) memberP.map = state.id;
+      send(memberWs, {type:'dungeon_queue_matched', zone, size:validMembers.length + aiFillMembers.length});
+      sendDungeonStateTo(memberWs, state, (validMembers.length + aiFillMembers.length) > 1 ? {party:true} : undefined);
+    }
+  }
+}
+// Roda junto do resto da limpeza periodica (ver setInterval perto do fim
+// do arquivo). A cada tick: remove quem excedeu a tolerancia de
+// desconexao, depois tenta fechar o maior grupo viavel por zona -- 4 na
+// hora se ja tiver gente suficiente, ou 3/2/1 (solo so com opt-in) assim
+// que o respectivo prazo de fallback for atingido, medido a partir de
+// quem espera ha mais tempo (fila = ordem de chegada).
+function dungeonQueueTick() {
+  const now = Date.now();
+  for (const [zone, q] of [...dungeonQueue]) {
+    for (const [userId, e] of [...q]) {
+      if (e.disconnectedAt && now - e.disconnectedAt > DUNGEON_QUEUE_DISCONNECT_GRACE_MS) { q.delete(userId); userQueueZone.delete(userId); }
+    }
+    if (!q.size) { dungeonQueue.delete(zone); continue; }
+    const entries = [...q.entries()].filter(([, e]) => !e.disconnectedAt).sort((a, b) => a[1].queuedAt - b[1].queuedAt);
+    while (entries.length) {
+      const waited = now - entries[0][1].queuedAt;
+      let targetSize = 0;
+      if (entries.length >= DUNGEON_QUEUE_PREFERRED_SIZE) targetSize = DUNGEON_QUEUE_PREFERRED_SIZE;
+      else if (entries.length === 3 && waited >= DUNGEON_QUEUE_FALLBACK_3_MS) targetSize = 3;
+      else if (entries.length === 2 && waited >= DUNGEON_QUEUE_FALLBACK_2_MS) targetSize = 2;
+      else if (entries.length === 1 && entries[0][1].soloOptIn && waited >= DUNGEON_QUEUE_FALLBACK_SOLO_MS) targetSize = 1;
+      if (!targetSize) break;
+      const group = dungeonQueuePickGroup(entries, targetSize);
+      for (const [userId] of group) {
+        q.delete(userId); userQueueZone.delete(userId);
+        const i = entries.findIndex(e => e[0] === userId); if (i >= 0) entries.splice(i, 1);
+      }
+      formDungeonGroup(zone, group).catch(err => console.error('dungeon_queue_form_error', err.message));
+    }
+    if (!q.size) dungeonQueue.delete(zone);
+  }
+}
+
+// ===== Fase 5.16: Living World / Aventureiros IA =====
+// NUNCA processo de navegador, NUNCA conta Supabase fake -- cada IA e
+// puramente um objeto em memoria (aiEntities), simulado por um tick
+// deterministico reaproveitando o MESMO tick de 1s ja existente (dentro
+// da janela de 500-1000ms pedida). O FSM (idle/wander/travel/hunt/
+// combat/retreat/rest/dead/respawn, mais party/queue/dungeon/tvt quando
+// preenchendo Fila/TvT -- ver mais abaixo) e heuristica pura -- NENHUMA
+// chamada a LLM em runtime, em lugar nenhum deste modulo.
+//
+// REGRA ABSOLUTA DE ECONOMIA (preservada verbatim do pedido): IA nunca
+// recebe ouro/gema/item persistente, nunca cria UID economico, nunca
+// compra/vende no Mercado, nunca recebe claim, nunca encanta item real,
+// nunca entra no ranking humano, nunca altera economia de guilda. Isso e
+// garantido ESTRUTURALMENTE aqui: uma entidade de IA nunca tem
+// charId/userId reais (sempre null), e o caminho de combate da IA
+// (aiDoCombat/dungeonHandleMobDeath) nunca chama creditKillReward/
+// creditDungeonReward/applyGearDrops/creditBestiaryKill(com charId real)/
+// nenhuma rota de Mercado -- quando a IA mata um mob, o mob morre pro
+// mundo (broadcast igual a um abate real) mas a recompensa da IA e
+// sempre ZERO por construcao, nunca uma checagem condicional que possa
+// ser esquecida em algum caminho.
+const AI_TICK_MS = 1000; // reusa o tick de 1s ja existente -- dentro de 500-1000ms
+const AI_MAX_POPULATION = 10; // teto conservador de partida (ver limitacoes -- benchmark real de carga nao foi possivel nesta sessao)
+// Ligado por padrao (mundo vivo de verdade em producao) -- so
+// aiPopulationTick() (spawn automatico em background) e afetado; criar
+// uma IA manualmente (aiSpawnEntity direto, usado pelos testes puros e
+// por um futuro preenchimento de fila/TvT) nunca depende desta flag.
+// test/helpers.js desliga explicitamente (AI_ENABLED=0) em todo
+// servidor de teste -- nenhuma suite depende de atores nao controlados
+// aparecendo sozinhos no mapa compartilhado de um teste.
+// Funcao (nunca uma const congelada) -- le process.env.AI_ENABLED a
+// CADA chamada, nunca so uma vez no carregamento do modulo. Isso
+// garante que test/helpers.js (que seta a env ANTES de spawnar o
+// processo filho) funcione, e tambem permite testar o gate ligando/
+// desligando em runtime dentro do mesmo processo.
+function aiEnabled() { return process.env.AI_ENABLED !== '0'; }
+const AI_FIELD_ZONES = ['floresta','cripta','serra','pantano','torre','ilhas','vulcao']; // nunca vila (hub social, sem mobs) nem masmorra/TvT diretamente (essas sao FILL, ver adiante)
+const AI_CLASS_POOL = [...ALLOWED_CLASS];
+const AI_NAME_POOL = ['Aldric','Branwen','Cedric','Dara','Eamon','Fiora','Gareth','Helka','Ivor','Junia','Kael','Lyra','Milo','Nessa','Orin','Petra','Quill','Rowan','Senna','Talon'];
+const AI_PERSONALITY_KINDS = ['agressivo','cauteloso','equilibrado'];
+const AI_MOVE_SPEED = 85; // px por tick -- comparavel a velocidade real de jogador
+function aiPersonalityProfile(kind) {
+  if (kind === 'agressivo') return {aggroRadius:560, fleeHpRatio:.12, restMs:1500};
+  if (kind === 'cauteloso') return {aggroRadius:420, fleeHpRatio:.35, restMs:3200};
+  return {aggroRadius:490, fleeHpRatio:.22, restMs:2200};
+}
+// Nivel simulado por zona: deriva da faixa real de niveis do proprio
+// MOB_MANIFEST (nunca uma tabela paralela) -- IA em floresta luta como
+// floresta pede, sem precisar duplicar a curva de dificuldade em outro lugar.
+function aiZoneLevelRange(zone) {
+  const rows = MOB_MANIFEST[zone] || [];
+  if (!rows.length) return [5, 10];
+  const lvls = rows.map(r => r.lvl);
+  return [Math.min(...lvls), Math.max(...lvls)];
+}
+// Equipamento SIMULADO -- gerado em memoria com o mesmo createGear() de
+// sempre (mesma formula de stats por nivel/raridade que um item real
+// usaria), mas NUNCA gravado em bag/eq de personagem nenhum, nunca tem
+// UID reconhecido por lockOwnedItems/market/enchant. So existe dentro do
+// `save` descartavel usado unicamente para alimentar combatSnapshot.
+// GEAR_DATA.statsFor so tem tabela pras mesmas faixas de nivel que o
+// jogo real usa pra req de equipamento (1/4/8/12/16/20/24/28/32/36/40),
+// nunca todo nivel inteiro -- createGear() com um nivel fora dessas
+// faixas retorna null. Sempre arredonda pra baixo pro tier valido mais
+// proximo (nunca pra cima -- nunca "empresta" um requisito de nivel
+// maior que o real da IA).
+const AI_GEAR_TIERS = [1, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40];
+function aiGearTierFor(lvl) {
+  let best = AI_GEAR_TIERS[0];
+  for (const t of AI_GEAR_TIERS) if (t <= lvl) best = t;
+  return best;
+}
+function buildAiSave(cls, lvl) {
+  const weapon = (CLASS_ITEM_TYPES[cls] || CLASS_ITEM_TYPES.guerreiro)[0];
+  const skills = CLASS_SKILLS[cls] || CLASS_SKILLS.guerreiro;
+  const gearLvl = aiGearTierFor(lvl);
+  const rarity = gearLvl >= 20 && Math.random() < .3 ? 'rare' : 'basic';
+  return {cls, eq:{sword:createGear(weapon, gearLvl, rarity)}, sk:Object.fromEntries(skills.map(id => [id, 1]))};
+}
+function buildAiCombat(cls, lvl, name) {
+  return WORLD_BOSS.combatSnapshot({userId:null, charId:null, name, cls, lvl, save:buildAiSave(cls, lvl)});
+}
+const aiEntities = new Map(); // aiId -> entity (runtime-only, nunca Supabase)
+function aiPublicPlayer(ai) {
+  // Mesmo formato de publicPlayer() -- reusa 100% do pipeline de
+  // renderizacao ja existente no cliente pra outros jogadores (nenhum
+  // codigo novo de desenho foi necessario), so com kind:'ai' a mais pra
+  // o indicador discreto "[IA]" e pra nunca ser confundido com humano
+  // em nenhuma API/admin.
+  return {id:ai.id, name:ai.name, cls:ai.cls, map:ai.map, x:ai.x, y:ai.y, dir:ai.dir, moving:!!ai.moving, lvl:ai.lvl, atkT:ai.atkT||0, atkAng:ai.atkAng||0, charId:null, kind:'ai'};
+}
+function aiSpawnAnchor(zone) {
+  const state = maps.get(zone);
+  if (state && state.mobs.size) {
+    const mobs = [...state.mobs.values()], m = mobs[Math.floor(Math.random() * mobs.length)];
+    return {x:Math.max(0, Math.min(MOB_WORLD_W, m.x + (Math.random() * 300 - 150))), y:Math.max(0, Math.min(MOB_WORLD_H, m.y + (Math.random() * 300 - 150)))};
+  }
+  return {x:MOB_WORLD_W * (.3 + Math.random() * .4), y:MOB_WORLD_H * (.3 + Math.random() * .4)};
+}
+function aiSpawnEntity(zone) {
+  if (aiEntities.size >= AI_MAX_POPULATION) return null;
+  const cls = AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
+  const [lo, hi] = aiZoneLevelRange(zone);
+  const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
+  const name = AI_NAME_POOL[Math.floor(Math.random() * AI_NAME_POOL.length)] + Math.floor(10 + Math.random() * 90);
+  const combat = buildAiCombat(cls, lvl, name);
+  const anchor = aiSpawnAnchor(zone);
+  const personality = AI_PERSONALITY_KINDS[Math.floor(Math.random() * AI_PERSONALITY_KINDS.length)];
+  const id = 'ai_' + crypto.randomBytes(4).toString('hex');
+  const entity = {
+    id, kind:'ai', name:combat.name, cls, lvl, map:zone, x:anchor.x, y:anchor.y, dir:0, moving:false, atkT:0, atkAng:0,
+    hp:combat.maxHp, maxHp:combat.maxHp, dead:false, respawnAt:0,
+    combat, basicCdUntil:0, buffUntil:0, pendingSkill:{}, lastDamageAt:0, evadeUntil:0, shieldUntil:0, shield:0,
+    fsm:'idle', fsmUntil:0, targetMobId:null, homeZone:zone,
+    personality, profile:aiPersonalityProfile(personality),
+    slot:null, // Fase 5.16 Tier 2: {kind:'dungeon'|'tvt', instanceId} quando preenchendo fila/TvT
+    createdAt:Date.now(),
+  };
+  aiEntities.set(id, entity);
+  broadcast({type:'player_join', player:aiPublicPlayer(entity)});
+  return entity;
+}
+function aiDespawnEntity(id) {
+  if (!aiEntities.has(id)) return;
+  aiEntities.delete(id);
+  broadcast({type:'player_leave', id});
+}
+// Distribuicao: sempre povoa a zona MENOS povoada primeiro -- nunca
+// concentra toda a populacao de IA numa unica zona.
+function aiPopulationTick() {
+  if (!aiEnabled() || aiEntities.size >= AI_MAX_POPULATION) return;
+  const counts = Object.fromEntries(AI_FIELD_ZONES.map(z => [z, 0]));
+  for (const ai of aiEntities.values()) if (counts[ai.map] != null) counts[ai.map]++;
+  const zone = AI_FIELD_ZONES.reduce((min, z) => counts[z] < counts[min] ? z : min, AI_FIELD_ZONES[0]);
+  aiSpawnEntity(zone);
+}
+function aiTransition(ai, next, now, extra) { ai.fsm = next; ai.fsmUntil = 0; if (extra) Object.assign(ai, extra); }
+function aiMoveToward(ai, tx, ty, speed) {
+  const dx = tx - ai.x, dy = ty - ai.y, dist = Math.hypot(dx, dy);
+  if (dist < 4) { ai.moving = false; return dist; }
+  const step = Math.min(dist, speed);
+  ai.x = Math.max(0, Math.min(MOB_WORLD_W, ai.x + dx / dist * step));
+  ai.y = Math.max(0, Math.min(MOB_WORLD_H, ai.y + dy / dist * step));
+  ai.dir = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 2 : 1) : (dy < 0 ? 3 : 0);
+  ai.moving = true;
+  return dist - step;
+}
+function aiNearestMob(ai, state, radius) {
+  let best = null, bestD = Infinity;
+  for (const mob of state.mobs.values()) {
+    if (mob.dead) continue;
+    const d = Math.hypot(mob.x - ai.x, mob.y - ai.y);
+    if (d < radius && d < bestD) { best = mob; bestD = d; }
+  }
+  return best;
+}
+// Boss/trash de masmorra morto pela IA passa pelo MESMO caminho de
+// recompensa que um abate real (extraido do handler mob_damage pra
+// nunca duplicar a logica) -- so que iterando state.members, cada
+// membro kind:'ai' e explicitamente pulado ANTES de qualquer chamada de
+// credito (a REGRA ABSOLUTA de novo, no ponto exato onde a recompensa
+// seria concedida). Membros humanos da mesma instancia continuam
+// recebendo normalmente mesmo quando quem baixou o mob foi a IA.
+function dungeonHandleMobDeath(state, mob, now, killerCharId) {
+  if (mob.boss && !state.bossDefeated) {
+    state.bossDefeated = true;
+    for (const [memberCharId, member] of state.members) {
+      if (member.kind === 'ai') continue;
+      if (!dungeonMemberEligible(member, now)) continue;
+      creditDungeonReward(wsForChar(memberCharId) || DUNGEON_OFFLINE_WS, {charId:memberCharId, userId:member.userId}, rollDungeonBossLoot(member.cls, mob.lvl));
+    }
+  } else if (!mob.boss) {
+    for (const [memberCharId, member] of state.members) {
+      if (member.kind === 'ai') continue;
+      if (!dungeonMemberEligible(member, now)) continue;
+      creditDungeonReward(wsForChar(memberCharId) || DUNGEON_OFFLINE_WS, {charId:memberCharId, userId:member.userId}, rollDungeonTrashLoot(mob.lvl, member.cls));
+    }
+  }
+  if (killerCharId && mob.type) creditBestiaryKill(killerCharId, mob.type).catch(err => console.error('bestiary_credit_error', err.message));
+}
+function aiDoIdle(ai, now) {
+  const state = maps.get(ai.map);
+  if (state && state.mobs.size) {
+    const mob = aiNearestMob(ai, state, ai.profile.aggroRadius);
+    if (mob) { aiTransition(ai, 'hunt', now, {targetMobId:mob.id}); return; }
+  }
+  // 'travel' (reatribuicao de zona) so pra IA de campo livre -- nunca
+  // pra quem esta preenchendo uma masmorra/TvT (ai.slot), senao ela
+  // abandonaria a instancia no meio da partida.
+  if (!ai.slot && Math.random() < .08) { aiTransition(ai, 'travel', now, {travelZone:AI_FIELD_ZONES[Math.floor(Math.random() * AI_FIELD_ZONES.length)]}); return; }
+  aiTransition(ai, 'wander', now, {wanderTargetX:Math.max(0, Math.min(MOB_WORLD_W, ai.x + (Math.random() * 400 - 200))), wanderTargetY:Math.max(0, Math.min(MOB_WORLD_H, ai.y + (Math.random() * 400 - 200)))});
+}
+function aiDoWander(ai, now) {
+  const remain = aiMoveToward(ai, ai.wanderTargetX ?? ai.x, ai.wanderTargetY ?? ai.y, AI_MOVE_SPEED);
+  if (remain <= 0) { aiTransition(ai, 'idle', now); return; }
+  const state = maps.get(ai.map);
+  if (state && state.mobs.size && Math.random() < .3) {
+    const mob = aiNearestMob(ai, state, ai.profile.aggroRadius);
+    if (mob) aiTransition(ai, 'hunt', now, {targetMobId:mob.id});
+  }
+}
+function aiDoTravel(ai, now) {
+  // Zonas de campo nao sao espacialmente contiguas no servidor (cada
+  // uma e um mapState() isolado) -- "viajar" e uma realocacao direta
+  // pro novo mapa, nao uma caminhada real entre elas. Limitacao
+  // documentada, nunca escondida.
+  ai.map = ai.travelZone || ai.homeZone; ai.homeZone = ai.map;
+  const anchor = aiSpawnAnchor(ai.map); ai.x = anchor.x; ai.y = anchor.y; ai.travelZone = null;
+  aiTransition(ai, 'idle', now);
+}
+function aiDoHunt(ai, now) {
+  const state = maps.get(ai.map), mob = state && state.mobs.get(ai.targetMobId);
+  if (!mob || mob.dead) { aiTransition(ai, 'idle', now); return; }
+  const range = attackRangeFor(ai, 'basic'), dist = Math.hypot(mob.x - ai.x, mob.y - ai.y);
+  if (dist <= range) { aiTransition(ai, 'combat', now); return; }
+  aiMoveToward(ai, mob.x, mob.y, AI_MOVE_SPEED);
+}
+function aiDoCombat(ai, now) {
+  const state = maps.get(ai.map), mob = state && state.mobs.get(ai.targetMobId);
+  if (!mob || mob.dead) { aiTransition(ai, 'idle', now); return; }
+  const dist = Math.hypot(mob.x - ai.x, mob.y - ai.y), range = attackRangeFor(ai, 'basic');
+  if (dist > range) { aiTransition(ai, 'hunt', now); return; }
+  if (ai.hp <= ai.maxHp * ai.profile.fleeHpRatio) { aiTransition(ai, 'retreat', now, {retreatUntil:now + 3000}); return; }
+  // MESMA formula/cooldown/teto de dano que resolveAttackDamage ja usa
+  // pra humanos (Fase 5.12) -- nunca uma formula de combate paralela pra IA.
+  const dmg = resolveAttackDamage(ai, {skill:'basic'}, now);
+  if (!dmg) return;
+  mob.hp = Math.max(0, mob.hp - dmg);
+  if (mob.hp <= 0 && !mob.dead) {
+    mob.dead = true;
+    mob.respawnAt = state.isDungeon ? 0 : (mob.boss ? Date.now() + 60000 : Date.now() + 30000);
+    if (state.isDungeon) dungeonHandleMobDeath(state, mob, now, null); // killerCharId null -- IA nunca credita Bestiario
+  }
+  broadcastMap(ai.map, {type:'mob_state', map:ai.map, mob, killerId:null});
+}
+function aiDoRetreat(ai, now) {
+  const state = maps.get(ai.map), mob = ai.targetMobId && state && state.mobs.get(ai.targetMobId);
+  if (mob) { const dx = ai.x - mob.x, dy = ai.y - mob.y, d = Math.hypot(dx, dy) || 1; aiMoveToward(ai, ai.x + dx / d * 200, ai.y + dy / d * 200, AI_MOVE_SPEED); }
+  if (now >= (ai.retreatUntil || 0)) { ai.targetMobId = null; aiTransition(ai, 'rest', now, {restUntil:now + ai.profile.restMs}); }
+}
+function aiDoRest(ai, now) {
+  if (ai.hp < ai.maxHp) ai.hp = Math.min(ai.maxHp, ai.hp + Math.round(ai.maxHp * .08));
+  if (now >= (ai.restUntil || 0)) aiTransition(ai, 'idle', now);
+}
+function aiDoRespawn(ai, now) {
+  ai.hp = ai.maxHp; ai.dead = false; ai.targetMobId = null;
+  if (ai.slot) {
+    const state = maps.get(ai.slot.instanceId);
+    if (!state) { aiDespawnEntity(ai.id); return; } // instancia ja acabou -- nunca deixa IA presa numa masmorra/TvT fantasma (limpeza rigorosa, sem leak)
+    ai.map = ai.slot.instanceId;
+    const anchor = state.layout ? state.layout.start : {x:MOB_WORLD_W / 2, y:MOB_WORLD_H / 2};
+    ai.x = anchor.x; ai.y = anchor.y;
+  } else {
+    const anchor = aiSpawnAnchor(ai.homeZone); ai.map = ai.homeZone; ai.x = anchor.x; ai.y = anchor.y;
+  }
+  aiTransition(ai, 'idle', now);
+}
+function aiStep(ai, now) {
+  // Fase 5.16 Tier 2 (bug corrigido apos revisao pre-merge): IA
+  // preenchendo TvT NUNCA passa pelo dead/respawnAt generico -- morte e
+  // respawn de TvT sao inteiramente governados por instance.players e
+  // TVT.tickTvtRespawns (o mesmo sistema autoritativo dos humanos).
+  // Antes desta checagem, aiDoTvt copiava tp.dead=true pra ai.dead mas
+  // nunca ai.respawnAt (fica em 0) -- no tick seguinte, ai.dead=true
+  // com respawnAt=0 sempre satisfaz now>=respawnAt, entao aiDoRespawn
+  // rodava IMEDIATAMENTE (antes do respawn real do TvT), resetava fsm
+  // pra 'idle'/'wander' e a IA nunca mais lutava depois da primeira
+  // morte. aiDoTvt ja checa tp.dead sozinho e so espera -- nunca tenta
+  // se ressuscitar por conta propria.
+  if (ai.slot && ai.slot.kind === 'tvt') { aiDoTvt(ai, now); return; }
+  if (ai.dead) { if (now >= ai.respawnAt) aiDoRespawn(ai, now); return; }
+  switch (ai.fsm) {
+    case 'wander': aiDoWander(ai, now); return;
+    case 'travel': aiDoTravel(ai, now); return;
+    case 'hunt': aiDoHunt(ai, now); return;
+    case 'combat': aiDoCombat(ai, now); return;
+    case 'retreat': aiDoRetreat(ai, now); return;
+    case 'rest': aiDoRest(ai, now); return;
+    // Fase 5.16 Tier 2: 'dungeon' reusa o MESMO idle/hunt/combat de
+    // campo (state.mobs de uma instancia de masmorra e um mapState()
+    // igual qualquer outro -- a maquina generica ja funciona la sem
+    // nenhuma mudanca). 'tvt' tem seu proprio handler (alvo e jogador
+    // inimigo, nunca mob). 'party'/'queue' sao marcadores transitorios
+    // curtos (preenchimento em andamento), nunca um estado "de trabalho"
+    // continuo -- nunca deveriam ser observados por mais de um tick.
+    // 'tvt' normalmente nunca chega aqui (o guard de ai.slot.kind==='tvt'
+    // no topo da funcao ja intercepta antes do switch) -- mantido so
+    // como retaguarda defensiva caso fsm='tvt' exista sem slot.kind='tvt'.
+    case 'dungeon': aiDoIdle(ai, now); return;
+    case 'tvt': aiDoTvt(ai, now); return;
+    case 'party': case 'queue': return;
+    default: aiDoIdle(ai, now); return;
+  }
+}
+// Fase 5.16 Tier 2: IA preenchendo TvT -- alvo e o jogador inimigo mais
+// proximo ainda vivo (nunca um mob), ataque via TVT.resolveTvtIntent, a
+// MESMA funcao autoritativa que resolve o dano de um jogador humano
+// (cooldown/alcance/formula identicos -- nunca um bypass de cooldown,
+// nunca dano oculto). instance.players e sempre a fonte de verdade de
+// posicao/HP -- ai.x/ai.y/ai.hp sao so um espelho pra broadcast.
+// PROIBICOES EXPLICITAS DE TRAPACA cumpridas por construcao: sem
+// wallhack (so mira quem esta em instance.players, nunca informacao
+// fora do que o proprio TVT.resolveTvtIntent ja exigiria de um
+// jogador real); sem mira instantanea (precisa se mover ate o alcance,
+// nunca teleporta); sem bypass de cooldown (skillCd é o mesmo campo
+// que resolveTvtIntent aplica pra humano); sem bonus escondido (usa o
+// mesmo snapshot/formula de dano). Latencia de reacao simulada:
+// ai.tvtEngageAt atrasa 200-600ms o primeiro ataque contra um alvo
+// recem-adquirido, nunca ataca no mesmo instante que avista alguem.
+function aiDoTvt(ai, now) {
+  const instance = ai.slot && tvtInstances.get(ai.slot.instanceId);
+  if (!instance || instance.state !== 'active') return;
+  const tp = instance.players.get(ai.id);
+  if (!tp) return;
+  ai.hp = tp.hp; ai.maxHp = tp.maxHp; ai.x = tp.x; ai.y = tp.y; ai.dead = tp.dead;
+  if (tp.dead) return; // respawn de TvT e o mesmo dos humanos (TVT.tickTvtRespawns), nunca um respawn paralelo aqui
+  let nearest = null, bestD = Infinity;
+  for (const [charId, other] of instance.players) {
+    if (charId === ai.id || other.team === tp.team || other.dead) continue;
+    const d = Math.hypot(other.x - tp.x, other.y - tp.y);
+    if (d < bestD) { bestD = d; nearest = other; }
+  }
+  if (!nearest) return;
+  if (ai.tvtTargetId !== nearest.charId) { ai.tvtTargetId = nearest.charId; ai.tvtEngageAt = now + 200 + Math.floor(Math.random() * 400); }
+  if (now < ai.tvtEngageAt) return;
+  const range = attackRangeFor(ai, 'basic');
+  if (bestD > range) {
+    const dx = nearest.x - tp.x, dy = nearest.y - tp.y, dist = Math.hypot(dx, dy) || 1, step = Math.min(dist, AI_MOVE_SPEED);
+    tp.x = Math.max(0, Math.min(TVT.TVT_ARENA.w, tp.x + dx / dist * step));
+    tp.y = Math.max(0, Math.min(TVT.TVT_ARENA.h, tp.y + dy / dist * step));
+    ai.x = tp.x; ai.y = tp.y; ai.moving = true;
+    return;
+  }
+  ai.moving = false;
+  // Achado na revisao pre-merge: o resultado do ataque era descartado
+  // -- os jogadores so viam o dano da IA na proxima sincronizacao
+  // por acaso (a partida ainda terminava certo, tickTvt ja checa
+  // checkTvtEnd todo tick independente disso, mas o dano em si
+  // ficava invisivel em tempo real). Mesmo broadcast que o caminho de
+  // um humano ja faz (player_damage/TVT_MAP_RE).
+  const result = TVT.resolveTvtIntent(instance, ai.id, {skill:'basic', targetId:nearest.charId}, now, secureRandom);
+  if (result.ok) {
+    tvtPublicSync(instance);
+    if (result.kind === 'damage' && !result.evaded && result.blocked !== 'protection') broadcastMap(instance.mapId, {type:'tvt_hit', attackerId:ai.id, targetId:result.targetId, damage:result.damage, skill:result.skill, killed:!!result.killed});
+  }
+}
+// Roda junto do resto do tick de 1s (setInterval perto do fim do
+// arquivo) -- nunca um setInterval novo por entidade (zero timer pra
+// vazar por IA: aiDespawnEntity so remove do Map, nunca deixa nenhum
+// setTimeout/setInterval pendurado).
+function aiTick() {
+  const now = Date.now();
+  aiPopulationTick();
+  for (const ai of [...aiEntities.values()]) {
+    aiStep(ai, now);
+    broadcast({type:'state', player:aiPublicPlayer(ai)});
+  }
+}
+// IA presente num mapa tambem conta pra IA de monstro de campo mirar
+// nela (mob_state/tickMobAI) -- combate de verdade nos dois sentidos,
+// nunca so a IA batendo sem nunca poder ser atingida. `ws=null` marca a
+// entrada como IA pra hitTarget() saber pular a checagem de posse via
+// `clients` (que so existe pra sockets reais) e nunca tentar `send()`
+// num socket que nao existe.
+function aiPresentOnMap(mapId) {
+  const out = [];
+  for (const ai of aiEntities.values()) if (ai.map === mapId && !ai.dead) out.push([null, ai]);
+  return out;
+}
+
 wss.on('connection', ws => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -2547,7 +3727,7 @@ wss.on('connection', ws => {
     if (!p) return;
     if(!isAuthoritativeSocket(p.charId,ws)){securityReject(p,'STALE_SESSION');return}
     if(p.authed&&['mob_damage','player_damage','cast_skill','state'].includes(msg.type)&&['atk','damage','hp','maxHp','sk'].some(k=>Object.prototype.hasOwnProperty.call(msg,k)))securityReject(p,'FORGED_COMBAT');
-    const packetPolicy={state:[35,1000],mob_damage:[16,1000],player_damage:[16,1000],cast_skill:[10,1000],event_register:[4,5000],event_unregister:[4,5000],dungeon_enter:[3,5000]};
+    const packetPolicy={state:[35,1000],mob_damage:[16,1000],player_damage:[16,1000],cast_skill:[10,1000],event_register:[4,5000],event_unregister:[4,5000],dungeon_enter:[3,5000],dungeon_queue_join:[4,5000],dungeon_queue_leave:[4,5000]};
     if(packetPolicy[msg.type]&&!allowPacket(p,msg.type,...packetPolicy[msg.type]))return;
     if (msg.type === 'event_status') {
       send(ws,eventStatePayload(p));
@@ -2603,6 +3783,10 @@ wss.on('connection', ws => {
       broadcast({type:'state',player:publicPlayer(p)},ws);
     } else if (msg.type === 'dungeon_enter') {
       await handleDungeonEnter(ws, p, msg);
+    } else if (msg.type === 'dungeon_queue_join') {
+      await handleDungeonQueueJoin(ws, p, msg);
+    } else if (msg.type === 'dungeon_queue_leave') {
+      handleDungeonQueueLeave(ws, p);
     } else if (msg.type === 'map_join') {
       const map=cleanText(msg.map,24);if(!isAllowedMap(map)||map!==p.map)return;
       const state=mapState(map),defs=Array.isArray(msg.mobs)?msg.mobs.slice(0,120):[];
@@ -2698,6 +3882,12 @@ wss.on('connection', ws => {
       if(!dmg)return;
       state.hitGuard.set(mobId,{playerId:p.id,at:now});
       mob.hp=Math.max(0,mob.hp-dmg);
+      // Fase 5.13.1: registra contribuicao real de QUEM bateu (dano
+      // somado + ultima atividade) -- usado so pra elegibilidade de
+      // recompensa em grupo (dungeonMemberEligible), nunca pra alterar
+      // dano/HP/placar. Sem efeito em masmorra solo (so 1 membro, sempre
+      // elegivel de qualquer forma).
+      if(state.isDungeon){const selfMember=state.members.get(p.charId);if(selfMember){selfMember.damageDone+=dmg;selfMember.lastActivityAt=now}}
       if(mob.hp<=0){
         mob.dead=true;
         // Mob de masmorra nunca respawna dentro da instancia (mesmo
@@ -2710,13 +3900,14 @@ wss.on('connection', ws => {
           // recompensa uma vez (mob.dead sincrono antes de qualquer await
           // ja evita reentrancia pro MESMO mob; state.bossDefeated é uma
           // segunda trava explicita, mais facil de auditar/testar).
-          if(mob.boss&&!state.bossDefeated){
-            state.bossDefeated=true;
-            creditDungeonReward(ws,p,rollDungeonBossLoot(p.cls,mob.lvl));
-          }else if(!mob.boss){
-            creditDungeonReward(ws,p,rollDungeonTrashLoot(mob.lvl,p.cls));
-          }
-          if(p.charId&&mob.type)creditBestiaryKill(p.charId,mob.type).catch(err=>console.error('bestiary_credit_error',err.message));
+          // Fase 5.13.1: LOOT INDIVIDUAL -- cada membro elegivel da
+          // instancia (nunca so quem desferiu o golpe final) recebe seu
+          // proprio roll independente, com o proprio cls (nao o de quem
+          // bateu) e proprio charId/userId (nunca duplica, cada
+          // creditDungeonReward ja e um withCharLock+PATCH atomico
+          // separado por personagem). Offline recebe do mesmo jeito (fica
+          // salvo no banco), so nao ve a mensagem em tempo real.
+          dungeonHandleMobDeath(state,mob,now,p.charId);
         }else if(mob.type){
           const stats=mobStats(mob.type,mob.lvl,mob.boss,mob.k);
           if(stats){
@@ -2782,8 +3973,13 @@ wss.on('connection', ws => {
       const map=cleanText(msg.map,24),id=cleanText(msg.id,64);if(map!==p.map||!id)return;
       broadcastMap(map,{type:'projectile_end',map,ownerId:p.id,id,x:Number(msg.x)||0,y:Number(msg.y)||0,boom:!!msg.boom});
     } else if (msg.type === 'chat') {
+      // Fase 5.14: mute persistente bloqueia qualquer chat (global/guilda) --
+      // p.muted e checado no join e mantido em tempo real por
+      // handleAdminMute/handleAdminUnmute pra quem ja esta conectado.
+      if (p.muted) { send(ws, {type:'muted', reason:p.muteReason||null}); return; }
       const text=cleanText(msg.text,160);if(text)broadcast({type:'chat',from:p.name,text,at:Date.now()});
     } else if (msg.type === 'guild_chat') {
+      if (p.muted) { send(ws, {type:'muted', reason:p.muteReason||null}); return; }
       // Fase 5.8: so quem realmente esta em memoria como membro (cache
       // carregado no join/reconnect e atualizado a cada mutacao de guilda)
       // pode falar -- nunca confia num guildId que o cliente mandasse.
@@ -2802,6 +3998,17 @@ wss.on('connection', ws => {
     // pertencendo a instancia; reconectar com o mesmo userId/charId acha
     // ela de novo em handleWsJoin.
     const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);if(tvtMember)tvtMember.online=false;
+    // Fase 5.13.1: desconectar nao termina a masmorra nem afeta quem mais
+    // esta dentro -- so marca esse membro offline (mesma regra de
+    // World Boss/TvT). Reconectar acha a mesma instancia de novo (ver
+    // bloco de reconexao em handleWsJoin).
+    if(p.charId){const dOwned=dungeonByOwner.get(p.charId);if(dOwned)for(const dMapId of dOwned.values()){const dState=maps.get(dMapId);const dMember=dState&&dState.members.get(p.charId);if(dMember){dMember.online=false;break}}}
+    // Fase 5.13.2: cair da fila de matchmaking nao remove na hora --
+    // marca disconnectedAt e da uma tolerancia (DUNGEON_QUEUE_DISCONNECT_
+    // GRACE_MS) pra reconectar sem perder a posicao; dungeonQueueTick
+    // remove de vez so depois do prazo, e nunca forma grupo com quem
+    // esta desconectado nesse meio-tempo.
+    if(p.userId){const qz=userQueueZone.get(p.userId);const qe=qz&&dungeonQueue.get(qz)?.get(p.userId);if(qe)qe.disconnectedAt=Date.now()}
     clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
 });
 
@@ -2817,6 +4024,8 @@ setInterval(()=>{
   for(const [ws,p] of clients){if(WORLD_BOSS_MAP_RE.test(p.map)||TVT_MAP_RE.test(p.map))continue;if(p.dead&&p.respawnAt&&now>=p.respawnAt){p.dead=false;p.respawnAt=0;p.map='vila';p.x=720;p.y=1258;p.hp=Math.ceil(p.maxHp*.5);p.lastMoveAt=now;send(ws,{type:'global_respawn',map:p.map,x:p.x,y:p.y,hp:p.hp,maxHp:p.maxHp})}else if(!p.dead&&p.hp<p.maxHp&&now-(p.lastDamageAt||0)>6000){const rate={guerreiro:2.52,druida:3.96,mago:2.16,arqueiro:2.7}[p.cls]||2;p.hp=Math.min(p.maxHp,p.hp+rate);send(ws,{type:'player_vitals',hp:p.hp,maxHp:p.maxHp,dead:false})}}
   for(const [charId,runtime] of characterRuntime)if(now-runtime.savedAt>30*60*1000)characterRuntime.delete(charId);
   dungeonCleanupTick();
+  dungeonQueueTick();
+  aiTick();
 },1000).unref();
 
 setInterval(()=>{
@@ -2996,7 +4205,11 @@ function stepGoblin(mob, dt, present) {
 }
 // Dano global de monstro e aplicado no runtime do servidor; o cliente so
 // renderiza o HP final. O atraso de projetil revalida sessao/mapa/alvo.
-function hitTarget(target, mob, dmg) { if (!target) return null;const [ws,p]=target;if(clients.get(ws)!==p||p.map!==mob.map||p.dead)return null;const result=applyGlobalPlayerDamage(p,dmg);if(result)send(ws,{type:'mob_hit',map:mob.map,mobId:mob.id,dmg:result.damage,hp:result.hp,maxHp:result.maxHp,dead:result.dead,respawnAt:result.respawnAt});return result; }
+// Fase 5.16: IA tambem pode ser alvo de mob de campo -- combate de
+// verdade nos dois sentidos (aiEntities.get(p.id)===p confirma que e a
+// MESMA instancia de IA viva, mesmo espirito do clients.get(ws)!==p
+// pra jogador real). Nunca manda `send()` -- IA nao tem socket.
+function hitTarget(target, mob, dmg) { if (!target) return null;const [ws,p]=target;if(p.kind==='ai'){if(aiEntities.get(p.id)!==p||p.map!==mob.map||p.dead)return null;return applyGlobalPlayerDamage(p,dmg)}if(clients.get(ws)!==p||p.map!==mob.map||p.dead)return null;const result=applyGlobalPlayerDamage(p,dmg);if(result)send(ws,{type:'mob_hit',map:mob.map,mobId:mob.id,dmg:result.damage,hp:result.hp,maxHp:result.maxHp,dead:result.dead,respawnAt:result.respawnAt});return result; }
 function delayedHit(target, mob, dmg, delayMs) { if (target) setTimeout(() => hitTarget(target,mob,dmg),delayMs).unref(); }
 
 // ===== Fase 2, unidades 3-12: os 10 tipos restantes =====
@@ -3539,7 +4752,10 @@ function tickMobAI() {
   mobAiLastTick = now;
   const slices = Math.max(1, Math.ceil(elapsed / .05)), dt = elapsed / slices;
   for (const state of maps.values()) {
-    const present = playersOnMap(state.id);
+    // Fase 5.16: IA presente no mapa tambem conta como "gente pra
+    // mirar" -- mob reage/persegue/ataca IA igual a um jogador real,
+    // nunca uma entidade fantasma que so bate e nunca apanha.
+    const present = playersOnMap(state.id).concat(aiPresentOnMap(state.id));
     if (!present.length) continue;
     const moved = [];
     for (const mob of state.mobs.values()) {
@@ -3582,6 +4798,22 @@ module.exports = {
   sanitizeItem, sanitizeSave, lockOwnedItems, createGear, dedupeByUid, typeSlot, CLASS_ITEM_TYPES, EQ_SLOTS, GEAR_DATA,
   // Fase 5.2 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   startingSave, ECONOMY_LOCK_FIELDS, createDungeonInstance, dungeonCleanupTick,
+  // Fase 5.13.1 -- masmorra em party (nucleo puro, sem HTTP/WS/Supabase):
+  buildDungeonInstance, dungeonMemberEligible, DUNGEON_ELIGIBLE_IDLE_MS,
+  // Fase 5.13.2 -- matchmaking de masmorra (nucleo puro + runtime em memoria):
+  dungeonQueue, userQueueZone, dungeonQueueTick, dungeonQueuePickGroup, dungeonQueueLeaveInternal,
+  DUNGEON_QUEUE_PREFERRED_SIZE, DUNGEON_QUEUE_FALLBACK_3_MS, DUNGEON_QUEUE_FALLBACK_2_MS,
+  DUNGEON_QUEUE_FALLBACK_SOLO_MS, DUNGEON_QUEUE_DISCONNECT_GRACE_MS,
+  // Fase 5.14 -- RBAC/admin (nucleo puro + helpers reusados pelos testes):
+  ADMIN_PERMS, adminHasPerm, sanitizeAuditMetadata, activeAmong, resolveAdmin, kickUserSockets,
+  // Fase 5.15 -- Portal Publico:
+  publicCache,
+  // Fase 5.16 -- Aventureiros IA (nucleo puro + runtime em memoria, nunca Supabase):
+  aiEntities, aiSpawnEntity, aiDespawnEntity, aiPopulationTick, aiStep, aiTick,
+  aiPublicPlayer, aiPresentOnMap, buildAiSave, buildAiCombat, aiZoneLevelRange,
+  aiPersonalityProfile, aiSpawnAnchor, dungeonHandleMobDeath, aiDoCombat, aiDoIdle, aiDoHunt, aiDoTvt,
+  formDungeonGroup, tvtFillTargetSize,
+  AI_MAX_POPULATION, AI_FIELD_ZONES, AI_CLASS_POOL, aiEnabled,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):

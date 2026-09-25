@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { startServer, stopServer, joinWs, waitFor, sleep } = require('./helpers');
 
-const PORT = 8113;
+const PORT = 8115;
 let srv;
 
 before(async () => { srv = await startServer(PORT); });

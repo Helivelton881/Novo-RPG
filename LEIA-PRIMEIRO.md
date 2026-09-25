@@ -1287,3 +1287,402 @@ Toda a geometria foi validada por execução real de código, não só leitura: 
 - **Total de monstros por instância caiu** (~17–21, distribuição curada por sala) em relação à média antiga (~35, chance uniforme por célula) — decisão deliberada seguindo a distribuição explicitamente pedida por sala, não um corte de recompensa (a fórmula de recompensa por abate não mudou nem um pouco, só quantos monstros existem pra abater).
 - **Checkpoint continua sem lógica de save-point própria** (nenhuma existia antes) — a sala foi preparada visualmente (área segura, sem monstro, decoração própria) mas nenhum sistema novo de "salvar progresso no meio da masmorra" foi implementado, como pedido explicitamente ("se não existir, não implementar sistema novo").
 - **Mesma limitação de sempre**: a masmorra continua solo (uma instância por personagem, `ownedDungeonInstance` por `charId`) — cooperativo multi-jogador não é desta fase, nunca foi.
+
+# HOTFIX 5.12.1 — SESSION REPLACED UX
+
+## Bug em produção
+
+O servidor já fazia a parte certa desde a Fase 5.12 (`server.js`, dentro de `handleWsJoin`): quando a mesma conta+personagem conecta em um segundo aparelho sem fechar o primeiro, o socket antigo recebe `{type:'session_replaced'}` e é fechado com o código `4001` (`"Sessão substituída"`). O bug era **inteiramente client-side**: `NET.onclose` sempre agendava uma reconexão (`netRetry=setTimeout(netConnect,2500)`), **mesmo quando o fechamento foi o próprio servidor expulsando aquele socket de propósito** — o cliente nunca distinguia "caiu a rede, reconecta" de "fui substituído, não deveria voltar". Resultado: os dois aparelhos entravam num loop reconectando e reexpulsando um ao outro.
+
+## Correção
+
+Um flag de estado terminal (`sessionReplaced`, `index.html`) é setado assim que a mensagem `session_replaced` chega, **antes** do `close` disparar — `NET.onclose` passou a checar esse flag primeiro e retornar sem agendar nada quando ele está ativo, preservando o comportamento de sempre (reconectar) pra qualquer outro motivo de fechamento (queda de rede, restart do servidor, etc.). Um modal (`#sessionReplacedModal`, novo) aparece com a mensagem pedida ("Usuário conectado em outro aparelho.") e um botão OK; `running=false` interrompe o loop de jogo imediatamente. Clicar OK reusa exatamente o padrão já existente de logout/troca de personagem (`logoutOnline(); location.reload();`) — limpa o token local (impede auto-login/auto-reconnect nessa aba) sem apagar nenhum dado de personagem, e a recarga da página devolve à tela de login do zero.
+
+## Verificação
+
+A metade **client-side** (a causa real do bug) foi verificada ao vivo no navegador via console: uma conexão WS real anônima foi estabelecida, a mensagem `session_replaced` foi injetada manualmente — confirmado que o flag liga, o modal aparece (com a mensagem exata pedida, screenshot conferido), `running` para, e chamar `NET.onclose()` depois **não** agenda reconexão (`netRetry` permanece `0`); o mesmo teste repetido com o flag desligado confirma que o fechamento normal **continua** reconectando (sem regressão). A metade **server-side** (que já estava correta desde a Fase 5.12, mas nunca tinha teste automatizado) ganhou um teste real de dois sockets: `test/ws-auth.test.js` conecta A, depois conecta B com o mesmo token+charId sem fechar A, e confirma que A recebe `session_replaced` e é fechado com código `4001`/motivo `"Sessão substituída"`, enquanto B continua respondendo normalmente.
+
+## Testes
+
+`test/ws-auth.test.js`: 1 teste novo (`{skip:!hasSupabase()}`) — segunda conexão com o mesmo token+charId expulsa a primeira com o código/motivo certos, sem afetar a segunda.
+
+## Migração de banco
+
+Nenhuma — mudança inteiramente de comportamento client-side (JS/CSS/HTML), servidor não foi alterado.
+
+# FASE 5.13.1 — DUNGEON EM PARTY
+
+**Escopo**: tornar a masmorra (até então estritamente solo — última limitação conhecida documentada no fim da Fase 5.13, acima) cooperativa para 1–4 jogadores, **reusando o sistema de Party já existente** (`parties`/`memberParty`, `/api/party`) sem inventar nenhuma estrutura paralela. Mapa/colisão/spawn da Fase 5.13 não foram tocados — só a camada de "quem pode entrar e é dono da instância" e "como a recompensa é distribuída" mudou.
+
+## Núcleo: `createDungeonInstance` virou um wrapper fino sobre `buildDungeonInstance`
+
+`buildDungeonInstance(zone, members[])` (novo, `server.js`) é a função real — recebe uma lista de `{charId, userId, cls}` em vez de um único dono. `createDungeonInstance(zone, ownerCharId, ownerUserId)` (assinatura antiga, usada por todo o teste pré-existente) virou uma casca de uma linha que chama `buildDungeonInstance(zone, [{charId, userId}])` — **comportamento solo bit-a-bit idêntico ao de antes**, confirmado pelos 28 testes de masmorra pré-existentes continuando verdes sem nenhuma alteração de asserção.
+
+`state.members` (campo que já existia, um `Set` nunca lido por ninguém, deixado de propósito por uma fase anterior) virou um `Map<charId, {userId, cls, online, joinedAt, damageDone, lastActivityAt}>` — a fonte real de quem pertence à instância. `ownerCharId`/`ownerUserId` continuam preenchidos (primeiro membro) só por compatibilidade com código antigo que ainda espera um "dono" único (ex.: `dungeonCleanupTick` ao limpar `dungeonByOwner`); `members` é sempre a verdade.
+
+## Escala de HP por participante — nunca no dano do jogador
+
+`DUNGEON_PARTY_SCALE` (`game-data/dungeon-generation.js`, núcleo puro): `{1: 1.00, 2: 1.55, 3: 2.05, 4: 2.50}`, aplicado via `dungeonScaleFor(n)` (grampeado a 1–4, nunca NaN/negativo). O multiplicador entra **só** no HP de mob/chefe (`Math.round(stats.hp * scale)` em `buildDungeonInstance`) — o dano que o jogador causa continua vindo 100% de `resolveAttackDamage`/`clampAtk`, código de combate da Fase 5.12 **inalterado**. TTK não foi medido em produção real (sem ambiente de carga disponível nesta sessão), mas os números de partida (1.55×/2.05×/2.50×) foram os pedidos explicitamente como ponto de partida.
+
+## Entrada: só o líder inicia, membros reais resolvidos pelo servidor
+
+`handleDungeonEnter` reescrito: se o personagem que pediu já tem uma instância viva daquela zona (`ownedDungeonInstance`), **sempre reusa** — nunca reconstrói a lista de membros numa chamada repetida (é assim que o late-join fica bloqueado, ver abaixo). Senão, se ele está numa Party real (`party.members.size > 1`), só o **líder** (`party.ownerId`) pode iniciar — qualquer outro membro recebe `dungeon_error: "Apenas o líder do grupo pode iniciar a masmorra."`. Os candidatos a membro são resolvidos via `activeCharacterForUser(userId)` para cada `userId` da Party — **nunca** uma lista de IDs vinda do cliente — e cada candidato tem o desbloqueio da região revalidado com uma leitura fresca do banco (`save.quest`/`save.gunlock`, nunca o que já está em memória). Quem não está liberado simplesmente fica de fora do grupo que entra; se ninguém estiver liberado, ou se o próprio líder não estiver, a masmorra não abre.
+
+## Late join: quem entra na Party depois que a masmorra já começou nunca entra naquela instância
+
+Não existe um mecanismo dedicado de "bloqueio" — é uma consequência direta de como a entrada funciona: `buildDungeonInstance` recebe a lista de membros **uma única vez**, no momento da criação, e `state.members` nunca é atualizado depois por eventos de Party (entrar/sair). Um personagem que entra na Party depois: (a) se tentar `dungeon_enter` ele mesmo, não é o líder (a menos que vire dono da Party) e é barrado pelo mesmo erro acima; (b) mesmo que o líder chame `dungeon_enter` de novo, a instância já existente é **reusada** (branch `ownedDungeonInstance`), nunca reconstruída com a lista atual da Party.
+
+## Presença compartilhada, HP/morte/loot continuam individuais
+
+Todos os membros resolvidos recebem `p.map = state.id` (o mesmo mapId) e o mesmo `dungeon_state` (com `party:true` quando é uma entrada de grupo real) — o resto do mundo compartilhado (outros jogadores visíveis, mobs sincronizados via `mob_state`/`broadcastMap`) usa exatamente o mesmo pipeline genérico de multiplayer já usado por TvT e World Boss (jogadores no mesmo `p.map` já se veem desde sempre) — **nenhuma mudança em `index.html`** foi necessária pra isso. HP/dano/morte/respawn de jogador continuam 100% o sistema server-authoritative da Fase 5.12, sem nenhum código novo — só o HP dos MOBS foi escalado.
+
+## Recompensa individual — cada membro elegível, seu próprio roll
+
+Dentro de `mob_damage`, quando um mob morre dentro de uma instância de masmorra, o loop de recompensa deixou de creditar só quem desferiu o golpe final e passou a iterar `state.members` inteiro, chamando `creditDungeonReward` **uma vez por membro elegível**, cada um com seu próprio `charId`/`userId`/`cls` (o roll de loot usa a classe de CADA membro, não a de quem bateu) — `creditDungeonReward` já era (desde a Fase 5.2/5.3) um `withCharLock`+leitura+PATCH atômico e independente por personagem, então chamá-lo em loop, um por membro, não precisou de nenhuma mudança nele. Membro offline no momento da morte recebe a recompensa do mesmo jeito (persistida no banco) através de um WS "morto" (`DUNGEON_OFFLINE_WS = {readyState:3}`) que deixa `send()` fazer nada com segurança — só não vê a notificação em tempo real. Mochila cheia usa exatamente o mecanismo já existente (`applyGearDrops`/`dropLost`), sem nenhum código novo.
+
+**Elegibilidade nunca exige abate** (mesmo espírito de `isTvtEligible` da Fase 5.7): `dungeonMemberEligible(member, now)` aceita quem já causou dano real (`damageDone>0`) OU esteve ativo nos últimos 90s (`DUNGEON_ELIGIBLE_IDLE_MS`) — um membro que ficou parado a masmorra inteira sem participar não rouba recompensa de quem lutou, mas ninguém precisa ter batido o golpe fatal especificamente.
+
+**Corrida de morte do chefe** (dois golpes quase simultâneos): `mob.dead=true` e `state.bossDefeated=true` são setados de forma síncrona, antes de qualquer `await` — como Node processa uma mensagem WS até completar antes da próxima, uma segunda mensagem `mob_damage` pro mesmo mob (mesmo chegando logo em seguida) sempre encontra `mob.dead===true` no guard do topo do handler e retorna sem reprocessar. Mesma proteção que já cobria o caso solo (testada em `test/dungeon-integration.test.js`), agora também correta pra N membros batendo ao mesmo tempo — nenhuma trava nova foi necessária.
+
+## Desconexão, reconexão e "dono" que não trava a instância
+
+Desconectar (líder ou qualquer outro membro) **nunca** termina a instância nem afeta quem mais está dentro — só marca aquele membro `online=false` (mesmo padrão de World Boss/TvT, novo bloco dentro do `ws.on('close', ...)`). `dungeonCleanupTick` decide se uma instância morre por presença real no mapa (`playersOnMap`), não por quem é "dono" — então o líder cair não derruba o grupo. Reconectar com o mesmo `userId`+`charId` (novo bloco dentro de `handleWsJoin`, espelhando o padrão já usado por World Boss/TvT) percorre `dungeonByOwner.get(charId)` procurando uma instância que ainda esteja viva e onde esse personagem seja membro de verdade — encontrando, marca `online=true` de novo e manda `dungeon_state` com `reconnect:true`, sem duplicar personagem nem criar instância nova.
+
+## Sair da Party durante uma masmorra ativa
+
+Sair da Party (`leaveParty`) é uma operação inteiramente no nível de Party — não tem nenhum gancho para dentro de `state.members` da masmorra. Como a lista de membros da instância foi fixada na criação (ver "late join" acima) e nunca é sincronizada de volta a partir da Party, sair do grupo não expulsa ninguém de uma masmorra em andamento nem abre brecha para reentrar em várias Parties e coletar a mesma recompensa mais de uma vez — a elegibilidade (`dungeonMemberEligible`) e o `withCharLock` por personagem em `creditDungeonReward` já impedem duplicação, com ou sem mudança de Party no meio do caminho.
+
+## Isolamento entre Parties
+
+Cada `dungeon_enter` bem-sucedido gera um `mapId` novo (`zone + '_d#' + hex aleatório de 4 bytes`) e só os membros resolvidos daquela chamada específica recebem `p.map` apontando pra ele — duas Parties diferentes entrando na mesma zona ao mesmo tempo sempre caem em instâncias `mapId` distintas, sem nenhum código de isolamento dedicado (é uma consequência direta de cada instância ser um `mapState` novo, mesmo princípio já usado por World Boss/TvT). Um personagem fora da Party nunca recebe `dungeon_state` daquela instância (só quem está na lista `validMembers` resolvida a partir da própria Party é notificado) e, mesmo sabendo o `mapId` por fora, não tem como se colocar dentro dela — nenhuma mensagem do cliente altera `p.map` diretamente.
+
+## Testes
+
+`test/dungeon-party.test.js` (novo arquivo, mesmo padrão de `test/dungeon-integration.test.js`): 6 testes puros de `dungeonScaleFor`/`buildDungeonInstance` (**sempre rodam, sem Supabase** — cobrem os 4 valores de escala pedidos, grampeamento fora de 1–4, forma solo idêntica à antiga, HP de mob/chefe escalado em 2.50× pra 4 membros sem alterar dano do jogador, `wallRects` compartilhado, zona/lista inválida retornando `null`) + 8 testes de integração real via Party+WebSocket (`{skip:!hasSupabase()}`, mesma convenção de todo o resto da suite): solo sem Party (regressão), Party de 2 caindo no mesmo mapId, Party de 4 caindo no mesmo mapId com chefe escalado, membro não-líder impedido de iniciar, duas Parties isoladas em mapIds diferentes, intruso nunca recebendo `dungeon_state` da instância alheia, reconexão voltando pra mesma instância (`reconnect:true`), recompensa individual creditando os DOIS membros mesmo quando só um bateu no chefe. Os 28 testes pré-existentes de masmorra (solo) continuam verdes sem nenhuma alteração de asserção — suite completa: 456 testes / 302 passando / 0 falhando / 154 pulados (todos os pulados exigem Supabase real, nenhum contado como passado).
+
+## Verificação
+
+Os 6 testes puros rodam de verdade nesta sessão (sandbox sem credenciais Supabase configuradas) e passam. Os 8 testes de integração real via WebSocket foram escritos para exercitar o fluxo completo (`/api/party` real, `dungeon_enter`/`mob_damage` reais, nunca bypass) mas **não puderam ser executados nesta sessão** — não há `SUPABASE_URL`/`SUPABASE_SECRET_KEY` disponíveis neste ambiente (mesma situação de TODOS os outros testes com `{skip:!hasSupabase()}` já existentes no repositório, incluindo o de `test/dungeon-integration.test.js` e o de `session_replaced` da Fase 5.12.1 — não é uma limitação nova desta fase). A correção foi verificada por revisão estática cuidadosa de cada trecho alterado (guard de `mob.dead` síncrono antes de qualquer `await`, `withCharLock` independente por `charId`, `state.members` nunca ressincronizado a partir da Party, presença por `playersOnMap` em vez de "dono") e por comparação direta com os padrões já comprovados de World Boss/TvT (reconexão, desconexão, isolamento por `mapId`). **Recomenda-se rodar `npm test` com `SUPABASE_URL`/`SUPABASE_SECRET_KEY` de um projeto de TESTE antes do merge em `main`**, para confirmar os 8 cenários fim-a-fim.
+
+## Limitações conhecidas
+
+- **Sem HUD dedicado de grupo dentro da masmorra** (barra de HP dos outros membros, indicador de "em grupo") — o pedido original cobre mecânica (escala/loot/reconexão), não UI nova; jogadores do mesmo grupo já se veem/se movem/lutam juntos pelo pipeline genérico de multiplayer (mesmo usado em TvT/World Boss), só não há um painel dedicado. Fica pronto pra uma fase futura de polish, se pedido.
+- **TTK (time-to-kill) não medido em produção real** — sem ambiente de carga/grupo real disponível nesta sessão; os multiplicadores de escala usados são os valores de partida pedidos explicitamente (1.55×/2.05×/2.50×), não uma calibração validada por playtesting.
+- **Os 8 testes de integração real (Party+WebSocket) não foram executados nesta sessão** — ver "Verificação" acima. Escritos e prontos, mas pendentes de confirmação com Supabase real antes do merge.
+- **Nenhuma migração de banco** — toda a mudança é em memória (`server.js`/`game-data/dungeon-generation.js`); o formato salvo em `characters.save` (gold/gem/bag/eq) não mudou.
+
+# FASE 5.13.2 — MATCHMAKING DE DUNGEON
+
+**Escopo**: fila de matchmaking somente-humano pra formar grupos de masmorra automaticamente (preenchimento por IA fica pra Fase 5.16 — aqui só existe o campo `allowAiFill`, guardado por entrada mas nunca lido por nada que spawne IA). Fila em memória, sem tabela, mesmo espírito efêmero de Party/instância de masmorra. A entrada direta de sempre (sozinho ou com a Party atual, Fase 5.13.1) continua funcionando sem nenhuma mudança — matchmaking é uma opção **a mais**, nunca uma substituição.
+
+## Estrutura
+
+`dungeonQueue` (`Map<zone, Map<userId, {charId,cls,queuedAt,allowAiFill,soloOptIn,disconnectedAt}>>`) e `userQueueZone` (`Map<userId, zone>`, garante nunca duas entradas simultâneas pro mesmo usuário — entrar numa fila nova sempre remove qualquer entrada anterior primeiro, `dungeonQueueLeaveInternal`). Chaveado por `userId`, não `charId` — mesma granularidade de Party e `activeCharacterForUser`, porque quem importa pro pareamento é a conta ativa agora, não um personagem específico guardado em memória.
+
+## Tamanho preferido (4), fallback por tempo de espera (3, depois 2), solo só com opt-in
+
+`dungeonQueueTick()` roda a cada 1s (junto do resto da limpeza periódica). Pra cada zona, mede quantos estão realmente disponíveis (online, sem tolerância de desconexão ativa) e decide o maior grupo viável: 4 ou mais na fila fecha **na hora** (não precisa esperar nada); exatamente 3 só fecha depois de `DUNGEON_QUEUE_FALLBACK_3_MS` (25s) de espera do mais antigo; exatamente 2 só depois de `DUNGEON_QUEUE_FALLBACK_2_MS` (45s); sozinho **nunca** fecha, a menos que o próprio jogador tenha marcado `soloOptIn:true` na entrada — e mesmo assim só depois de `DUNGEON_QUEUE_FALLBACK_SOLO_MS` (60s). Se sobrar mais gente que o grupo fechado (ex.: 5 na fila), o loop continua tentando fechar outro grupo com quem restou, no mesmo tick.
+
+## Diversidade de classe sem bloquear ninguém
+
+`dungeonQueuePickGroup(entries, n)` sempre inclui quem está esperando há mais tempo (justiça por ordem de chegada), depois prioriza entradas com uma classe ainda não escolhida no grupo, e só preenche o resto com quem sobrar (mais antigo primeiro) se a diversidade se esgotar — nunca deixa um grupo incompleto ou atrasado só por falta de variedade de classe.
+
+## Tolerância de desconexão
+
+Cair da fila (rede instável, troca de aba) não remove a posição na hora — `disconnectedAt` é marcado no fechamento do WebSocket e a entrada continua na fila, mas **nunca** entra num grupo formado enquanto isso (o tick filtra por `!disconnectedAt` antes de contar quem está disponível). Reconectar com o mesmo `userId` dentro de `DUNGEON_QUEUE_DISCONNECT_GRACE_MS` (20s) limpa o flag e a espera acumulada continua valendo; passado esse prazo sem reconectar, a entrada é removida de vez no próximo tick.
+
+## Pareamento vira uma Party de verdade
+
+`formDungeonGroup(zone, group)` revalida o desbloqueio de **cada** membro com uma leitura fresca do banco (o check feito na entrada da fila pode ter ficado velho) — quem não está mais liberado simplesmente não entra no grupo final. Membros validados (2+) são desligados de qualquer Party manual anterior (`leaveParty`) e uma Party nova é montada pra eles com o mesmo sistema da Fase 5.13.1 (`parties`/`memberParty`, nunca uma estrutura paralela) — o mais antigo da fila vira o dono. A masmorra é então criada e cada membro online recebe `dungeon_queue_matched` seguido do `dungeon_state` normal, pelo mesmo `buildDungeonInstance`/`sendDungeonStateTo` de sempre. **Simplificação deliberada**: o nome exibido na Party montada pelo matchmaking usa o nome do personagem (`p.name`, já disponível na conexão), não o username da conta (que exigiria uma consulta extra ao Supabase só pra isso) — cosmético, sem efeito em nenhuma lógica de posse/permissão.
+
+## Cliente (`index.html`)
+
+Botão "Buscar Grupo (matchmaking)" na tela da masmorra (`scrMasmorra`), ao lado do "Entrar" de sempre (que continua igual). Enquanto na fila, o botão de entrada direta fica desabilitado e um status (`X/4 jogador(es) reais, aguardando há Ys`) aparece com um botão "Cancelar busca" — o contador de segundos é fixado no momento da última atualização do servidor (join/leave), não um relógio ticando em tempo real no cliente (ver limitações). `dungeon_queue_matched` mostra um toast ("Grupo encontrado!") e prepara a mesma transição de tela (`$('#fade')`, `traveling=true`) que a entrada direta já usava, deixando o `dungeon_state` que chega logo em seguida cair no mesmo `applyDungeonState` de sempre — nenhum código de transição novo foi necessário.
+
+## Testes
+
+`test/dungeon-queue.test.js` (novo arquivo): **11 testes puros** (sempre rodam, sem Supabase, sem esperar os prazos reais de 25s/45s/60s — os timestamps `queuedAt`/`disconnectedAt` são forjados no passado via manipulação direta dos `Map`s exportados) cobrindo cada limiar de fallback (4 fecha na hora; 3 não fecha antes de 25s e fecha depois; 2 não fecha antes de 45s e fecha depois; solo nunca fecha sem opt-in, fecha só depois de 60s com opt-in), a tolerância de desconexão (nunca entra num grupo dentro da tolerância, é removido depois dela) e a limpeza de fila/zona vazia — mais **5 testes de integração real via WebSocket** (`{skip:!hasSupabase()}`, mesma convenção do resto da suite): entrar/sair da fila, 4 jogadores pareando quase imediatamente e virando uma Party real, sozinho nunca pareando sem opt-in, reentrada na mesma zona não duplicando, e diversidade de classe garantindo que a única classe diferente (mago entre 4 guerreiros) entra no primeiro grupo fechado. A lógica de renderização do cliente (`scrMasmorra`, os dois estados — fora e dentro da fila) foi verificada isolando a função com estado forjado (Node, fora do navegador) e conferindo a string HTML gerada nos dois casos, sem precisar de um servidor real rodando.
+
+## Verificação
+
+Os 11 testes puros rodam de verdade nesta sessão e passam — cobrem exaustivamente a aritmética de fallback (a parte mais fácil de errar). Os 5 testes de integração via WebSocket foram escritos pra exercitar o fluxo completo (`dungeon_queue_join`/`dungeon_queue_leave` reais, nunca bypass) mas não puderam ser executados aqui pela mesma razão já documentada na Fase 5.13.1 (sem `SUPABASE_URL`/`SUPABASE_SECRET_KEY` neste sandbox). **Recomenda-se rodar `npm test` com Supabase de TESTE antes do merge**, junto com os 8 pendentes da Fase 5.13.1.
+
+## Limitações conhecidas
+
+- **Contador de espera não atualiza em tempo real no cliente** — fica parado no valor de quando o servidor confirmou a entrada/saída da fila, só muda de novo se o jogador reabrir o painel (o que dispara `renderScr()` com `Date.now()` fresco só quando um novo `dungeon_queue_state` chega do servidor). Um relógio local ticando seria puramente cosmético; não implementado pra não adicionar estado novo além do pedido.
+- **Sem persistência entre sessões** — sair do jogo remove a entrada da fila como qualquer desconexão (com a mesma tolerância de 20s); não existe "voltar pra fila de onde parei" depois de fechar a aba de propósito.
+- **`allowAiFill` e `soloOptIn` preparados mas sem UI dedicada pra ligar/desligar** — o cliente atual nunca manda `allowAiFill` (fica sempre `false`) nem `soloOptIn` (fica sempre `false`, então o fallback solo nunca dispara na prática hoje); os campos existem no protocolo servidor-cliente exatamente como pedido ("flag allowAiFill preparada, IA não spawna ainda"), prontos pra Fase 5.16 ligar preenchimento por IA e pra uma fase futura de UI adicionar as opções, sem precisar mexer no núcleo da fila de novo.
+- **Nenhuma migração de banco** — toda a fila é em memória; nada foi persistido no Supabase.
+
+# FASE 5.14 — ADMIN + OBSERVABILIDADE
+
+**Escopo**: painel administrativo separado (`/admin`, `admin.html`) com RBAC de 4 níveis, moderação persistente e auditada (kick/mute/ban/unban), visão somente-leitura de economia/guildas/eventos, e um log de segurança com lista explícita do que nunca é gravado.
+
+## Banco de dados: auditado antes de qualquer migração
+
+Antes de escrever qualquer SQL, o schema real do Supabase do projeto (`MMORPG 2D V0.22 Online`, o único projeto `ACTIVE_HEALTHY`, com dados reais — 10 usuários, 10 personagens) foi lido via `list_tables`: `users`, `characters`, `sessions`, `friends`, `guilds`/`guild_members`/`guild_invites`, `character_bestiary`, `character_rank_stats`, `market_listings`/`market_transactions`/`market_claims`. Nenhuma das tabelas candidatas (`admin_roles`, `moderation_actions`, `player_bans`, `player_mutes`, `admin_audit_log`) existia — confirmando que a migração é 100% nova, nunca um conflito com algo já lá.
+
+**Decisão registrada com o usuário**: como é o banco de produção real (não um projeto de teste), foi oferecida a opção de criar uma branch de desenvolvimento do Supabase antes de aplicar qualquer coisa (custo: $0.01344/hora) — o usuário optou por aplicar direto na produção, confiando que a migração é puramente aditiva (só `CREATE TABLE`, nenhuma tabela existente alterada). A migração foi aplicada com `apply_migration` (não um arquivo SQL só documentado — rodou de verdade no projeto real) e os Advisors de Segurança/Performance foram executados logo em seguida, como exigido.
+
+## Schema (100% aditivo)
+
+4 tabelas novas, nenhuma tabela existente tocada — `moderation_actions` foi **deliberadamente fundida** em `admin_audit_log` (toda ação de moderação já é uma entrada de auditoria; não fazia sentido manter duas tabelas espelhadas para a mesma informação):
+- `admin_roles(user_id PK, role, granted_by, granted_at)` — `role` restrito por `check` a `owner`/`admin`/`moderator`/`support`.
+- `player_bans(id, user_id, reason, banned_by, created_at, expires_at NULL=permanente, revoked_at, revoked_by)`.
+- `player_mutes` — mesma forma de `player_bans`, para chat.
+- `admin_audit_log(id, actor_user_id, action, target_user_id, target_character_id, reason, metadata jsonb, created_at)` — toda ação administrativa (kick/mute/ban/unban/concessão de cargo) grava uma linha aqui.
+
+RLS habilitado em todas, **sem nenhuma policy** para `anon`/`authenticated` — exatamente o mesmo padrão já usado nas 12 tabelas pré-existentes (confirmado pelo Advisor: a mesma checagem informativa `rls_enabled_no_policy` já existia pras 12 tabelas antigas, não é uma novidade desta fase). Só o backend, autenticado com a service-role key (que ignora RLS por padrão no Supabase), lê/escreve — nunca o cliente direto. O Performance Advisor sinalizou 6 foreign keys sem índice de cobertura (`granted_by`/`banned_by`/`revoked_by`/`muted_by`/`revoked_by`/`target_character_id`) — corrigido numa segunda migração pequena, só nas tabelas novas desta fase (índices em tabelas pré-existentes que o Advisor também sinalizou, como `friends.friend_id`, ficaram de fora por estarem fora do escopo desta fase).
+
+## RBAC: matriz de permissão centralizada, nunca `role==='admin'` espalhado
+
+`ADMIN_PERMS` (`server.js`) mapeia cada um dos 4 cargos pra uma lista de permissões nomeadas (`view_dashboard`, `search_players`, `kick`, `mute`, `ban`, `unban`, `view_economy`, `manage_roles`, `view_guilds`, `view_events`, `view_security_log`) — toda rota do painel checa `adminHasPerm(role, 'permissão_nomeada')`, nunca uma comparação direta de string espalhada pelo código. `support` é somente-leitura (dashboard/busca/guildas/eventos); `moderator` ganha kick/mute/ban/unban; `admin` ganha tudo do moderator mais visão de economia e log de segurança; só `owner` tem `manage_roles` (conceder/revogar qualquer cargo, incluindo outros admins).
+
+## Auth: sempre server-side, nunca localStorage
+
+`resolveAdmin(req)` reusa o **mesmo** token Bearer de sessão de sempre (`resolveUser`, Fase 1) e faz uma leitura fresca de `admin_roles` a **cada requisição** — o cargo nunca é guardado no cliente nem cacheado em memória entre requisições. `admin.html` guarda só o token de sessão (o mesmo que qualquer login do jogo emite) — não existe "senha de admin" separada; quem tem uma conta com uma linha em `admin_roles` vê o painel, quem não tem recebe 403 (`Acesso restrito`) em toda rota `/api/admin/*`.
+
+## Moderação: persistente, auditada, aplicada em login E no WebSocket
+
+Ban é checado em **dois** pontos, como pedido explicitamente: `/api/auth/login` (rejeita a emissão de uma sessão nova pra conta banida, com o motivo e a data de expiração se houver) e dentro de `handleWsJoin` (cobre quem já tinha uma sessão válida emitida **antes** do ban — nunca degrada pra "visitante anônimo", fecha a conexão de verdade com o código `4003` e uma mensagem `banned` explícita). Banir uma conta **já conectada** força a desconexão imediata (`kickUserSockets`, reusado por kick e ban) — nunca espera a próxima reconexão pra começar a valer. Mute é checado no join (`p.muted`) e reforçado **em tempo real** pra quem já está conectado (`/api/admin/mute` varre `accountSockets` e liga o flag na conexão viva na hora, sem exigir reconexão) — os dois handlers de chat (`chat` e `guild_chat`) recusam com uma mensagem `muted` em vez de propagar a mensagem. `unban`/`unmute` marcam `revoked_at`/`revoked_by` (histórico nunca é apagado, só desativado) e, no caso do mute, também desligam o flag em tempo real.
+
+## Prazo: calculado na leitura, nunca um job apagando histórico
+
+Ban/mute com `expires_at` vencido continua com `revoked_at is null` no banco pra sempre (nunca reescrito nem apagado) — `activeAmong` (núcleo puro, testado exaustivamente) decide na hora da leitura se uma linha ainda vale (`!revoked_at && (!expires_at || expires_at > agora)`), tanto pro gate de login/WS quanto pro contador do dashboard. Histórico completo fica sempre disponível via `/api/admin/audit`, nunca truncado.
+
+## Cargos: proteção contra travar o painel sozinho
+
+`/api/admin/roles/revoke` recusa remover o **último** `owner` restante (checagem explícita antes de deletar) — sem essa trava, um único erro de clique zeraria `admin_roles` inteiro e ninguém mais conseguiria conceder cargo nenhum, exigindo acesso direto ao banco pra recuperar.
+
+## Economia: somente leitura, de propósito
+
+`/api/admin/economy` soma `gold`/`gem` de todas as `characters.save` reais e conta anúncios ativos/transações do Mercado — **nenhuma ação corretiva foi implementada** (dar/tirar ouro, cancelar transação à força) nesta fase, de propósito: o pedido é explícito que o painel nunca vire um "console de cheat". Se uma ação corretiva pontual for pedida numa fase futura, ela merece seu próprio fluxo auditado com motivo obrigatório e confirmação — não uma rota genérica de "editar economia".
+
+## Log de segurança: lista explícita do que é gravado e do que NUNCA é
+
+`admin_audit_log` grava `action` (kick/ban/unban/mute/unmute/role_grant/role_revoke), quem fez, alvo, motivo e uma `metadata` jsonb livre (ex.: prazo do ban, quantos sockets foram fechados). `sanitizeAuditMetadata` (núcleo puro, testado) filtra qualquer chave cujo nome contenha `password`, `token`, `service_role` ou `session` antes de gravar — mesmo que uma chamada futura passasse um desses campos por engano dentro de `metadata`, ele nunca chegaria no banco.
+
+## Cliente: `admin.html` (separado do jogo)
+
+Página isolada em `/admin` (servida pelo mesmo `server.js`, mapeada especificamente pra `admin.html` — nunca dentro de `index.html`/do canvas do jogo). Login reusa `/api/auth/login`; depois de autenticar, busca `/api/admin/me` pra saber cargo/permissões e monta a navegação só com as abas que o cargo realmente tem acesso (Painel, Jogadores, Economia, Guildas, Eventos, Cargos, Auditoria). Busca de jogador por nome de personagem com ações inline (kick/mute/ban/desmutar/desbanir) quando o cargo permite.
+
+## Bootstrap do primeiro owner
+
+`admin_roles` nasceu vazia — não existe nenhuma rota que crie o primeiro `owner` sozinha (seria um jeito de qualquer conta se auto-promover). O primeiro `owner` precisa ser inserido manualmente uma única vez (SQL direto no projeto, `insert into public.admin_roles (user_id, role) values ('<uuid da conta>', 'owner');`) — depois disso, essa conta usa o próprio painel (`/api/admin/roles`) pra conceder os demais cargos normalmente.
+
+## Testes
+
+`test/admin.test.js` (novo arquivo): **11 testes puros** (sempre rodam, sem Supabase) cobrindo a matriz de permissão inteira (cada cargo x cada permissão relevante), a sanitização de metadata (nunca deixa passar password/token/service_role/session) e o cálculo de ban/mute ativo (permanente ativo, prazo vencido nunca ativo, prazo futuro ativo, revogado sempre inativo, lista vazia nunca quebra) — mais **9 testes de integração real via HTTP/WebSocket** (`{skip:!hasSupabase()}`, mesma convenção do resto da suite): sem cargo nenhum é 403 em tudo; `support` vê dashboard/busca mas 403 em ban/economia/cargos; ban derruba quem está conectado na hora e bloqueia login novo; unban restaura o login; mute bloqueia chat em tempo real sem precisar reconectar; kick derruba uma conexão ativa; `owner` concede `moderator` a outra conta que passa a poder kickar mas não gerenciar cargos; nunca remove o último owner; toda ação de ban gera uma entrada de auditoria sem nenhum campo sensível.
+
+## Verificação
+
+Os 11 testes puros rodam de verdade e passam. Os 9 testes de integração foram escritos pra exercitar o fluxo HTTP/WS completo (login real, join real, chat real) mas **não puderam ser executados aqui**: rodá-los exigiria configurar `SUPABASE_URL`/`SUPABASE_SECRET_KEY` apontando pro projeto real (o único disponível — não existe um projeto de teste separado) e cada teste cria contas reais descartáveis (`newAccount`) e insere linhas reais em `admin_roles`/`player_bans`/`player_mutes` — a mesma convenção que todo outro teste `{skip:!hasSupabase()}` deste repositório segue ("projeto de TESTE, nunca o oficial") teria sido violada rodando contra o único projeto disponível. A correção foi verificada por revisão estática cuidadosa de cada rota (guard de permissão em toda rota, mute/ban aplicados em tempo real via `accountSockets`, prazo calculado só na leitura) e comparação direta com os padrões já comprovados do resto do código (`resolveUser`, `activeCharacterSockets`, `kickUserSockets` espelhando o fechamento de socket já usado por `session_replaced`). **Recomenda-se rodar `npm test` com `SUPABASE_URL`/`SUPABASE_SECRET_KEY` de um projeto de TESTE de verdade antes do próximo merge**, junto com os pendentes das Fases 5.13.1/5.13.2.
+
+## Limitações conhecidas
+
+- **Sem ação corretiva de economia** — de propósito, ver "Economia" acima.
+- **Sem UI de duração de ban/mute no painel** (usa `prompt()` simples pro motivo, sem campo de prazo) — o protocolo servidor (`durationMs`) já aceita prazo, só a UI ainda não expõe um seletor; ban/mute via painel hoje sempre saem permanentes a menos que a API seja chamada diretamente com `durationMs`.
+- **Bootstrap do primeiro owner é manual** (SQL direto), ver acima — decisão deliberada pra nunca existir uma rota de auto-promoção.
+- **9 testes de integração não executados nesta sessão** — ver "Verificação" acima.
+- **Nenhuma métrica de observabilidade além do dashboard básico** (online agora, bans/mutes ativos, atividade recente) — latência/erro-rate/uptime não fazem parte desta fase; o pedido de "métricas leves de observabilidade" foi interpretado como o dashboard administrativo em si, não um sistema de monitoramento de infraestrutura separado.
+
+# FASE 5.15 — PORTAL PÚBLICO
+
+**Escopo**: site público (`/portal`, `portal.html`) sem quebrar a URL do jogo (`/`) nem a do admin (`/admin`) — profissional, com status do servidor, rankings, guildas, eventos e um sistema simples de notícias gerenciável pelo painel admin (Fase 5.14).
+
+## Reuso em vez de reconstrução: rankings e guildas já eram públicos
+
+Antes de escrever qualquer rota nova, `/api/rankings` (Fase 5.10) foi revisado — já é **100% público** (nenhuma autenticação exigida) e já retorna só campos de exibição seguros (nome/classe/nível/tag de guilda/estatísticas, nunca `userId`/`characterId` real/token/save). `type=guild` já devolve exatamente `name`/`tag`/`memberCount`/`totalLevel`/`tvtWins`/`worldBossKills` — a informação pública de guilda pedida. O portal **reusa esse endpoint sem nenhuma mudança nele**, tanto para os rankings de jogador quanto para a lista de guildas — nenhuma rota nova foi criada para isso, e o cache de 45s que ele já tinha (`RANKINGS.createRankCache`, Fase 5.10) já atende à janela de 30-60s pedida.
+
+## API nova: só o que realmente faltava
+
+`handlePublic` (`server.js`, montado em `/api/public/*`, sem autenticação nenhuma):
+- `GET /api/public/status` — população (`{human, ai}` — `ai` sempre `0` porque a Fase 5.16/Aventureiros IA ainda não existe; o formato já fica pronto pra quando existir, sem precisar mudar o contrato depois), se o World Boss está ativo agora, horário do próximo World Boss/próximo Team vs Team (reusa `EVENT_DATA.scheduleAfter`, Fase 5.5, sem nenhuma mudança nele), contagem de guildas.
+- `GET /api/public/events` — próximos 8 eventos agendados (mesma fonte de sempre).
+- `GET /api/public/news` — notícias publicadas, mais recentes primeiro (`title`/`body`/`published_at` — nunca `author_user_id`, que fica só na tabela e nas rotas administrativas).
+
+Todas as três usam a **mesma fábrica de cache TTL** já criada na Fase 5.10 (`RANKINGS.createRankCache()`, uma instância nova `publicCache`) — 45s por padrão, dentro da janela de 30-60s pedida — mais o header HTTP `Cache-Control: public, max-age=30` (status/eventos) ou `max-age=60` (notícias) pra CDNs/navegadores também poderem cachear.
+
+## Privacidade: nunca os campos proibidos
+
+Nenhuma rota de `/api/public/*` toca em `resolveUser`/token/sessão — são as únicas rotas do projeto que respondem sem checar credencial nenhuma, de propósito. `user_id`, `email`, `save` (inventário/ouro/gemas reais), token, sessão, cargo de admin e qualquer ação de moderação nunca aparecem em nenhuma resposta — testado explicitamente (`test/portal-public.test.js`, varre a resposta inteira procurando essas substrings). `/api/public/news` nunca inclui `author_user_id` (só é lido internamente pra auditoria).
+
+## Notícias: gerenciável pelo admin, publicado na hora
+
+`portal_news` (migração aditiva, RLS sem policy — mesmo padrão das 17 tabelas já existentes) + duas rotas novas em `handleAdmin` (`POST /api/admin/news`, `POST /api/admin/news/delete`), gated pela permissão nova `manage_news` (só `owner`/`admin` — nunca `moderator`/`support`). Publicar ou excluir uma notícia limpa o `publicCache` inteiro (`publicCache.clear()`) — a notícia aparece na API pública **imediatamente**, sem esperar o TTL de 60s expirar sozinho. `admin.html` ganhou uma aba "Notícias" (formulário simples título+texto, lista com botão excluir) reusando a mesma leitura pública (`/api/public/news`) pra não duplicar lógica de listagem.
+
+## Cliente: `portal.html` (separado do jogo e do admin)
+
+Página pública em `/portal` — hero com call-to-action "Jogar agora" (linka pra `/`, nunca quebra a URL do jogo), cards de status, abas de ranking (reusando `/api/rankings` direto do navegador), tabela de próximos eventos, lista de notícias. SEO básico: `<title>` descritivo, `<meta name="description">`, tags Open Graph mínimas. Responsivo (grid flexível `auto-fit`, tipografia com `clamp()`, um breakpoint simples de mobile) — sem framework, mesmo espírito leve de `admin.html`.
+
+## Testes
+
+`test/portal-public.test.js` (novo arquivo — nome distinto de `test/portal.test.js`, que já existia e testa a tela de viagem "portal" dentro do jogo, um conceito diferente): **1 teste puro** (sempre roda, sem Supabase — contrato do cache TTL: hit dentro da janela nunca reexecuta a função de origem) + **7 testes de integração real via HTTP** (`{skip:!hasSupabase()}`, mesma convenção do resto da suite): status/eventos/notícias respondem sem autenticação nenhuma, o formato de população humano/IA está presente (IA sempre 0), nenhum campo proibido vaza em nenhuma resposta pública, notícia publicada pelo admin aparece na API pública na hora (cache limpo no publish), e `moderator` (sem `manage_news`) não consegue publicar.
+
+## Verificação
+
+O teste puro roda de verdade e passa. Os 7 de integração foram escritos pra exercitar o fluxo HTTP completo mas não puderam ser executados aqui — mesma razão já documentada nas Fases 5.13.1/5.13.2/5.14 (sem Supabase de teste configurado neste sandbox, e o único projeto Supabase disponível é o de produção real, onde não se deve rodar testes que criam contas descartáveis). A correção foi verificada por revisão estática (toda rota pública revisada campo a campo contra a lista de proibidos, cache invalidado explicitamente no publish/delete de notícia) e por reuso direto de rotas já testadas e comprovadamente públicas (`/api/rankings`, Fase 5.10). **Recomenda-se rodar `npm test` com Supabase de TESTE de verdade antes do merge**, junto com os pendentes das fases anteriores.
+
+## Efeito colateral: corrigido um problema pré-existente na suite de testes
+
+Durante a verificação desta fase, percebi que `test/blacksmith.test.js` e `test/monster-movement.test.js` usavam a **mesma porta** (8113) — uma colisão pré-existente (não introduzida nesta sessão) que podia causar `EADDRINUSE` intermitente quando os dois rodam em paralelo (comportamento padrão do `node:test`). Corrigido movendo `monster-movement.test.js` pra uma porta livre (8115). Contagem final da suite completa, confirmada por soma independente de cada arquivo: **498 testes / 323 passando / 0 falhando / 175 pulados**.
+
+## Limitações conhecidas
+
+- **`ai` sempre 0 em `/api/public/status`** — de propósito, ver acima; passa a refletir a realidade automaticamente quando a Fase 5.16 existir, sem precisar mudar o contrato da API.
+- **Notícias sem edição** (só publicar/excluir) — pedido era um sistema "simples", editar um título/texto publicado não foi considerado essencial; excluir e republicar já cobre o caso de correção.
+- **7 testes de integração não executados nesta sessão** — ver "Verificação" acima.
+- **Nenhuma migração de banco além de `portal_news`** — aditiva, mesmo padrão das fases anteriores.
+
+# FASE 5.16 (TIER 1) — LIVING WORLD / AVENTUREIROS IA (NÚCLEO)
+
+**Escopo**: camada de IA server-side (nunca navegador, nunca conta Supabase) que povoa as zonas de campo com "Aventureiros" simulados — um FSM determinístico, combate real usando a mesma autoridade dos humanos, isolamento econômico absoluto. Esta seção documenta o **núcleo** (entidade/FSM/combate de campo/visibilidade/isolamento). O preenchimento de masmorra e TvT por IA (Dungeon Fill / TvT Fill) é uma fase seguinte, documentada em separado quando pronta.
+
+## Nunca um processo de navegador, nunca uma conta fake — e nunca um LLM em runtime
+
+Cada Aventureiro IA é só um objeto em memória (`aiEntities`, `Map<id, entity>`) — nenhum WebSocket, nenhuma linha em `users`/`characters`, nenhum processo/aba de navegador. Simulado por um tick determinístico (`aiTick`, reaproveitando o mesmo `setInterval` de 1s que já existia — dentro da janela de 500-1000ms pedida, sem criar um timer novo). **Nenhuma chamada a LLM em lugar nenhum** — o "cérebro" da IA é um FSM com heurísticas simples (raio de agressividade, limiar de fuga por personalidade, seleção por zona menos povoada), nunca uma API de IA generativa.
+
+## FSM: os 12 estados pedidos, todos realmente alcançáveis
+
+`idle` → decide (mob por perto? `hunt`; senão `wander` ou raramente `travel`) · `wander` → passeio aleatório, pode virar `hunt` se um mob aparecer no raio · `travel` → realocação pra outra zona (ver limitação de "viagem" abaixo) · `hunt` → persegue o mob alvo · `combat` → ataca (ou foge, se HP abaixo do limiar de personalidade) · `retreat` → foge do alvo por alguns segundos · `rest` → recupera HP passivamente antes de voltar a `idle` · `dead`/`respawn` → aguarda o prazo e reaparece. `party`/`queue`/`dungeon`/`tvt` são os estados reservados pro preenchimento de masmorra/TvT (Fase seguinte) — o switch já os reconhece (no-op controlado externamente), preparados sem serem enfeite morto.
+
+## Combate: a MESMA autoridade dos humanos, nunca uma fórmula paralela
+
+`aiDoCombat` chama `resolveAttackDamage(ai, {skill:'basic'}, now)` — a função exportada desde a Fase 5.12 e usada por **todo** dano do jogo — com o próprio objeto da IA no lugar de `p`. Cooldown, teto de dano, fórmula por classe/nível: tudo idêntico. Mobs de campo também **revidam de verdade**: `tickMobAI` agora inclui `aiPresentOnMap(mapId)` na lista de alvos possíveis, e `hitTarget` ganhou um ramo pra IA (`aiEntities.get(p.id)===p` no lugar do `clients.get(ws)===p` de um jogador real) — combate nos dois sentidos, a IA pode morrer de verdade e não é uma entidade fantasma que só bate e nunca apanha.
+
+## Equipamento simulado — nunca um item real
+
+`buildAiSave`/`buildAiCombat` geram um `save` descartável em memória, com `createGear()` (a mesma função real) numa arma da classe — nunca gravado em `bag`/`eq` de personagem nenhum, sem UID reconhecido por `lockOwnedItems`/Mercado/encantamento. **Detalhe técnico descoberto durante a implementação**: `GEAR_DATA.statsFor` só tem tabela de stats pros níveis de tier reais do jogo (1/4/8/12/16/20/24/28/32/36/40) — um nível arbitrário (ex. 15) retorna `null` e `createGear` silenciosamente não equipa nada. `aiGearTierFor(lvl)` arredonda sempre **pra baixo** pro tier válido mais próximo (nunca pra cima — nunca "empresta" um requisito de nível maior que o real da IA) antes de gerar o item.
+
+## Nível/zona: derivado do próprio manifesto de mobs, nunca uma tabela paralela
+
+`aiZoneLevelRange(zone)` lê o `MOB_MANIFEST[zone]` já existente (a mesma fonte que define os mobs reais de cada zona) pra descobrir a faixa de nível apropriada — uma IA em `floresta` luta como `floresta` pede, sem duplicar a curva de dificuldade em lugar nenhum.
+
+## Distribuição de população: sempre a zona menos povoada, nunca concentrada
+
+`aiPopulationTick` conta quantas IA já existem por zona (`AI_FIELD_ZONES`, as 7 zonas de campo — nunca `vila`, hub social sem mobs) e sempre spawna na zona com **menos** IA no momento — nunca deixa a população inteira se acumular numa zona só. Teto conservador de partida: `AI_MAX_POPULATION=10` (ver limitações — não foi possível medir carga real nesta sessão pra calibrar um teto por benchmark, como pedido).
+
+## Visibilidade: mesmo pipeline de sempre, indicador discreto
+
+Uma IA aparece pra jogadores reais via `player_join`/`state`/`player_leave` — **exatamente** as mesmas mensagens que um jogador real já usava — com um campo `kind:'ai'` a mais (`aiPublicPlayer`, espelha `publicPlayer` campo a campo). Isso significa **zero código novo de desenho no cliente**: o mesmo `drawRemote` que já desenhava outros jogadores desenha a IA automaticamente. A única mudança de cliente foi o rótulo (`index.html`, `drawRemote`): cor diferente + sufixo `[IA]` quando `p.kind==='ai'` — nunca esconde, nunca finge ser humano. `charId` é sempre `null` no payload público — nenhuma IA pode ser confundida com um personagem real em nenhuma tela.
+
+## Isolamento econômico — a REGRA ABSOLUTA, garantida estruturalmente
+
+Uma entidade de IA **nunca** tem `userId`/`charId` reais (sempre `null`) — cada função que credita economia (`creditKillReward`, `creditDungeonReward`, `applyGearDrops`, `creditBestiaryKill`, qualquer rota de Mercado) já rejeita entrada sem `charId`/`userId` válidos por construção própria, **e** o próprio caminho de combate da IA (`aiDoCombat`) nunca chama nenhuma dessas funções — quando a IA mata um mob (de campo ou de masmorra), o mob morre pro mundo (broadcast idêntico a um abate real) mas a recompensa da IA é sempre ZERO, nunca uma checagem condicional que poderia ser esquecida num caminho novo. A lógica de recompensa de masmorra foi **extraída** pra uma função só (`dungeonHandleMobDeath`, reusada pelo handler `mob_damage` de sempre E pelo combate da IA) com um guard explícito `if (member.kind==='ai') continue;` **antes** de qualquer chamada de crédito — testado com um membro de IA com `userId`/`charId` propositalmente parecendo válidos, pra provar que a exclusão é pelo `kind`, não um acidente de campo vazio.
+
+## Observabilidade: sempre marcada, nunca escondida, nunca inflando o humano
+
+`/api/admin/dashboard` ganhou `aiOnline` (separado de `online`, nunca somado) e uma rota nova `GET /api/admin/ai` (lista completa, cada entrada sempre `kind:'ai'`). `/api/public/status` (Fase 5.15) agora reporta `population.ai` real (`aiEntities.size`) em vez do `0` fixo temporário — nunca misturado com `population.human` (fontes totalmente separadas: `clients` vs `aiEntities`), o número de humanos online nunca é falsificado pela presença de IA.
+
+## Limpeza rigorosa — sem vazamento
+
+Nenhuma IA tem seu próprio `setTimeout`/`setInterval` — tudo roda no único tick de 1s compartilhado, então não existe timer nenhum pra vazar por entidade. `aiDespawnEntity` só remove do `Map` e manda `player_leave` — sem referência pendurada em lugar nenhum.
+
+## Gate de testes: `AI_ENABLED` desligado por padrão em toda suite
+
+Durante a verificação, uma IA que nasceu automaticamente (`aiPopulationTick`) dentro do processo filho de `test/monster-movement.test.js` interferiu num teste sensível a tempo (`alvo desconectado e trocado sem paralisar a perseguição`) — um ator não controlado apareceu no mapa compartilhado do teste, quebrando uma suposição implícita sobre quem está presente. Corrigido com `aiEnabled()` (função, não uma const congelada — lê `process.env.AI_ENABLED` a cada chamada) e `test/helpers.js` passando `AI_ENABLED:'0'` pra **todo** servidor de teste por padrão — nenhuma suite depende de atores não controlados aparecendo sozinhos. Criar uma IA manualmente (`aiSpawnEntity` direto, como os testes puros fazem, ou um preenchimento de fila/TvT futuro) nunca depende dessa flag — só o spawn automático em segundo plano é afetado. Confirmado com 3 execuções consecutivas e limpas da suite completa após a correção.
+
+## Testes
+
+`test/ai.test.js` (novo arquivo): **16 testes puros** (sempre rodam, sem Supabase, sem esperar o tick real de 1s — FSM exercitado chamando `aiStep`/`aiDoCombat` diretamente com timestamps forjados): geração de stats/equipamento simulado por classe (nunca `maxHp` zero, nunca `userId`/`charId` reais), tier de equipamento sempre arredondado pra baixo, faixa de nível derivada do manifesto real, perfis de personalidade realmente distintos, spawn/despawn sem deixar rastro no Map, teto de população respeitado, formato `publicPlayer`-compatível com `kind:'ai'`, distribuição pra zona menos povoada, gate `AI_ENABLED` respeitado, ciclo completo idle→hunt→combat→mob morto, fuga por HP baixo, morte/respawn no prazo certo, e as duas REGRAS ABSOLUTAS (nenhuma recompensa creditada a um membro `kind:'ai'` mesmo com campos parecendo válidos; nenhuma função de economia mencionada no código-fonte do FSM de combate) — mais **2 testes de integração real via WebSocket/HTTP** (`{skip:!hasSupabase()}`, mesma convenção do resto da suite, usando um servidor com `AI_ENABLED:'1'` explícito): uma IA aparece pra um jogador humano real via `player_join` dentro de 15s, e `/api/admin/ai`/`aiOnline` no dashboard funcionam de ponta a ponta.
+
+## Verificação
+
+Os 16 testes puros rodam de verdade e passam — cobrem o núcleo inteiro (geração de stats, FSM, distribuição, as duas regras absolutas) sem depender de Supabase. Adicionalmente, o ciclo completo foi verificado manualmente em Node antes de escrever o teste formal (`aiSpawnEntity`→`aiStep` repetido→mob morto, `aiDespawnEntity`→Map vazio), e a suite completa do projeto (518 testes) rodou **3 vezes consecutivas sem nenhuma falha** após corrigir o problema de interferência entre processos. Os 2 testes de integração via WebSocket foram escritos pra provar o fluxo real mas não puderam ser executados aqui pela mesma razão já documentada nas fases anteriores (sem Supabase de teste configurado neste sandbox). **Recomenda-se rodar `npm test` com Supabase de TESTE antes do merge**, junto com os pendentes das fases anteriores.
+
+## Limitações conhecidas
+
+- **Sem colisão de parede pra IA em mapa de campo** — mesma limitação pré-existente de todo mob de campo (documentada desde fases anteriores: "a geometria de paredes de mapa de campo ainda vive só no cliente"); IA pode visualmente atravessar cenário decorativo, nunca um problema de segurança/economia.
+- **"Viajar" entre zonas é uma realocação direta, não uma caminhada real** — zonas de campo não são espacialmente contíguas no servidor (cada uma é um `mapState()` isolado); documentado no próprio código, nunca escondido.
+- **Zona nunca visitada por humano fica sem mobs pra IA caçar** (`state.mobs` só é populado quando o primeiro `map_join` real de um jogador chega, com posições que só o cliente conhece) — IA nessas zonas só vagueia (`wander`) até um jogador real aparecer; decisão deliberada pra não inventar um sistema paralelo de posicionamento de mob sem colisão real. Nunca acontece nas zonas onde já existe atividade humana (o caso comum).
+- **Teto de população (10) não veio de um benchmark de carga real** — o pedido era "benchmark-então-teto"; não havia como gerar carga real de produção nesta sessão. Valor de partida conservador, documentado como tal, pronto pra ser recalibrado com dados reais depois do deploy.
+- **Dano recebido de mob não gera feedback visual pra outros jogadores olhando a IA** (`mob_hit` não é transmitido quando o alvo é IA) — simplificação deliberada: a IA não tem HP visível em `publicPlayer` mesmo (igual jogador remoto real, que também não mostra barra de vida pros outros), então o feedback visual não faria diferença nenhuma hoje.
+- **Nenhuma migração de banco** — toda a camada de IA é em memória; nada foi persistido no Supabase (e nunca deveria ser, pela própria regra absoluta).
+
+# FASE 5.16 (TIER 2) — AI DUNGEON FILL + AI TVT FILL
+
+**Escopo**: integra o núcleo de IA (Tier 1) com o matchmaking de masmorra (Fase 5.13.2) e com Team vs Team — preenchendo vagas restantes só depois de esgotada a prioridade humana, nunca substituindo um humano disponível.
+
+## AI Dungeon Fill: só entra se pedido, só depois dos humanos resolvidos
+
+`formDungeonGroup` (Fase 5.13.2) já recebia `group` com o flag `allowAiFill` de cada entrada da fila. Depois de validar e montar a Party só com os humanos reais (nenhuma mudança nessa parte), se **alguém do grupo pediu `allowAiFill`** e ainda sobra vaga até 4, a IA entra pro resto — nunca antes disso, nunca reduzindo quantos humanos entrariam. Seleção de classe **consciente**: prioriza uma classe que o grupo ainda não tem (`AI_CLASS_POOL.find(c => !haveClasses.has(c))`), só cai pra aleatória se todas já estiverem representadas — nunca aleatória pura. A entidade de IA nasce direto dentro da instância (`map: state.id`, `fsm:'idle'`) — o mesmo idle→hunt→combat do núcleo de campo já funciona ali sem nenhuma mudança, porque uma instância de masmorra é só mais um `mapState()` com `.mobs` como qualquer outra. **IA nunca vira membro persistente de Party nenhuma** — só entra em `state.members` (memória da instância), nunca em `parties`/`memberParty`.
+
+`buildDungeonInstance` (Fase 5.13.1) ganhou um campo `kind` no `state.members` (`'human'` por padrão, `'ai'` quando vem de `formDungeonGroup`) — usado por `dungeonHandleMobDeath` pra nunca creditar um membro de IA, e a IA **conta pro cálculo de escala de HP** igual um humano (participante ativo de verdade, testado explicitamente: 1 humano + 1 IA escala pra 1.55×, igual 2 humanos escalariam).
+
+## AI TvT Fill: reservas humanas sempre primeiro, times sempre balanceados
+
+`startTvtEvent` mudou de "cancela se não bater o mínimo" pra: reserva humana tratada **antes** de qualquer IA existir (nenhuma mudança nisso), carrega os personagens reais, e só então `tvtFillTargetSize(loaded.length)` (núcleo puro, testado exaustivamente) decide o tamanho final do time — sempre par, sempre pelo menos `TVT_MIN_PLAYERS`, nunca acima de `TVT_MAX_PLAYERS`, **nunca descarta um humano que se inscreveu** pra caber num número par (o corte por imparidade que existia antes foi removido — agora a IA fecha a diferença). Nível da IA = média dos humanos reais carregados, pra ficar equilibrado. Os times (humanos + IA misturados) passam pelo **mesmo** `TVT.balanceTvtTeams` de sempre (powerScore + composição de classe) — a IA participa do balanceamento como qualquer jogador, nunca um "extra" desequilibrando o time.
+
+## Combate de TvT: a MESMA função autoritativa, nunca um caminho paralelo
+
+`aiDoTvt` chama `TVT.resolveTvtIntent(instance, ai.id, {skill:'basic', targetId}, now, secureRandom)` — a **exata mesma função** que resolve o ataque de um jogador humano real (mesmo cooldown via `attacker.lastAttackAt`/`snapshot.basicCdMs`, mesma fórmula de dano, mesma mitigação por `def`/bloqueio/barreira, mesma proteção de spawn de 3s). `instance.players` é sempre a fonte de verdade de HP/posição/morte — a entidade de IA só espelha esse estado (`ai.hp = tp.hp`, etc.) pra fins de broadcast/renderização, nunca o contrário.
+
+**Proibições explícitas de trapaça, cumpridas por construção**:
+- **Sem wallhack**: a IA só considera alvos que já estão em `instance.players` (a mesma informação que o cliente de um jogador real recebe via `tvt_state`), nunca nada fora disso.
+- **Sem mira instantânea**: precisa se mover de verdade até o alcance (mesma velocidade do núcleo de campo, `AI_MOVE_SPEED`) — nunca teleporta até o alvo.
+- **Sem bypass de cooldown**: `resolveTvtIntent` aplica o cooldown em cima do próprio `attacker.lastAttackAt`/`skillCd` — o mesmo campo que travaria um humano tentando atacar rápido demais.
+- **Sem bônus escondido**: usa o mesmo `snapshot` (atk/def/maxHp) derivado de `combatSnapshot`, a mesma fórmula de dano — nada de multiplicador secreto pra IA.
+- **Latência de reação simulada**: `ai.tvtEngageAt` atrasa 200-600ms o primeiro ataque contra um alvo recém-adquirido — testado explicitamente que a IA **nunca** ataca no mesmo tick em que avista alguém pela primeira vez.
+
+Abates/dano da IA contam pro **placar da partida** (`instance.score`, mesmo mecanismo de sempre — a IA participa do resultado de verdade) mas nunca são somados às estatísticas competitivas humanas permanentes: `grantTvtRewards` ganhou um guard `if (member.kind==='ai') continue;` logo no início do loop — nenhuma IA nunca chega perto de `bumpRankStat('tvt_kills', ...)`/`syncRankLevelXp`/gold/gem, mesmo que tenha acumulado `damageDone`/`kills` reais na partida.
+
+## Visibilidade e limpeza — reusa tudo do Tier 1
+
+`game-data/tvt.js` ganhou um campo `kind` em `createTvtInstance` (no player) e em `publicTvtState` (no payload público) — o cliente já reusa o mesmo `drawRemote` com o rótulo `[IA]` do Tier 1 pra jogadores dentro da arena, sem nenhum código novo. `aiTick` agora transmite `state` pra **toda** IA a cada tick (antes só fazia isso pra IA "livre" de campo — corrigido, senão IA preenchendo masmorra/TvT ficaria parada visualmente pros outros jogadores). Ao fim da partida/instância, `finishTvtInstance` e `dungeonCleanupTick` despacham (`aiDespawnEntity`) qualquer IA que estivesse alocada ali — nunca fica presa apontando pra uma instância que já acabou.
+
+## Testes
+
+`test/ai-fill.test.js` (novo arquivo): **11 testes puros** (sempre rodam, sem Supabase, sem esperar tick real): `tvtFillTargetSize` em toda a faixa relevante (par suficiente, abaixo do mínimo, ímpar acima do mínimo sempre arredonda pra cima nunca descarta humano, nunca ultrapassa o máximo), `buildDungeonInstance` com humano+IA misturados (`kind` correto, escala de HP conta a IA), a REGRA ABSOLUTA da masmorra com membros mistos (só o humano gera tentativa de crédito), `aiDoTvt` completo (nunca ataca no primeiro tick, ataca de verdade após a latência via `resolveTvtIntent`, nunca ataca morta), e a REGRA ABSOLUTA do TvT (`grantTvtRewards` tem o guard explícito) — mais **1 teste de integração real via matchmaking de masmorra** (`{skip:!hasSupabase()}`, 3 humanos reais + `allowAiFill`, esperando o prazo real de fallback de 25s — lento de propósito, mesmo espírito de outros testes de integração já existentes que priorizam correção sobre velocidade).
+
+## Verificação
+
+Os 11 testes puros rodam de verdade e passam. Além disso, o ciclo completo foi verificado manualmente em Node antes do teste formal: `buildDungeonInstance` com humano+IA misturados, e uma instância de TvT real (`TVT.createTvtInstance`) com um combate de verdade entre humano e IA rodado via `aiDoTvt` repetido — confirmando dano real aplicado e contribuição registrada em `instance.players`. Um teste WS de AI Dungeon Fill foi escrito mas não executado aqui (sem Supabase de teste neste sandbox); o teste de AI TvT Fill via fluxo HTTP/WS completo (agendamento real de evento) não foi escrito nesta sessão — a cobertura do combate de TvT em si (a parte de maior risco) já é extensiva nos testes puros. **Recomenda-se rodar `npm test` com Supabase de TESTE antes do merge**, junto com os pendentes de todas as fases anteriores.
+
+## Limitações conhecidas
+
+- **AI TvT Fill não tem teste de integração HTTP/WS de ponta a ponta** (agendamento real do evento, `startTvtEvent` chamado pelo EventManager de verdade) — só o núcleo de combate (`aiDoTvt`+`resolveTvtIntent`) e o dimensionamento (`tvtFillTargetSize`) foram testados isoladamente, com alta confiança, mas não o fluxo inteiro de agendamento-até-partida.
+- **AI Dungeon Fill: só um teste de integração real, com o caminho mais rápido (fallback de 3, 25s)** — os caminhos de 2 e 1 (solo com opt-in) usam a mesma lógica de preenchimento (código compartilhado), não foram testados separadamente via WS pela mesma lentidão real desses prazos (45s/60s).
+- **Nível da IA de TvT é sempre a média dos humanos da partida** — nunca varia por "papel"/build dentro da classe; uma calibração mais fina de dificuldade fica pra uma iteração futura, se pedida.
+- **Nenhuma migração de banco** — toda a integração é em memória.
+
+# GATE G — REVISÃO GLOBAL PRÉ-MERGE
+
+Antes de qualquer merge em `main`, uma revisão independente (agente separado, sem contexto da implementação, só o diff + `LEIA-PRIMEIRO.md`) foi feita sobre a missão inteira (5.13.1 a 5.16, 22 commits). Achou **2 bugs reais que bloqueavam o merge** e vários pontos que mereciam correção antes de ir pra produção. Documentado aqui com a mesma honestidade radical do resto deste arquivo — inclusive o que a revisão anterior (minha própria, dentro de cada fase) não tinha pego.
+
+## Bugs que bloqueavam o merge (corrigidos)
+
+**1. AI Dungeon Fill / AI TvT Fill viravam "fantasmas" quando a população de IA de campo já estava no teto.** `startTvtEvent` e `formDungeonGroup` adicionavam o membro de IA ao time/instância **antes** de checar `aiEntities.size >= AI_MAX_POPULATION` — se o teto (10) já tivesse sido atingido pela IA ambiental de campo (que fica permanentemente no teto em produção, `aiPopulationTick` sempre repovoa), a vaga era contada pro balanceamento de time e pro roster da masmorra, mas a entidade de IA de verdade **nunca era criada**. Resultado real, reproduzido pelo revisor: um único humano se inscrevendo pra TvT sozinho ganhava a partida 10-0 contra "oponentes" que nunca existiam de verdade, e ainda recebia ouro/XP/rank_stats por isso. **Corrigido**: preenchimento de fila (dungeon ou TvT) nunca mais respeita `AI_MAX_POPULATION` — é uma resposta direta a um pedido humano real, sempre tem prioridade sobre o teto ambiental, e já é limitado sozinho pelo tamanho máximo de time/grupo (8 no TvT, 4 na masmorra).
+
+**2. Uma IA de TvT parava de lutar pra sempre depois da primeira morte.** `aiDoTvt` copiava `tp.dead=true` pra `ai.dead`, mas nunca `ai.respawnAt` (ficava em `0`) — no tick seguinte, `aiStep` via `ai.dead=true` com `respawnAt=0`, que sempre satisfaz "já passou do prazo", e chamava `aiDoRespawn` **imediatamente** (antes do respawn real do TvT), resetando o FSM pra `idle`/`wander` — a IA nunca mais voltava a atacar depois de morrer uma vez. **Corrigido**: IA alocada num slot de TvT (`ai.slot.kind==='tvt'`) nunca mais passa pelo caminho genérico de `dead`/`respawnAt` — vai direto pra `aiDoTvt`, que já espera corretamente `tp.dead` virar `false` via `TVT.tickTvtRespawns` (o mesmo sistema autoritativo dos humanos), sem tentar se ressuscitar sozinha.
+
+Os dois foram verificados com um script reproduzindo exatamente o cenário do revisor (população de campo no teto + partida de TvT real; IA morta + vários ticks) antes e depois da correção.
+
+## Achados corrigidos (não bloqueavam merge, mas eram reais)
+
+- **Hierarquia de cargo ausente**: um `moderator` conseguia banir/mutar/expulsar um `admin` ou o próprio `owner` — só a permissão nomeada (`kick`/`ban`/`mute`) era checada, nunca o cargo do ALVO. Adicionado `ADMIN_RANK`/`canActOnTarget`: toda ação sobre outra conta agora exige que o alvo tenha cargo estritamente menor que o do ator.
+- **Corrida na proteção do último owner**: o guard de "nunca remover o último owner" só existia no revoke, não no grant (dava pra rebaixar o último owner direto via `POST /roles`), e a checagem "ler quantos owners existem, depois escrever" tinha uma janela de corrida entre duas chamadas concorrentes. As duas rotas agora compartilham o mesmo `withCharLock` (serializado dentro desta instância Node, mesma limitação já documentada do lock de economia) e o grant também respeita a proteção do último owner.
+- **Ban não invalidava sessão nem era tratado pelo cliente**: o token de sessão (até 30 dias) continuava válido pra rotas HTTP que não exigem WS aberto depois de um ban; e o cliente nunca tratava as mensagens `banned`/`kicked`/`muted` nem os códigos de fechamento 4003/4004 — só via uma reconexão de 2.5s sem explicação (banido reconectava pra sempre). Corrigido: `/api/admin/ban` agora apaga todas as sessões da conta na hora; `kickUserSockets` manda a mensagem antes de fechar; `index.html` trata `banned` (nunca reconecta, mostra motivo/prazo, mesmo modal terminal do Hotfix 5.12.1), `kicked` e `muted` (toast explicando o motivo), mais uma rede de segurança pelo próprio código de fechamento (4003 nunca reconecta, mesmo que a mensagem se perca numa corrida com o close).
+- **Dashboard vazava o audit log pra quem não tinha permissão**: `/api/admin/dashboard` incluía `recentAudit` pra qualquer cargo com `view_dashboard` (inclusive `support`, que nunca tem `view_security_log`). Agora só busca/inclui quando o cargo realmente tem a permissão certa.
+- **`activeBanFor`/`activeMuteFor` podiam esconder um ban permanente antigo atrás de 5 linhas temporárias mais recentes já vencidas** (`limit=5` sem filtrar `revoked_at`). Corrigido: filtra `revoked_at is.null` no próprio banco antes de paginar.
+- **Um líder de Party podia "sequestrar" um membro que já estivesse numa partida de TvT/World Boss ativa** (ou já em outra masmorra de zona diferente), teleportando ele no meio da outra partida sem checagem nenhuma. `charBusyElsewhere(charId, zone)` novo, aplicado tanto em `handleDungeonEnter` quanto em `formDungeonGroup` — um candidato ocupado em outra instância ativa simplesmente não entra no grupo, sem erro.
+- **Dano da IA em TvT nunca era sincronizado em tempo real** (`aiDoTvt` descartava o resultado de `resolveTvtIntent` — a partida ainda terminava certo, já que `tickTvt` checa o fim a cada segundo independente disso, mas o dano em si ficava invisível até a próxima sincronização por acaso). Corrigido: mesmo `tvtPublicSync`/`tvt_hit` que o caminho de um humano já dispara.
+- **Testes que nunca detectariam o próprio bug que afirmavam cobrir**: o teste de "último owner" sempre passava mesmo com o bug presente (testes anteriores no mesmo arquivo acumulam outros owners, nunca limpos — corrigido limpando explicitamente antes da asserção); o teste de audit log quebraria assim que o log passasse de 100 linhas (comparava tamanho de lista contra o próprio limite da rota — corrigido pra localizar a entrada específica em vez de comparar tamanho); a asserção "no máximo 1 crédito" em `ai-fill.test.js` passava mesmo se ninguém fosse creditado (trocado pra "exatamente 1"); o teste de AI Dungeon Fill só verificava onde os humanos caíam, nunca se a IA realmente existia (reforçado com uma checagem via `/api/admin/ai`); dois testes de `/api/public/status`/`/api/public/events` estavam com `{skip:!hasSupabase()}` sem precisar (as duas rotas já toleram Supabase ausente) — removido o skip, rodam sempre agora.
+
+## Verificado pela revisão e confirmado sólido (não precisou de mudança)
+
+- A REGRA ABSOLUTA de isolamento econômico da IA — rastreada em todos os três contextos de combate (campo, masmorra, TvT) — se mantém sem exceção.
+- Nenhuma rota `/api/admin/*` é alcançável sem a permissão certa; `resolveAdmin` sempre lê o cargo fresco a cada requisição; `sanitizeAuditMetadata` nunca deixa passar segredo nenhum.
+- `/api/public/*` e `/api/rankings` nunca incluem `user_id`/email/save/token/sessão/cargo/moderação privada.
+- As três migrações são puramente aditivas; RLS sem policy é o mesmo padrão já usado pelas 12 tabelas anteriores.
+- O comportamento pré-existente (humano-só) de `hitTarget`, `tickMobAI`, e o handler `mob_damage` continua byte-a-byte idêntico pro caminho não-IA.
+
+## Não corrigido nesta rodada (documentado, não escondido)
+
+- **Mute/ban podem ser contornados pro chat entrando anônimo (sem token)** — uma visita anônima nunca teve identidade persistente nenhuma (mesma limitação de sempre desde as fases iniciais: sem token, sem economia, sem nada pra moderar contra). Não é uma regressão desta missão; documentado aqui por transparência.
+- **`wsForChar` retorna o primeiro socket que bater, não necessariamente o autoritativo** (`activeCharacterSockets`) — pode, em tese, entregar uma mensagem de recompensa pro socket antigo durante uma troca de sessão. Janela estreita, efeito é só a notificação em tempo real (a persistência no banco sempre acontece certo); não corrigido nesta rodada.
+- **Foreign keys novas (ator/alvo/`banned_by`/autor) sem regra `ON DELETE`** — bloquearia excluir uma conta referenciada no audit log. Latente: não existe nenhum fluxo de exclusão de conta no app hoje.
+- **O servidor de arquivo estático serve qualquer arquivo do repositório** (`server.js`, `LEIA-PRIMEIRO.md`, as migrações) — pré-existente, não introduzido por esta missão, fora do escopo desta revisão.
+
+## Validação final (após todas as correções)
+
+`node -c` limpo em `server.js`/`game-data/tvt.js`/`game-data/dungeon-generation.js`. Suite completa estável em múltiplas execuções consecutivas: **530 testes / 355 passando / 0 falhando / 175 pulados** (os pulados continuam exigindo Supabase de teste real, nenhum contado como passado).
