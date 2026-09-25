@@ -76,6 +76,11 @@ button{font:inherit;color:inherit}
 #talk.on{display:block}
 
 #toast{position:absolute;left:50%;top:96px;transform:translate(-50%,-10px);opacity:0;pointer-events:none;background:var(--panel);border:3px solid var(--frame);box-shadow:inset 0 0 0 2px var(--frame-in);border-radius:5px;padding:7px 16px;font-size:17px;text-align:center;max-width:82vw;transition:opacity .25s,transform .25s;z-index:9}
+#sessionReplacedModal{position:fixed;inset:0;display:none;place-items:center;background:rgba(6,4,2,.82);z-index:999}
+#sessionReplacedModal.on{display:grid}
+#sessionReplacedModal .srbox{background:var(--panel);border:3px solid var(--frame);box-shadow:inset 0 0 0 2px var(--frame-in);border-radius:8px;padding:22px 24px;max-width:88vw;width:360px;text-align:center}
+#sessionReplacedModal p{font-size:16px;margin:0 0 16px;color:#f7e8c3}
+#sessionReplacedModal button{width:100%;padding:10px;font-size:16px;font-weight:700;border-radius:6px;border:2px solid #120c07;background:linear-gradient(#5a72cf,#34479a 55%,#2a3a80);color:#fff6d0;cursor:pointer}
 #toast.on{opacity:1;transform:translate(-50%,0)}
 #toast.low{top:auto;bottom:88px}
 #net{position:absolute;right:12px;top:140px;padding:5px 10px;font-size:14px;pointer-events:none;z-index:5}
@@ -493,6 +498,7 @@ button{font:inherit;color:inherit}
     <div id="wbHud" aria-live="polite"><h3>TITÃ ANCESTRAL</h3><div class="bh"><i id="wbHp"></i></div><div class="bt"><span id="wbHpT"></span><span id="wbTime"></span></div><div id="wbParty"></div></div>
     <div id="tvtHud" aria-live="polite"><div class="tvtScore"><b class="red">RUBRA</b><span id="tvtScoreRed">0</span><i>×</i><span id="tvtScoreBlue">0</span><b class="blue">AZUL</b></div><div class="bt"><span id="tvtLimit"></span><span id="tvtTime"></span></div><div class="bt"><span id="tvtMyKD"></span></div><div id="tvtTeams"></div></div>
     <div id="dlg" class="fr"></div>
+    <div id="sessionReplacedModal" role="alertdialog" aria-modal="true" aria-labelledby="sessionReplacedText"><div class="srbox"><p id="sessionReplacedText">Usuário conectado em outro aparelho.</p><button type="button" id="sessionReplacedOk">OK</button></div></div>
     <div id="inv" class="rw" role="dialog" aria-label="Bolsa"></div>
     <div id="tgtf" class="fr" aria-live="polite"><canvas id="tIcon" width="44" height="44"></canvas><div class="tinfo"><div class="tn"><b id="tName"></b><span id="tLv"></span></div><div class="thp"><i id="tHp"></i><span id="tHpT"></span></div><small id="tSt"></small></div><button id="tX" type="button" aria-label="Limpar alvo">✕</button></div>
     <div id="barpick" class="fr" role="dialog" aria-label="Editar espaço da barra"></div>
@@ -1339,6 +1345,12 @@ $('#dlg').addEventListener('click',ev=>{
   if(b&&dlg){const c=dlg.choices[+b.dataset.ch];const r=c.do();hud();if(r===null){closeDlg();return}if(typeof r==='object'){dlg.lines=r.lines;dlg.choices=r.choices||null;dlg.i=0;renderDlg();return}dlg.lines=[r];dlg.i=0;renderDlg();return}
   advanceDlg();
 });
+// Hotfix 5.12.1: "OK" volta pro login -- mesmo padrao ja usado por
+// logout/switchchar (saveGame ja nao faz sentido aqui: o estado local desta
+// aba nao e mais autoritativo, a OUTRA sessao e quem continua valendo).
+// Limpa o token local (impede auto-login/auto-reconnect nesta aba) sem
+// apagar nenhum dado de personagem.
+$('#sessionReplacedOk').addEventListener('click',()=>{logoutOnline();location.reload()});
 function nearestNpc(r){let best=null,bd=r||62;for(const n of NPCS){const d=Math.hypot(n.x-P.x,n.y-P.y);if(d<bd){bd=d;best=n}}for(const c of CHESTS){const d=Math.hypot(c.x-P.x,c.y+8-P.y);if(d<bd){bd=d;best=c}}return best}
 function interact(){if(uiBusy())return;if(dlg){advanceDlg();return}const n=nearestNpc();if(n){if(n.chest)openChest(n);else openDialog(n)}}
 
@@ -2973,6 +2985,17 @@ const stage=$('#stage'),ctx=stage.getContext('2d');
 const REMOTE=new Map();
 const RPROJ=[];
 let NET=null,NET_ID=null,NET_SESSION='',NET_MAP='',netSendT=0,netRetry=0;
+// Hotfix 5.12.1: quando o servidor manda 'session_replaced' (a MESMA conta
+// entrou com o mesmo personagem em outro aparelho), o antigo socket nunca
+// pode tentar reconectar -- senao as duas maquinas ficam roubando a sessao
+// uma da outra em loop. Esse flag e checado dentro de NET.onclose pra
+// decidir "reconecta" (fechamento normal/queda de rede) vs "nao reconecta,
+// mostra o modal" (sessao substituida de proposito).
+let sessionReplaced=false;
+function showSessionReplacedModal(){
+  running=false;
+  const m=$('#sessionReplacedModal');if(m)m.classList.add('on');
+}
 let EVENT_STATE=null,EVENT_CLOCK_OFFSET=0,WB_STATE=null;
 let IN_TVT=false,TVT_STATE=null,TVT_TEAM=null;
 let GUILD_STATE=false,GUILD_INVITES={incoming:[],outgoing:[]},GUILD_SEARCH=[],GUILD_SEARCH_Q='',GUILD_CHAT=[],guildUiTimer=0;
@@ -3124,6 +3147,16 @@ function netConnect(){
     }
     else if(m.type==='dungeon_state')applyDungeonState(m);
     else if(m.type==='dungeon_error'){pendingDungeonZone=null;traveling=false;$('#fade').style.opacity=0;toast(m.error||'Não foi possível entrar na masmorra')}
+    else if(m.type==='session_replaced'){
+      // Hotfix 5.12.1: o servidor ja fechou (ou esta prestes a fechar, codigo
+      // 4001) este socket -- marca o estado terminal ANTES do onclose
+      // disparar, pra ele nunca agendar reconexao. Nunca reconecta sozinho
+      // de novo: so volta a jogar depois que o usuario clicar OK e logar de
+      // novo (ver botao abaixo).
+      sessionReplaced=true;
+      clearTimeout(netRetry);
+      showSessionReplacedModal();
+    }
     else if(m.type==='dungeon_reward'){
       // Fase 5.2: recompensa de mob/chefe de masmorra -- sempre autoritativa
       // do servidor (ouro/gema/pocao/itens), nunca calculada aqui. bag/eq
@@ -3137,7 +3170,11 @@ function netConnect(){
       if(m.dropLost)toast('Mochila cheia — equipamento '+GEAR_DATA.RARITY[m.dropLost.rarity].label+' não foi coletado.');
     }
   };
-  NET.onclose=()=>{NET_ID=null;NET_SESSION='';NET_MAP='';REMOTE.clear();netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500)};
+  NET.onclose=()=>{
+    NET_ID=null;NET_SESSION='';NET_MAP='';REMOTE.clear();
+    if(sessionReplaced){netLabel('Sessão encerrada',false);return} // Hotfix 5.12.1: nunca reconecta nesse caso
+    netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500);
+  };
   NET.onerror=()=>NET.close();
 }
 // W_.netMap (Fase 5.2): id de mapa que o SERVIDOR conhece pra masmorra --
