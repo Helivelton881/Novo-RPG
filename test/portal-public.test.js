@@ -32,7 +32,11 @@ test('/api/public/status: responde sem nenhuma autenticacao, formato de populaca
   assert.equal(res.status, 200);
   assert.ok('human' in res.json.population);
   assert.ok('ai' in res.json.population);
-  assert.equal(res.json.population.ai, 0, 'Fase 5.16 (Aventureiros IA) ainda nao existe -- IA sempre zero por enquanto');
+  // Fase 5.16: IA agora existe de verdade (aiEntities.size) -- so
+  // confirma o formato (numero >=0), nunca um valor fixo, ja que a
+  // populacao de IA cresce sozinha pelo tick de 1s (aiPopulationTick).
+  assert.equal(typeof res.json.population.ai, 'number');
+  assert.ok(res.json.population.ai >= 0);
   assert.equal(typeof res.json.worldBossActive, 'boolean');
 });
 
