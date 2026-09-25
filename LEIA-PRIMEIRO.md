@@ -1287,3 +1287,25 @@ Toda a geometria foi validada por execução real de código, não só leitura: 
 - **Total de monstros por instância caiu** (~17–21, distribuição curada por sala) em relação à média antiga (~35, chance uniforme por célula) — decisão deliberada seguindo a distribuição explicitamente pedida por sala, não um corte de recompensa (a fórmula de recompensa por abate não mudou nem um pouco, só quantos monstros existem pra abater).
 - **Checkpoint continua sem lógica de save-point própria** (nenhuma existia antes) — a sala foi preparada visualmente (área segura, sem monstro, decoração própria) mas nenhum sistema novo de "salvar progresso no meio da masmorra" foi implementado, como pedido explicitamente ("se não existir, não implementar sistema novo").
 - **Mesma limitação de sempre**: a masmorra continua solo (uma instância por personagem, `ownedDungeonInstance` por `charId`) — cooperativo multi-jogador não é desta fase, nunca foi.
+
+# HOTFIX 5.12.1 — SESSION REPLACED UX
+
+## Bug em produção
+
+O servidor já fazia a parte certa desde a Fase 5.12 (`server.js`, dentro de `handleWsJoin`): quando a mesma conta+personagem conecta em um segundo aparelho sem fechar o primeiro, o socket antigo recebe `{type:'session_replaced'}` e é fechado com o código `4001` (`"Sessão substituída"`). O bug era **inteiramente client-side**: `NET.onclose` sempre agendava uma reconexão (`netRetry=setTimeout(netConnect,2500)`), **mesmo quando o fechamento foi o próprio servidor expulsando aquele socket de propósito** — o cliente nunca distinguia "caiu a rede, reconecta" de "fui substituído, não deveria voltar". Resultado: os dois aparelhos entravam num loop reconectando e reexpulsando um ao outro.
+
+## Correção
+
+Um flag de estado terminal (`sessionReplaced`, `index.html`) é setado assim que a mensagem `session_replaced` chega, **antes** do `close` disparar — `NET.onclose` passou a checar esse flag primeiro e retornar sem agendar nada quando ele está ativo, preservando o comportamento de sempre (reconectar) pra qualquer outro motivo de fechamento (queda de rede, restart do servidor, etc.). Um modal (`#sessionReplacedModal`, novo) aparece com a mensagem pedida ("Usuário conectado em outro aparelho.") e um botão OK; `running=false` interrompe o loop de jogo imediatamente. Clicar OK reusa exatamente o padrão já existente de logout/troca de personagem (`logoutOnline(); location.reload();`) — limpa o token local (impede auto-login/auto-reconnect nessa aba) sem apagar nenhum dado de personagem, e a recarga da página devolve à tela de login do zero.
+
+## Verificação
+
+A metade **client-side** (a causa real do bug) foi verificada ao vivo no navegador via console: uma conexão WS real anônima foi estabelecida, a mensagem `session_replaced` foi injetada manualmente — confirmado que o flag liga, o modal aparece (com a mensagem exata pedida, screenshot conferido), `running` para, e chamar `NET.onclose()` depois **não** agenda reconexão (`netRetry` permanece `0`); o mesmo teste repetido com o flag desligado confirma que o fechamento normal **continua** reconectando (sem regressão). A metade **server-side** (que já estava correta desde a Fase 5.12, mas nunca tinha teste automatizado) ganhou um teste real de dois sockets: `test/ws-auth.test.js` conecta A, depois conecta B com o mesmo token+charId sem fechar A, e confirma que A recebe `session_replaced` e é fechado com código `4001`/motivo `"Sessão substituída"`, enquanto B continua respondendo normalmente.
+
+## Testes
+
+`test/ws-auth.test.js`: 1 teste novo (`{skip:!hasSupabase()}`) — segunda conexão com o mesmo token+charId expulsa a primeira com o código/motivo certos, sem afetar a segunda.
+
+## Migração de banco
+
+Nenhuma — mudança inteiramente de comportamento client-side (JS/CSS/HTML), servidor não foi alterado.
