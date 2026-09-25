@@ -1878,7 +1878,7 @@ function castSkill(id){
 // auto-cura na interface (mesma UX que o resto do jogo ja usa pra heal),
 // entao sempre o proprio charId; mirar aliado fica pra melhoria futura de
 // UI (o SERVIDOR ja suporta aliado real via TVT.resolveTvtIntent, testado).
-function netCastSkill(id,r){if(NET&&NET.readyState===1)NET.send(JSON.stringify({type:'cast_skill',map:W_?W_.name:'vila',id,targetId:(IN_TVT&&id==='heal'&&CUR_CHAR)?CUR_CHAR.id:undefined}))}
+function netCastSkill(id,r){if(NET&&NET.readyState===1)NET.send(JSON.stringify({type:'cast_skill',map:netMapId(),id,targetId:(IN_TVT&&id==='heal'&&CUR_CHAR)?CUR_CHAR.id:undefined}))}
 function skillUpdate(dt){
   if(P.bleed){const b=P.bleed;b.t-=dt;b.k=(b.k||0)+dt;if(b.k>=1){b.k-=1;if(!P.dead){P.hp=Math.max(1,P.hp-b.dmg);P.calm=0;floater(P.x,P.y-70,'Sangrando -'+b.dmg,'#d63a3a')}}if(b.t<=0||P.dead)P.bleed=null}
   if(P.burn){const b=P.burn;b.t-=dt;b.k=(b.k||0)+dt;if(b.k>=.5){b.k-=.5;if(!P.dead){P.hp=Math.max(1,P.hp-b.dmg);P.calm=0;floater(P.x,P.y-70,'Queimando -'+b.dmg,'#ff8a3c')}}if(b.t<=0||P.dead)P.burn=null}
@@ -3616,7 +3616,7 @@ function drawPlayer(){
   if(P.dead)ctx.restore();
 }
 function drawRemote(p){
-  if(!p||!W_||p.map!==W_.name)return;
+  if(!p||!W_||p.map!==netMapId())return;
   const img=IMG['hero_'+p.cls]||IMG.hero,fw=56,fh=74,row=clamp(p.dir|0,0,3);
   p.anim=(p.anim||0)+(p.moving?.13:.035);const col=p.moving?[3,4,5,4][Math.floor(p.anim)%4]:[0,1,2,1][Math.floor(p.anim/3)%4];
   const attacking=(p.atkT||0)>0,prog=attacking?clamp(1-p.atkT/.3,0,1):-1,a=p.atkAng||0;
@@ -3795,7 +3795,7 @@ function draw(){
   for(const c of CHICKENS)list.push({sy:c.y,fn:()=>drawChicken(c)});
   for(const f of FX)list.push({sy:f.y+1,fn:()=>f.kind==='fdecor'||f.kind==='fcrystal'?drawFDecor(f):f.kind==='ember'?0:f.kind==='brazier'?drawBrazier(f):f.kind==='fire'?drawFire(f):0});
   for(const ch of CHESTS)list.push({sy:ch.y,fn:()=>drawChest(ch)});
-  for(const p of REMOTE.values())if(p.map===W_.name)list.push({sy:p.y,fn:()=>drawRemote(p)});
+  for(const p of REMOTE.values())if(p.map===netMapId())list.push({sy:p.y,fn:()=>drawRemote(p)});
   list.push({sy:P.y,fn:drawPlayer});
   list.sort((a,b)=>a.sy-b.sy);
   for(const it of list){
@@ -3838,7 +3838,7 @@ function drawMini(){
   // do mapa atual (nunca vaza posicao de Dungeon/TvT/World Boss privados
   // -- REMOTE ja so tem quem esta no MESMO mapId por construcao). IA em
   // lilas, humano remoto em ciano -- cor diferente do jogador local (azul).
-  for(const rp of REMOTE.values())if(rp.map===W_.name){g.fillStyle=rp.kind==='ai'?'#c9a6ff':'#5ad1ff';g.fillRect(Math.round(rp.x/24)-1,Math.round(rp.y/24)-1,2,2)}
+  for(const rp of REMOTE.values())if(rp.map===netMapId()){g.fillStyle=rp.kind==='ai'?'#c9a6ff':'#5ad1ff';g.fillRect(Math.round(rp.x/24)-1,Math.round(rp.y/24)-1,2,2)}
   const x=P.x/24,y=(P.y-10)/24;
   g.fillStyle='#fff';g.beginPath();g.arc(x,y,3.6,0,6.29);g.fill();g.fillStyle='#2f8cff';g.beginPath();g.arc(x,y,2.3,0,6.29);g.fill();
 }
