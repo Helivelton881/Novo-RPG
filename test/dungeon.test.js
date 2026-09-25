@@ -191,16 +191,32 @@ test('DUNGEON_GEN: toda sala nomeada tem pelo menos uma porta (nenhuma sala isol
   for (const id of ids) assert.ok(touching.has(id), `${id} nunca aparece em nenhuma conexao`);
 });
 
-test('DUNGEON_GEN: sequencia de conexoes forma um unico caminho linear entrada->saida (sem ramificacao/ciclo)', () => {
-  // cada sala aparece no maximo 2 vezes no total de conexoes (uma vez como
-  // origem, uma vez como destino) -- exceto entrada (so origem) e saida
-  // (so destino), que aparecem 1 vez. Isso confirma "linear, sem maze".
+// Fase 5.16.3 (V3): layout de ENCRUZILHADA -- substitui o antigo layout
+// V2, que era estritamente linear (cada sala com no maximo 1 pai + 1
+// filho). O novo layout e uma ARVORE enraizada em 'entrada' (ainda sem
+// ciclos -- todo ponto tem exatamente 1 caminho desde a entrada -- mas
+// com ramificacao real: a 'encruzilhada' abre pra 3 direcoes).
+test('DUNGEON_GEN: conexoes formam uma ARVORE enraizada em entrada (sem ciclo, toda sala alcancavel por exatamente 1 caminho) -- ramificacao real permitida', () => {
   const conns = S.DUNGEON_GEN.DUNGEON_CONNECTIONS_V2;
-  const count = {};
-  for (const [a, , b] of conns) { count[a] = (count[a] || 0) + 1; count[b] = (count[b] || 0) + 1; }
-  for (const id of Object.keys(S.DUNGEON_GEN.DUNGEON_ROOMS_V2)) {
-    const expected = (id === 'entrada' || id === 'saida') ? 1 : 2;
-    assert.equal(count[id], expected, `${id} deveria aparecer ${expected}x nas conexoes (achado ${count[id]})`);
+  const ids = Object.keys(S.DUNGEON_GEN.DUNGEON_ROOMS_V2);
+  // arvore valida com N nos tem exatamente N-1 arestas
+  assert.equal(conns.length, ids.length - 1, `uma arvore com ${ids.length} salas deveria ter ${ids.length - 1} conexoes (achado ${conns.length})`);
+  const adj = {}; for (const id of ids) adj[id] = [];
+  for (const [a, , b] of conns) { adj[a].push(b); adj[b].push(a); }
+  const seen = new Set(['entrada']), queue = ['entrada'];
+  while (queue.length) { const cur = queue.shift(); for (const n of adj[cur]) if (!seen.has(n)) { seen.add(n); queue.push(n); } }
+  for (const id of ids) assert.ok(seen.has(id), `${id} deveria ser alcancavel a partir de 'entrada' (arvore conectada)`);
+});
+test('DUNGEON_GEN: a encruzilhada e um HUB de verdade -- abre pra sala esquerda, sala direita e sala de elite (3 filhos, nao mais so passagem)', () => {
+  const conns = S.DUNGEON_GEN.DUNGEON_CONNECTIONS_V2;
+  const children = conns.filter(([a]) => a === 'encruzilhada').map(([, , b]) => b);
+  assert.deepEqual(new Set(children), new Set(['salaEsquerda', 'salaDireita', 'salaElite']), 'encruzilhada deveria conectar exatamente com salaEsquerda, salaDireita e salaElite');
+});
+test('DUNGEON_GEN: sala esquerda e sala direita sao alas opcionais (dead-end) -- nao fazem parte do caminho obrigatorio ate o chefe', () => {
+  const conns = S.DUNGEON_GEN.DUNGEON_CONNECTIONS_V2;
+  for (const wing of ['salaEsquerda', 'salaDireita']) {
+    const touches = conns.filter(([a, , b]) => a === wing || b === wing);
+    assert.equal(touches.length, 1, `${wing} deveria ter exatamente 1 conexao (dead-end, nao passagem)`);
   }
 });
 

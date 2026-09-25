@@ -2816,10 +2816,13 @@ const DUNGEON_IDLE_MS = 30 * 60 * 1000, DUNGEON_MAX_LIFE_MS = 2 * 60 * 60 * 1000
 // Fase 5.13: distribuicao de monstros por sala nomeada do layout fixo
 // (game-data/dungeon-generation.js DUNGEON_MOB_ROOMS_V2) -- [minimo,maximo]
 // de mobs comuns por sala, sorteado por instancia via o mesmo stream
-// mulberry(seed+1) de sempre. Sala5 ("elite/guarda") usa 2 mobs comuns em
-// vez de inventar um tier de elite novo (fora do escopo desta fase, que e
-// so mapa/colisao/posicionamento -- ver LEIA-PRIMEIRO.md "Fase 5.13").
-const DUNGEON_ROOM_MOB_COUNTS = { sala1: [2, 3], sala2: [4, 6], sala3: [3, 4], sala4: [5, 7], sala5: [2, 2] };
+// mulberry(seed+1) de sempre. Fase 5.16.3: chaves atualizadas pro layout
+// V3 (encruzilhada/hub, ver dungeon-generation.js) -- salaElite ("guarda")
+// usa poucos mobs comuns em vez de inventar um tier de elite novo (o flag
+// boss esta entrelacado no FSM de combate de cada mob no cliente; reusa-lo
+// marcaria bossDefeated incorretamente e concederia loot de chefe cedo
+// demais -- documentado em LEIA-PRIMEIRO.md "Fase 5.16.3").
+const DUNGEON_ROOM_MOB_COUNTS = { corredorInicial: [2, 3], encruzilhada: [3, 5], salaEsquerda: [3, 4], salaDireita: [4, 6], salaElite: [2, 3] };
 // Fase 5.13.1 -- Dungeon em Party: nucleo real de criacao de instancia,
 // aceita 1 a 4 membros reais (nunca confia em memberIds do cliente --
 // quem chama isto ja resolveu cada membro via activeCharacterForUser +

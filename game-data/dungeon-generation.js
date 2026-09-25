@@ -62,46 +62,45 @@ function mazeGen(cols, rows, seed) {
 
 const T = 48, WALL = 1;
 
-// ===== Fase 5.13: Dungeon Map V2 -- layout fixo (Ruinas Antigas) =====
-// Sequencia unica, linear, sem ramificacoes: ENTRADA -> SALA1 -> CORR1 ->
-// SALA2 -> (cotovelo) -> SALA3 -> SALA4 -> SALA5 -> (folga) -> CHECKPOINT
-// -> CORRFINAL -> BOSS -> SAIDA. Coordenadas em TILES (x,y = canto
-// superior-esquerdo, w/h = largura/altura incluindo a propria parede).
-// Dimensoes ligeiramente reduzidas em relacao a proposta original pra
-// caber no teto global de mundo (60x44 tiles) -- ver LEIA-PRIMEIRO.md.
+// ===== Fase 5.16.3 (V3): Dungeon Map -- layout de ENCRUZILHADA (hub) =====
+// Substitui o layout V2 (Fase 5.13), que era uma sequencia unica linear
+// sem ramificacao ("S" dobrado). Pedido explicito do usuario com 2
+// imagens de referencia (guia de arte + layout ilustrativo): uma espinha
+// vertical ENTRADA -> CORREDOR INICIAL -> ENCRUZILHADA -> SALA DE ELITE ->
+// CORREDOR FINAL -> SALA DO BOSS -> SAIDA, com a ENCRUZILHADA abrindo
+// tambem pra SALA ESQUERDA (oeste) e SALA DIREITA (leste) como alas
+// opcionais (nao fazem parte do caminho obrigatorio ate o chefe, mas sao
+// alcancaveis a partir do hub -- arvore, nao mais uma linha reta).
+// Coordenadas em TILES (x,y = canto superior-esquerdo, w/h = largura/
+// altura incluindo a propria parede). y cresce pra baixo: chefe fica no
+// topo do mapa (y baixo), entrada embaixo (y alto) -- mesma leitura de
+// cima-pra-baixo da imagem de referencia. Ainda cabe no teto global de
+// mundo (60x44 tiles) -- ver LEIA-PRIMEIRO.md "Fase 5.16.3".
 const DUNGEON_ROOMS_V2 = {
-  entrada:    { x:3,  y:4,  w:10, h:8  },
-  sala1:      { x:13, y:3,  w:14, h:10 },
-  corr1:      { x:27, y:6,  w:8,  h:3  },
-  sala2:      { x:35, y:3,  w:16, h:10 },
-  corr2v:     { x:41, y:13, w:3,  h:3  },
-  sala3:      { x:37, y:16, w:12, h:10 },
-  sala4:      { x:19, y:15, w:18, h:12 },
-  sala5:      { x:5,  y:16, w:14, h:10 },
-  gap23:      { x:10, y:26, w:3,  h:4  },
-  checkpoint: { x:7,  y:30, w:10, h:8  },
-  corrfinal:  { x:17, y:32, w:8,  h:4  },
-  boss:       { x:25, y:28, w:20, h:12 },
-  saida:      { x:45, y:30, w:10, h:8  },
+  entrada:         { x:22, y:37, w:16, h:6 },
+  corredorInicial: { x:25, y:31, w:10, h:6 },
+  encruzilhada:    { x:24, y:23, w:12, h:8 },
+  salaEsquerda:    { x:2,  y:23, w:22, h:8 },
+  salaDireita:     { x:36, y:23, w:22, h:8 },
+  salaElite:       { x:21, y:15, w:18, h:8 },
+  corredorFinal:   { x:27, y:11, w:6,  h:4 },
+  boss:            { x:20, y:2,  w:20, h:9 },
+  saida:           { x:40, y:2,  w:10, h:8 },
 };
 // [idA, ladoDeSaidaEmA, idB, larguraDaPassagem(tiles)]
 const DUNGEON_CONNECTIONS_V2 = [
-  ['entrada','E','sala1',5],
-  ['sala1','E','corr1',3],
-  ['corr1','E','sala2',3],
-  ['sala2','S','corr2v',3],
-  ['corr2v','S','sala3',3],
-  ['sala3','W','sala4',5],
-  ['sala4','W','sala5',5],
-  ['sala5','S','gap23',3],
-  ['gap23','S','checkpoint',3],
-  ['checkpoint','E','corrfinal',4],
-  ['corrfinal','E','boss',6],
+  ['entrada','N','corredorInicial',4],
+  ['corredorInicial','N','encruzilhada',4],
+  ['encruzilhada','W','salaEsquerda',5],
+  ['encruzilhada','E','salaDireita',5],
+  ['encruzilhada','N','salaElite',6],
+  ['salaElite','N','corredorFinal',4],
+  ['corredorFinal','N','boss',4],
   ['boss','E','saida',6],
 ];
-// Salas que recebem monstros comuns (nunca entrada/corredores/checkpoint/
-// saida -- checkpoint e area segura de proposito, o resto e so passagem).
-const DUNGEON_MOB_ROOMS_V2 = ['sala1', 'sala2', 'sala3', 'sala4', 'sala5'];
+// Salas que recebem monstros comuns (nunca entrada/corredores/saida --
+// entrada e area segura de proposito, corredores sao so passagem).
+const DUNGEON_MOB_ROOMS_V2 = ['corredorInicial', 'encruzilhada', 'salaEsquerda', 'salaDireita', 'salaElite'];
 
 function wallSegments(rangeFrom, rangeTo, openings) {
   let segments = [[rangeFrom, rangeTo]];

@@ -864,7 +864,7 @@ const THEMES={
   cripta:{split:false,v:['#4a4757','#43404f','#525063'],path:['#6b6878','#615e70','#77748a'],edge:'#3d3a48',tuftV:'#37344a',fl:['#e8dcc0','#cfc6ae','#9c9686'],flp:.0012,dark:'#3a3747',slab:'#34313f',wt:['#2f5a4a','#3a6b58'],whi:'#7ad0a8',wedge:'#1f4236',cb:['#5b5670','#635e7a','#544f68'],cm:'#3b3750'},
   floresta:{split:false,v:['#3d7a30','#356e2a','#468636'],path:['#8a6a3f','#7d5f37','#957347'],edge:'#5f4526',tuftV:'#295a20',fl:['#d63a2f','#f4f0e6','#e8a838'],flp:.0018,dark:'#2f6626'}
 };
-function paintGround(theme){
+function paintGround(theme,dungeonWalls){
   const TH=THEMES[theme||'vila'];
   const gc=document.createElement('canvas');gc.width=WPX;gc.height=HPX;
   const g=gc.getContext('2d'),id=g.createImageData(WPX,HPX),u32=new Uint32Array(id.data.buffer);
@@ -876,6 +876,13 @@ function paintGround(theme){
   const CLF=['#8a7660','#7d6a54','#705e49','#635240','#564637','#4a3d30','#3f3328','#352c22','#2c251d'].map((c,i)=>PK(mixc(c,'#8cc0f4',Math.max(0,(i-4)/6)))),SKY=['#7db4ee','#8cc0f4','#9acaf8','#b6d8fa'].map(PK);
   const CB=(TH.cb||['#9b968a','#a5a094','#908b80']).map(PK),CM=PK(TH.cm||'#6e695f'),CH=PK('#b8b3a6');
   const RK=[PK('#8a7866'),PK('#6f5f4f'),PK('#a09080')];
+  // Fase 5.16.3 (redesign visual): blocos de pedra grandes com argamassa
+  // escura pro k===4 (area fechada/parede da masmorra) -- mesmo padrao de
+  // fiada alternada que o piso k===3 ja usa (mortar em intervalos fixos,
+  // offset alternado por fiada), so blocos MAIORES e MAIS ESCUROS, pra ler
+  // como parede grossa de pedra em vez de rocha generica. Reforca a
+  // separacao "area jogavel vs area fechada" pedida no guia de arte.
+  const RKM=PK('#241d16');
   const FL=TH.fl.map(PK);
   for(let cy=0;cy<CHn;cy++)for(let cx=0;cx<CWn;cx++){
     const k=kind[cy*CWn+cx];let p;
@@ -889,7 +896,13 @@ function paintGround(theme){
       }else p=edge?WEDGE:(s>.93?WHI:WT[vnoise(cx,cy,37,6)>.5?1:0]);
     }else if(k===6){const eb=kAt(cx,cy-1)===2||kAt(cx,cy+1)===2||kAt(cx-1,cy)===2||kAt(cx+1,cy)===2;p=eb?ROPE:((cx+cy)%7===0?PLK[2]:PLK[hash2(cx>>1,cy>>1,80)>.5?0:1])
     }else if(k===5){const v=vnoise(cx,cy,63,6)*.6+hash2(cx,cy,64)*.4;p=hash2(cx,cy,65)>.97?MUDH:MUD[v<.4?0:v<.65?1:2]
-    }else if(k===4){const h=hash2(cx>>1,cy>>1,34);p=h<.5?RK[0]:h<.8?RK[1]:RK[2]}
+    }else if(k===4){
+      if(dungeonWalls){
+        const bw=11,row=(cy/bw)|0,off=(row%2)*(bw>>1),xx=cx+off;
+        if(xx%bw===0||cy%bw===0)p=RKM;
+        else{const h=hash2((xx/bw)|0,row,34);p=h<.5?RK[0]:h<.8?RK[1]:RK[2]}
+      }else{const h=hash2(cx>>1,cy>>1,34);p=h<.5?RK[0]:h<.8?RK[1]:RK[2]}
+    }
     else if(k===3){
       const row=(cy/6)|0,off=(row%2)*3,xx=cx+off,ccx=(xx/6)|0;
       if(xx%6===0||cy%6===0)p=CM;else if(xx%6===1&&cy%6===1)p=CH;else{const h=hash2(ccx,row,35);p=h<.4?CB[0]:h<.7?CB[1]:CB[2]}
@@ -3349,6 +3362,34 @@ $('#talk').addEventListener('click',()=>interact());
 $('#mBtn').addEventListener('click',()=>$('#tr').classList.toggle('big'));
 
 /* ================= atualização ================= */
+// Fase 5.16.3 (bug real, achado em produção): a expressão antiga que
+// decidia o nome de localização (nomeada `ln` no update()) nunca
+// reconhecia mundos de masmorra ('<zona>_d') nem arenas de TvT ('tvt#…')
+// /World Boss ('wb#…') -- qualquer um desses caía no ELSE final, que so
+// existia pra decidir entre "Vila Inicial"/"Planície dos Slimes" pela
+// coordenada X. Resultado: uma masmorra completamente diferente (ex.:
+// Covil dos Goblins) aparecia rotulada como "Vila Inicial" no HUD. A
+// única condição que pode decidir entre esses dois rótulos agora é
+// w.name==='vila' explicitamente -- nunca mais um "pega tudo que sobrou".
+// Extraído pra uma função dedicada e testável (test/dungeon-visual.test.js).
+function locationDisplayName(w,px){
+  if(!w)return'';
+  if(w.name.endsWith('_d')){
+    const base=w.name.slice(0,-2),cfg=MASMORRA_CFG[base];
+    return cfg?('Masmorra — '+cfg.name):'Masmorra';
+  }
+  if(w.name.startsWith('tvt#'))return'Arena TvT';
+  if(w.name.startsWith('wb#'))return'Arena do Titã';
+  if(w.name==='vulcao')return'Vulcão Ardente';
+  if(w.name==='ilhas')return'Ilhas Flutuantes';
+  if(w.name==='torre')return'Torre do Feiticeiro';
+  if(w.name==='pantano')return'Pântano Sombrio';
+  if(w.name==='serra')return'Serra dos Lobos';
+  if(w.name==='cripta')return'Cripta dos Esqueletos';
+  if(w.name==='floresta')return'Floresta dos Goblins';
+  if(w.name==='vila')return px<28.3*T?'Vila Inicial':'Planície dos Slimes';
+  return w.name; // mundo desconhecido -- nunca inventa "Vila Inicial", so ecoa o id cru (visível/estranho o bastante pra ser notado e corrigido, nunca silenciosamente errado)
+}
 let locName='Vila Inicial',portalCool=0,caveCool=0,saveT=0,hudT=0,mmT=0,time=0,CAVE=null,masmorraSel=null;
 // Fase 5.13.2: estado local da fila de matchmaking de masmorra -- so
 // espelha o que o servidor manda (dungeon_queue_state), nunca decide
@@ -3427,7 +3468,7 @@ function update(dt){
   if(caveCool>0)caveCool-=dt;
   if(caveCool<=0&&CAVE&&Math.hypot(P.x-CAVE.x,P.y-(CAVE.y+8))<62){caveCool=3;stopAuto();masmorraSel=CAVE.zone;openScr('masmorra')}
   // local
-  const ln=W_.name==='vulcao'?'Vulcão Ardente':W_.name==='ilhas'?'Ilhas Flutuantes':W_.name==='torre'?'Torre do Feiticeiro':W_.name==='pantano'?'Pântano Sombrio':W_.name==='serra'?'Serra dos Lobos':W_.name==='cripta'?'Cripta dos Esqueletos':W_.name==='floresta'?'Floresta dos Goblins':(P.x<28.3*T?'Vila Inicial':'Planície dos Slimes');
+  const ln=locationDisplayName(W_,P.x);
   if(ln!==locName){locName=ln;$('#loc').textContent=ln}
   // monstros
   for(const s of MOBS)updMob(s,dt);
@@ -3761,8 +3802,20 @@ function draw(){
     if(it.fn)it.fn();else{ctx.drawImage(it.img,it.x,it.y);if(it.img===SP.portal.c)drawPortalFx()}
   }
   drawWaves();drawEfx();
-  if(W_.name==='floresta'||W_.name==='cripta'||W_.name==='serra'||W_.name==='pantano'||W_.name==='torre'||W_.name==='ilhas'||W_.name==='vulcao'){
-    ctx.fillStyle=W_.name==='vulcao'?'rgba(255,90,30,.10)':W_.name==='ilhas'?'rgba(255,240,205,.05)':W_.name==='torre'?'rgba(28,14,60,.28)':W_.name==='pantano'?'rgba(30,60,18,.22)':W_.name==='serra'?'rgba(120,165,220,.12)':W_.name==='cripta'?'rgba(10,8,28,.30)':'rgba(6,26,18,.2)';ctx.fillRect(camX,camY,vw,vh);
+  // Fase 5.16.3 (redesign visual): masmorra (nome com sufixo '_d') usa o
+  // MESMO tint ambiente + camada de brilho aditivo (GL, logo abaixo) que a
+  // zona de campo do mesmo tema ja usa -- antes essa zona inteira nunca
+  // rodava pra masmorra (comparacao exata de nome nunca batia com
+  // 'cripta_d' etc.), entao tochas la nunca tinham a luz quente/glow real,
+  // so o sprite estatico do suporte. Um pouco mais escuro/saturado que a
+  // versao de campo (multiplicador de alpha) pra reforcar a sensacao de
+  // masmorra fechada/perigosa.
+  const dunBase=W_.name.endsWith('_d')?W_.name.slice(0,-2):null;
+  const ambientZone=dunBase&&MASMORRA_CFG[dunBase]?dunBase:W_.name;
+  if(ambientZone==='floresta'||ambientZone==='cripta'||ambientZone==='serra'||ambientZone==='pantano'||ambientZone==='torre'||ambientZone==='ilhas'||ambientZone==='vulcao'){
+    const tintAlphaMul=dunBase?1.5:1;
+    const withAlpha=(rgba,mul)=>rgba.replace(/,([.\d]+)\)$/,(_,a)=>','+Math.min(.85,parseFloat(a)*mul)+')');
+    ctx.fillStyle=withAlpha(ambientZone==='vulcao'?'rgba(255,90,30,.10)':ambientZone==='ilhas'?'rgba(255,240,205,.05)':ambientZone==='torre'?'rgba(28,14,60,.28)':ambientZone==='pantano'?'rgba(30,60,18,.22)':ambientZone==='serra'?'rgba(120,165,220,.12)':ambientZone==='cripta'?'rgba(10,8,28,.30)':'rgba(6,26,18,.2)',tintAlphaMul);ctx.fillRect(camX,camY,vw,vh);
     ctx.globalCompositeOperation='lighter';
     const GL={fire:['255,160,60',.34],brazier:['70,220,190',.30],crystal:['130,200,255',.30],lantern:['200,245,90',.32],cauldron:['110,255,120',.34],mushroom:['90,240,200',.24],arcane:['170,110,255',.32],candle:['255,205,120',.26],skylight:['255,235,170',.28],fcrystal:['140,210,255',.30],ember:['255,120,40',.36],geyser:['255,160,60',.3]};
     for(const f of FX){const gl=GL[f.kind];if(!gl)continue;const g=ctx.createRadialGradient(f.x,f.y-10,4,f.x,f.y-10,f.kind==='fire'?120:105);g.addColorStop(0,'rgba('+gl[0]+','+gl[1]+')');g.addColorStop(1,'rgba('+gl[0]+',0)');ctx.fillStyle=g;ctx.fillRect(f.x-125,f.y-135,250,250)}
@@ -6188,32 +6241,154 @@ function scatterProps(room,theme,pr,count){
 }
 function placeColumn(x,y){addStatic(dunSprite(0,1,.5),x,y,'dunwall');addBlock(x-14,y-14,28,20)}
 function placeTorch(x,y){addStatic(dunSprite(0,7,.42),x,y,'dunprop')}
+// Fase 5.16.3 -- redesenho visual: em vez de inventar arte nova, reusa os
+// MESMOS geradores procedurais (SP.*) que os 7 mapas de CAMPO ja usam pra
+// cripta/serra/pantano/torre/ilhas/vulcao/floresta -- a masmorra passa a
+// "rimar" visualmente com sua zona de origem (paredes de pedra, colunas,
+// tochas, ossos, cogumelos, entulho, grades, altares, pedestais/estatuas,
+// barris) em vez do cenario generico/vazio de antes. SP.* de uma zona so
+// existe depois que a zona de CAMPO correspondente foi construida
+// (ensureFieldSprites cuida disso, chamado por buildMasmorra ANTES desta
+// funcao); os campos aqui sao FUNCOES (lazy) porque em alguns temas dependem
+// de arrays que so a propria build da zona preenche.
+const DUNGEON_THEME_KIT={
+  floresta:{pillar:null,                         torch:()=>SP.fire,      rubble:()=>pick(SP.rocks),        bones:()=>SP.log,   landmark:()=>SP.totem,  fence:()=>SP.pal,   clutter:()=>SP.mush,                       crate:()=>SP.barrel,  fx:'fire'},
+  cripta:  {pillar:()=>SP.pillar,                 torch:()=>SP.brazier,   rubble:()=>SP.ruin,               bones:()=>(Math.random()<.5?SP.bones:SP.skulls), landmark:()=>SP.altar, fence:()=>SP.iron, clutter:()=>pick(SP.tombs), crate:()=>SP.sarc, fx:'brazier'},
+  serra:   {pillar:null,                          torch:()=>SP.fire,      rubble:()=>pick(SP.srocks),       bones:()=>SP.bones, landmark:()=>SP.den,    fence:null,          clutter:()=>SP.crystal,                    crate:()=>SP.flog,    fx:'fire'},
+  pantano: {pillar:null,                          torch:()=>SP.lpost,     rubble:()=>pick(SP.mrocks),       bones:()=>SP.bones, landmark:()=>SP.cauldron, fence:()=>SP.reeds, clutter:()=>(Math.random()<.5?SP.mush:pick(SP.mush2)), crate:()=>SP.stump, fx:'lantern'},
+  torre:   {pillar:()=>SP.mpillar,                torch:()=>SP.candel,    rubble:()=>pick(SP.twalls),       bones:()=>SP.bones, landmark:()=>SP.obelisk, fence:null,          clutter:()=>SP.bookshelf,                  crate:()=>SP.throne,  fx:'candle'},
+  ilhas:   {pillar:()=>SP.sPillar,                torch:()=>SP.scrystal,  rubble:()=>pick(SP.frocks),       bones:()=>SP.bones, landmark:()=>SP.saltar, fence:null,          clutter:()=>SP.fbed,                       crate:()=>SP.wtotem,  fx:'crystal'},
+  vulcao:  {pillar:()=>SP.obelisk2,               torch:()=>SP.geyserRock,rubble:()=>pick(SP.lrocks),       bones:()=>SP.crackedRock, landmark:()=>SP.ashTotem, fence:null,     clutter:()=>SP.craterRing,                 crate:()=>SP.throneV, fx:'ember'},
+};
+function pick(arr){return arr&&arr.length?arr[Math.floor(Math.random()*arr.length)]:null}
+// Fase 5.16.3 (redesign visual, parte 2): coloca uma tocha do kit E
+// registra em FX -- sem isso a tocha era so um sprite estatico "apagado"
+// (o brilho quente + a chama animada de brazier/fire/etc SEMPRE vieram do
+// par addStatic+FX.push nos mapas de campo, nunca so do sprite). kind vem
+// do proprio kit (kit.fx), entao cada tema brilha com a cor certa (a
+// mesma tabela GL que os mapas de campo ja usam).
+function kitTorch(kit,x,y){
+  if(kitProp(kit,'torch',x,y))FX.push({kind:kit.fx||'fire',x,y});
+}
+// Garante que as zonas de CAMPO usadas como fonte de sprite ja foram
+// construidas (SP.* populado) antes da masmorra tentar desenha-las --
+// idempotente (ensureWorld/buildXxx nao refazem nada se a zona ja existe)
+// e nunca deixa o jogador atual (W_) trocado (ensureWorld restaura).
+function ensureFieldSprites(theme){
+  if(!SP.bones)SP.bones=makeBones();if(!SP.skulls)SP.skulls=makeSkulls();
+  if(theme==='floresta')return; // base set ja vem de buildSprites() no boot, sempre disponivel
+  ensureWorld(theme);
+}
+// Coloca um prop do kit do tema com sombra e bloqueio pequeno (nunca no
+// vao de porta) -- se o kit nao tiver aquele papel pro tema (ex.: serra
+// nao tem "fence"), simplesmente nao desenha nada (nunca quebra).
+function kitProp(kit,role,x,y,block){
+  const fn=kit&&kit[role];if(!fn)return false;
+  let spr;try{spr=fn()}catch(e){spr=null}
+  if(!spr)return false;
+  addStatic(spr,x,y,'dunkit');if(block)addBlock(x-block[0]/2,y-block[1],block[0],block[1]);
+  return true;
+}
+// Tapete/carpete decorativo (decal, sem colisao, sem sombra -- desenhado
+// no chao antes de tudo, igual paintGround/dcl ja fazem) -- usado como um
+// "caminho vermelho" ate o trono da sala do chefe, o unico elemento novo
+// desenhado do zero nesta fase (retangulo simples com borda dourada,
+// mesmo estilo procedural/canvas de todo o resto do jogo).
+let _rugCache={};
+function makeRug(w,h){
+  const key=w+'x'+h;if(_rugCache[key])return _rugCache[key];
+  const c=document.createElement('canvas');c.width=Math.round(w);c.height=Math.round(h);
+  const g=c.getContext('2d');
+  g.fillStyle='#3a0e10';g.fillRect(0,0,c.width,c.height);
+  g.fillStyle='#6e181c';g.fillRect(3,3,c.width-6,c.height-6);
+  g.strokeStyle='#c9a24a';g.lineWidth=2;g.strokeRect(2.5,2.5,c.width-5,c.height-5);
+  // Fase 5.16.3 (V3): tapete pode ser desenhado deitado (largo) ou em pe
+  // (alto) -- as franjas seguem o eixo mais comprido automaticamente, pra
+  // sempre ler como "tapete correndo na direcao do trono", nunca deitado
+  // errado quando o eixo entrada->trono e vertical (layout de encruzilhada).
+  g.fillStyle='rgba(201,162,74,.5)';
+  if(c.width>=c.height)for(let i=6;i<c.width-6;i+=14)g.fillRect(i,c.height/2-1,6,2);
+  else for(let i=6;i<c.height-6;i+=14)g.fillRect(c.width/2-1,i,2,6);
+  return _rugCache[key]={c,ax:c.width/2,ay:c.height/2};
+}
 function decorateMasmorra(w,rooms,theme,pr){
-  if(!DUN_IMG)return;
+  ensureFieldSprites(theme);
+  const kit=DUNGEON_THEME_KIT[theme]||DUNGEON_THEME_KIT.cripta;
   const c=id=>DUNGEON_GEN.roomCenter(rooms[id]);
-  // Sala 1 - Recepcao: 1-2 colunas perto das bordas (nunca no vao central)
-  {const r=rooms.sala1,ct=c('sala1');placeColumn(r.x*T+40,ct.y);if(pr()<.7)placeColumn((r.x+r.w)*T-40,ct.y);scatterProps(r,theme,pr,2)}
-  // Sala 2 - Combate inicial: ate 2 obstaculos pequenos, fora do eixo principal
-  {const r=rooms.sala2;scatterProps(r,theme,pr,2)}
-  // Sala 3 - Camara lateral: objeto decorativo central (banner), visual fechado
-  {const r=rooms.sala3,ct=c('sala3');addStatic(dunSprite(6,7,.4),ct.x,ct.y,'dunprop');scatterProps(r,theme,pr,2)}
-  // Sala 4 - Central: 4 colunas nos CANTOS INTERNOS (nao no centro exato)
-  {const r=rooms.sala4,pad=48;
-    placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
-    placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad);
-    scatterProps(r,theme,pr,3)}
-  // Sala 5 - Elite/Guarda: layout simetrico, visual de pre-boss (tochas nas laterais)
-  {const r=rooms.sala5,ct=c('sala5');placeTorch(r.x*T+30,ct.y);placeTorch((r.x+r.w)*T-30,ct.y)}
-  // Checkpoint: sem inimigos, runa/simbolo central (cristal), iluminacao propria
-  {const ct=c('checkpoint');addStatic(dunSprite(5,4,.4),ct.x,ct.y,'dunprop')}
-  // Corredor final: 2 tochas grandes na entrada da arena
-  {const r=rooms.corrfinal;placeTorch(r.x*T+10,(r.y+r.h/2)*T);placeTorch((r.x+r.w)*T-10,(r.y+r.h/2)*T)}
-  // Arena do chefe: 4 pilares proximos as extremidades, arena limpa no meio
-  {const r=rooms.boss,pad=56;
-    placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
-    placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
-  // Tochas na entrada (2, como pedido)
-  {const r=rooms.entrada;placeTorch(r.x*T+24,(r.y+r.h/2)*T);placeTorch((r.x+r.w)*T-24,(r.y+r.h/2)*T)}
+  // Espalha uma combinacao de entulho/ossos/cogumelos perto das bordas de
+  // uma sala (nunca no eixo central de passagem) -- densidade cresce por
+  // sala conforme o jogador se aproxima do chefe, pra dar sensacao de
+  // avanco (mais perigo/ruina visual quanto mais fundo).
+  function debris(room,count,{allowBones=true,allowClutter=true}={}){
+    for(let n=0;n<count;n++){
+      const pt=DUNGEON_GEN.roomRandomPoint(room,pr,2.4);
+      const roll=pr();
+      const role=roll<.4?'rubble':(allowBones&&roll<.7)?'bones':(allowClutter?'clutter':'rubble');
+      kitProp(kit,role,pt.x,pt.y,[26,16]);
+    }
+  }
+  if(DUN_IMG){
+    // Camada base (opcional, tileset externo): colunas do sistema ja
+    // existente -- mantida como esta, so complementada pela camada SP.*.
+    {const r=rooms.encruzilhada,pad=40;
+      placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
+      placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
+    {const r=rooms.boss,pad=56;
+      placeColumn(r.x*T+pad,r.y*T+pad);placeColumn((r.x+r.w)*T-pad,r.y*T+pad);
+      placeColumn(r.x*T+pad,(r.y+r.h)*T-pad);placeColumn((r.x+r.w)*T-pad,(r.y+r.h)*T-pad)}
+  }
+  // 1. Entrada -- area segura, tochas acolhedoras (brilho de verdade via
+  // kitTorch/FX), sem entulho.
+  {const r=rooms.entrada;
+    kitTorch(kit,r.x*T+24,(r.y+r.h/2)*T);kitTorch(kit,(r.x+r.w)*T-24,(r.y+r.h/2)*T);
+    kitProp(kit,'crate',r.x*T+r.w*T*.22,(r.y+r.h*.7)*T,[24,16]);
+  }
+  // 2. Corredor inicial -- primeiros mobs, primeiro sinal de ruina:
+  // entulho leve, uma tocha de transicao acesa.
+  {const r=rooms.corredorInicial;debris(r,3,{allowClutter:true});kitTorch(kit,(r.x+r.w/2)*T,r.y*T+14)}
+  // 3. Encruzilhada -- HUB de verdade (abre pra 3 direcoes: sala esquerda,
+  // sala direita, sala de elite -- nunca mais um corredor de passagem so):
+  // pilar central se o tema tiver, entulho/ossos nos 4 cantos, tochas
+  // acesas nas bordas (hub bem iluminado, "sensacao de exploracao").
+  {const r=rooms.encruzilhada,ct=c('encruzilhada');
+    kitProp(kit,'pillar',ct.x,ct.y,[28,20]);
+    debris(r,5);
+    kitTorch(kit,r.x*T+20,ct.y);kitTorch(kit,(r.x+r.w)*T-20,ct.y);
+  }
+  // 4. Sala esquerda -- ala opcional a oeste do hub (mobs comuns,
+  // decoracao de ruina): entulho denso, marco tematico central, tocha.
+  {const r=rooms.salaEsquerda,ct=c('salaEsquerda');kitProp(kit,'landmark',ct.x,ct.y,[30,22]);debris(r,5);kitTorch(kit,r.x*T+22,r.y*T+22);kitTorch(kit,(r.x+r.w)*T-22,(r.y+r.h)*T-22)}
+  // 5. Sala direita -- ala opcional a leste do hub (mobs mais fortes/
+  // densos): entulho+ossos abundantes, grade, tocha.
+  {const r=rooms.salaDireita,ct=c('salaDireita');kitProp(kit,'fence',r.x*T+18,r.y*T+20,[26,20]);debris(r,6);kitTorch(kit,(r.x+r.w)*T-22,r.y*T+22);kitTorch(kit,r.x*T+22,(r.y+r.h)*T-22)}
+  // 6. Sala de elite -- passagem guardada rumo ao chefe, ao norte do hub:
+  // tochas simetricas acesas + estatuas/pedestais flanqueando a passagem
+  // central, reforcando a leitura de "guarda de elite" sem mudar
+  // combate/loot (decisao documentada em LEIA-PRIMEIRO.md).
+  {const r=rooms.salaElite,ct=c('salaElite');
+    kitTorch(kit,r.x*T+30,ct.y);kitTorch(kit,(r.x+r.w)*T-30,ct.y);
+    kitProp(kit,'crate',ct.x-60,r.y*T+26,[26,20]);kitProp(kit,'crate',ct.x+60,r.y*T+26,[26,20]);
+    kitProp(kit,'pillar',ct.x,(r.y+r.h)*T-26,[28,20]);
+  }
+  // 7. Corredor final -- visual mais sombrio: tochas grandes acesas
+  // (clima de aproximacao) + ossos concentrados.
+  {const r=rooms.corredorFinal;
+    kitTorch(kit,r.x*T+8,(r.y+r.h/2)*T);kitTorch(kit,(r.x+r.w)*T-8,(r.y+r.h/2)*T);
+    kitProp(kit,'bones',(r.x+r.w/2)*T,r.y*T+r.h*T*.3,[20,12]);
+  }
+  // 8. Sala do boss -- arena grande e marcante: entrada pelo SUL (vinda do
+  // corredor final), tapete vermelho vertical ate o trono/marco no lado
+  // NORTE (atras do chefe, layout.boss fica exatamente no centro da sala
+  // -- espaco livre pra combate em party nunca e coberto pelo tapete/
+  // marco), flanqueado por 2 estandartes (SP.banner) e 2 tochas acesas.
+  // Lado LESTE fica livre (e onde a saida se conecta).
+  {const r=rooms.boss,entryY=(r.y+r.h)*T,throneX=(r.x+r.w/2)*T,throneY=r.y*T+46;
+    const rug=makeRug(56,Math.max(40,entryY-throneY-40));
+    addStatic(rug,throneX,(throneY+40+entryY)/2,'decal');
+    kitProp(kit,'landmark',throneX,throneY,[34,24]);
+    addStatic(SP.banner,throneX-50,throneY-6,'dunkit');addStatic(SP.banner,throneX+50,throneY-6,'dunkit');
+    kitTorch(kit,throneX-74,throneY+26);kitTorch(kit,throneX+74,throneY+26);
+  }
   statics.sort((a,b)=>a.sy-b.sy);
 }
 // Fase 5.13 -- DUNGEON MAP V2: layout FIXO (game-data/dungeon-generation.js
@@ -6238,7 +6413,7 @@ function buildMasmorra(zoneId,seed,roster){
   // monstro (layout.rects) -- uma unica fonte pra render e colisao,
   // nunca duas matematicas que podem divergir.
   for(const r of layout.rects)addBlock(r.x,r.y,r.w,r.h);
-  paintGround(cfg.theme);w.ground=ground;
+  paintGround(cfg.theme,true);w.ground=ground;
   addStatic(SP.portal,w.portal.x,w.portal.y);addBlock(w.portal.x-40,w.portal.y-30,80,30);
   const pr=mulberry(Number.isFinite(seed)?seed:555+zoneId.length);
   decorateMasmorra(w,rooms,cfg.theme,pr);
@@ -6353,6 +6528,20 @@ function applyDungeonState(m){
   buildMasmorra(zoneId,m.seed,m.roster);
   const w=worlds[zoneId+'_d'];w.netMap=m.map;
   setWorld(w);
+  // Fase 5.16.3 (causa raiz do "personagem preso"): nenhum travel/entrada
+  // de masmorra chamava resize() -- na maioria dos casos cw/ch/vw/vh
+  // ficavam bons o bastante (verificado numericamente com a geometria
+  // real da masmorra: spawn nunca cai dentro de parede, camera nunca
+  // corta o jogador pra fora em viewports tipicos). Mas se o tamanho real
+  // do canvas tivesse mudado desde o ultimo resize (chrome do navegador
+  // mobile recolhendo, reflow durante o fade de transicao) e nenhum
+  // evento 'resize' tivesse disparado a tempo, camX/camY/vw/vh ficavam
+  // presos em valores de ANTES de entrar na masmorra ate o jogador mexer
+  // manualmente na configuracao de zoom (que ja chamava resize() sozinho
+  // -- e foi exatamente o que "consertava" o problema). Forcar resize()
+  // aqui, sempre, garante viewport fresco no exato momento em que o
+  // jogador passa a existir dentro da masmorra.
+  resize();
   P.x=m.start?m.start.x:w.start.x;P.y=m.start?m.start.y:w.start.y;P.dir=3;P.inv=1.2;P.kbx=P.kby=0;
   drops.length=0;floaters.length=0;waves.length=0;locName='';
   clearTarget();
