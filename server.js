@@ -24,6 +24,8 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const authAttempts = new Map();
 const clients = new Map();
 const maps = new Map();
+const activeCharacterSockets = new Map();
+const characterRuntime = new Map();
 // Fase 5.2: masmorra agora usa uma chave de mapa por INSTANCIA
 // (`<zona>_d#<id8hex>`) em vez de compartilhar um unico `<zona>_d` global
 // entre qualquer personagem que entrar -- reaproveita playersOnMap/
@@ -560,6 +562,7 @@ const CLASS_SKILLS = {
   mago: ['fireball','frost','barrier'], arqueiro: ['multi','evade','pierce'],
 };
 const DAMAGE_SKILLS = new Set(['spin','dash','roots','thorns','fireball','frost','multi','pierce']);
+const SKILL_REQ = {spin:2,dash:3,warcry:5,heal:2,roots:3,thorns:5,fireball:2,frost:3,barrier:5,multi:2,evade:3,pierce:5};
 
 // Save inicial de um personagem novo, definido pelo servidor (Fase 5.2) --
 // espelha os defaults reais do objeto P no cliente (index.html): ouro 10,
@@ -605,20 +608,20 @@ function skillDamageMul(id, r) {
 function clampAtk(v) { return Math.max(0, Math.min(120, Number(v) || 0)); }
 function baseDmgOf(cls, lvl) { const c = CLASS_DMG[cls] || CLASS_DMG.guerreiro; return c.dmg0 + c.dmgL * (lvl - 1); }
 function buffMulOf(p) { return 1 + ((p.buffUntil && Date.now() < p.buffUntil) ? (p.buffAtk || 0) : 0); }
-function skBaseOf(p, atk) { return (baseDmgOf(p.cls, p.lvl) + clampAtk(atk) + 2) * buffMulOf(p); }
+function skBaseOf(p) { return (baseDmgOf(p.cls, p.lvl) + (p.combat?.atk || 0) + 2) * buffMulOf(p); }
 
 // Compartilhado por mob_damage e player_damage: nunca confia no numero que o
 // cliente manda, so em qual skill foi usada (basic com formula+cooldown por
 // classe, ou o valor "pendente" computado no cast_skill). Retorna null se a
 // skill nao pode causar dano agora (sem cast valido, cooldown, ou spam).
-function resolveAttackDamage(p, msg, now) {
+function resolveAttackDamage(p, msg, now, rng=Math.random) {
   const skill = cleanText(msg.skill, 16) || 'basic';
   let dmg = 0;
   if (skill === 'basic') {
-    p.recentBasic = (p.recentBasic || []).filter(t => now - t < (BASIC_CD_MS[p.cls] || 420));
-    if (p.recentBasic.length >= 6) return null;
-    p.recentBasic.push(now);
-    dmg = Math.round((baseDmgOf(p.cls, p.lvl) + clampAtk(msg.atk)) * buffMulOf(p)) + Math.floor(Math.random() * 4);
+    const cd = p.combat?.basicCdMs || BASIC_CD_MS[p.cls] || 420;
+    if (now < (p.basicCdUntil || 0)) return null;
+    p.basicCdUntil = now + cd;
+    dmg = Math.round((baseDmgOf(p.cls, p.lvl) + (p.combat?.atk || 0)) * buffMulOf(p)) + Math.floor(rng() * 4);
   } else if (DAMAGE_SKILLS.has(skill)) {
     const pend = p.pendingSkill && p.pendingSkill[skill];
     if (!pend || now > pend.expiresAt) return null;
@@ -627,6 +630,69 @@ function resolveAttackDamage(p, msg, now) {
   const lvl = Math.max(1, Math.min(99, Number(p.lvl) || 1)), maxHit = Math.min(6500, 50 + lvl * 60);
   dmg = Math.max(0, Math.min(maxHit, dmg));
   return dmg || null;
+}
+
+function securityReject(p, code) {
+  console.warn('security_reject', code, p?.charId || p?.id || 'anonymous');
+}
+function isAuthoritativeSocket(charId, ws) { return !charId || activeCharacterSockets.get(charId) === ws; }
+function allowPacket(p, type, limit, windowMs, now=Date.now()) {
+  p.packetWindows = p.packetWindows || new Map();
+  const list = (p.packetWindows.get(type) || []).filter(t => now - t < windowMs);
+  if (list.length >= limit) { p.packetWindows.set(type, list); securityReject(p, 'RATE_LIMIT'); return false; }
+  list.push(now); p.packetWindows.set(type, list); return true;
+}
+function mitigatePlayerDamage(p, rawDamage, rng=Math.random) {
+  const now=Date.now();
+  if(p.evadeUntil>now)return 0;
+  let dmg = Math.max(1, Math.round((Number(rawDamage)||0) - ((p.combat?.def || 0)+(p.buffUntil>now?(p.buffDef||0):0)) * .45));
+  if ((p.combat?.block || 0) > 0 && rng() < p.combat.block) dmg = Math.max(1, Math.round(dmg * .5));
+  if(p.shieldUntil>now&&p.shield>0){const absorbed=Math.min(p.shield,dmg);p.shield-=absorbed;dmg-=absorbed}
+  if(dmg<=0)return 0;
+  return Math.min(dmg, Math.max(1, Math.floor(p.maxHp * .35)));
+}
+function applyGlobalPlayerDamage(p, rawDamage, now=Date.now(), rng=Math.random) {
+  if (!p || p.dead) return null;
+  const damage = mitigatePlayerDamage(p, rawDamage, rng);
+  if(damage<=0)return{damage:0,hp:p.hp,maxHp:p.maxHp,dead:false,respawnAt:0,killed:false};
+  p.hp = Math.max(0, Math.min(p.maxHp, p.hp - damage));
+  p.lastDamageAt = now;
+  let killed = false;
+  if (p.hp === 0 && !p.dead) { p.dead = true; p.respawnAt = now + 2200; killed = true; }
+  return {damage,hp:p.hp,maxHp:p.maxHp,dead:p.dead,respawnAt:p.respawnAt,killed};
+}
+function consumeRuntimePotion(p, key) {
+  if (!p || p.dead || !['pv','ap'].includes(key) || p.hp >= p.maxHp) return null;
+  const amount = key === 'pv' ? 45 : 25;
+  const before = p.hp; p.hp = Math.min(p.maxHp, p.hp + amount);
+  return {amount:p.hp-before,hp:p.hp,maxHp:p.maxHp};
+}
+function allowedFieldTransition(p, nextMap) {
+  if (nextMap === p.map) return true;
+  // Visitante anonimo nao possui progresso/economia persistente; mantem o
+  // sandbox multiplayer legado. A autoridade estrita vale para personagens.
+  if (!p.authed) return ALLOWED_MAP.test(nextMap) && !DUNGEON_MAP_RE.test(nextMap);
+  if (DUNGEON_MAP_RE.test(nextMap) || WORLD_BOSS_MAP_RE.test(nextMap) || TVT_MAP_RE.test(nextMap)) return false;
+  if (p.map !== 'vila' && nextMap !== 'vila') return false;
+  if (nextMap !== 'vila' && (p.quest || 0) < (DUNGEON_UNLOCK_QUEST[nextMap] || 999) && !p.gunlock?.[nextMap]) return false;
+  const atPortal = p.map === 'vila'
+    ? Math.hypot(p.x - 720, p.y - 1042) <= 190
+    : Math.hypot(p.x - 480, p.y - 1906) <= 190;
+  return atPortal;
+}
+function attackRangeFor(p, skill) {
+  if (skill === 'spin' || skill === 'dash') return 150;
+  if (skill === 'roots' || skill === 'thorns' || skill === 'frost') return 410;
+  if (skill === 'fireball' || skill === 'multi' || skill === 'pierce') return 550;
+  return (p.cls === 'mago' || p.cls === 'arqueiro' || p.cls === 'druida') ? 520 : 105;
+}
+function validateMovement(p, rawX, rawY, now=Date.now()) {
+  const x=Number(rawX),y=Number(rawY);
+  if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>2880||y>2112)return{ok:false,code:'INVALID_MOVEMENT',x:p.x,y:p.y};
+  const dt=Math.max(.05,Math.min(1.5,(now-(p.lastMoveAt||now))/1000));
+  const allow=150*(1+(p.combat?.speed||0))*dt+180+(p.dashUntil>now?520:0),dist=Math.hypot(x-p.x,y-p.y);
+  if(dist>allow){const ratio=allow/dist;return{ok:false,code:'INVALID_MOVEMENT',x:p.x+(x-p.x)*ratio,y:p.y+(y-p.y)*ratio};}
+  return{ok:true,x,y};
 }
 
 function cleanText(value, max) {
@@ -1026,6 +1092,8 @@ async function handleShop(req, res, pathname) {
   try {
     const user = await resolveUser(req);
     if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
+    const activeWs=activeCharacterSockets.get(charId),activeP=activeWs&&clients.get(activeWs);
+    if(activeP&&req.headers['x-game-session']!==activeP.sessionKey){securityReject(activeP,'STALE_SESSION');json(res,409,{error:'Sessão do personagem foi substituída'});return true}
     const input = await readJson(req);
     const result = await withCharLock(charId, async () => {
       const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
@@ -1036,6 +1104,7 @@ async function handleShop(req, res, pathname) {
       const action = String(input.action || '');
       let error = null;
       let enchantResult = null; // Fase 5.4: preenchido so pela acao enchant_item, ver abaixo
+      let runtimeEffectKey = null;
 
       if (action === 'buy_gear') {
         const type = String(input.type || ''), gearLv = Math.round(Number(input.lv));
@@ -1147,7 +1216,11 @@ async function handleShop(req, res, pathname) {
         const key = String(input.key || '');
         if (!['pv', 'pa', 'ap', 'scr'].includes(key)) error = 'Item inválido';
         else if ((save[key] || 0) < 1) error = 'Você não tem esse item';
-        else save[key] -= 1;
+        else if(!activeP)error='Personagem precisa estar online';
+        else if(activeP.dead)error='Jogador morto não pode usar consumível';
+        else if((key==='pv'||key==='ap')&&activeP.hp>=activeP.maxHp)error='Sua vida já está cheia';
+        else if(key==='scr'&&activeP.map==='vila')error='Você já está na vila';
+        else {save[key]-=1;runtimeEffectKey=key}
       } else if (action === 'enchant_item') {
         // Fase 5.4: tentativa de enchant server-authoritative. Cliente so
         // pede "quero tentar encantar este uid, no estado que EU vejo como
@@ -1168,7 +1241,11 @@ async function handleShop(req, res, pathname) {
       if (error) return {status:400, body:{error}};
       const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
       if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
-      return {status:200, body:{character: rows[0], shopSold: shopSoldByChar.get(charId) || [], enchant: enchantResult}};
+      let itemEffect=null;
+      if(runtimeEffectKey==='pv'||runtimeEffectKey==='ap')itemEffect={type:'hp',...consumeRuntimePotion(activeP,runtimeEffectKey)};
+      else if(runtimeEffectKey==='pa')itemEffect={type:'mp',amount:30};
+      else if(runtimeEffectKey==='scr'){activeP.map='vila';activeP.x=720;activeP.y=1258;activeP.lastMoveAt=Date.now();itemEffect={type:'teleport',map:'vila',x:activeP.x,y:activeP.y};send(activeWs,{type:'server_teleport',...itemEffect})}
+      return {status:200, body:{character: rows[0], shopSold: shopSoldByChar.get(charId) || [], enchant: enchantResult, itemEffect}};
     });
     json(res, result.status, result.body); return true;
   } catch (err) {
@@ -2341,7 +2418,7 @@ const wss = new WebSocketServer({ server, path: '/game' });
 async function resolveCharacterForWs(userId, charId) {
   if (!userId || !charId) return null;
   try {
-    const rows = await supabase('characters', {query:`?select=id,name,cls,lvl&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
+    const rows = await supabase('characters', {query:`?select=id,name,cls,lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
     return rows[0] || null;
   } catch { return null; }
 }
@@ -2379,21 +2456,30 @@ async function handleWsJoin(ws, msg) {
       } catch (err) { console.error('ws_join_auth_error', err.message); userId = null; charRow = null; }
     }
     if (clients.get(ws)) return; // ja tratado por outra mensagem enquanto este join aguardava o Supabase
+    const claimedCls=ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',claimedLvl=Math.max(1,Math.min(99,Number(msg.lvl)||1));
+    const realSave = charRow ? sanitizeSave(charRow.save,charRow.lvl) : startingSave(claimedCls,cleanText(msg.name,14)||'Herói');
+    const combat = WORLD_BOSS.combatSnapshot({userId,charId:charRow?.id||null,name:charRow?.name||msg.name,cls:charRow?.cls||claimedCls,lvl:charRow?.lvl||claimedLvl,save:realSave});
+    const remembered = charRow && characterRuntime.get(charRow.id);
     const p = {
       id: crypto.randomUUID(), userId, charId: charRow ? charRow.id : null,
       name: charRow ? (cleanText(charRow.name,14)||'Herói') : (cleanText(msg.name, 14) || 'Herói'),
-      cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : (ALLOWED_CLASS.has(msg.cls) ? msg.cls : 'guerreiro'),
-      lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : Math.max(1, Math.min(99, Number(msg.lvl) || 1)),
-      authed: !!charRow, map: 'vila', x: 720, y: 1258, dir: 0, moving: false, atkT: 0, atkAng: 0,
+      cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : claimedCls,
+      lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : claimedLvl,
+      authed: !!charRow, map: remembered?.map || realSave?.map || 'vila', x: remembered?.x ?? (realSave?.x || 720), y: remembered?.y ?? (realSave?.y || 1258), dir: 0, moving: false, atkT: 0, atkAng: 0,
       guildId: null, guildRole: null, guildTag: null, guildName: null,
+      combat, hp:remembered?Math.min(combat.maxHp,remembered.hp):Math.min(combat.maxHp,realSave.hp||combat.maxHp), maxHp:combat.maxHp,
+      dead:!!remembered?.dead, respawnAt:remembered?.respawnAt||0, skillCd:remembered?.skillCd||{}, basicCdUntil:remembered?.basicCdUntil||0,
+      lastMoveAt:Date.now(), gameplayAuthority:true, packetWindows:new Map(), sessionKey:crypto.randomUUID(),
+      quest:realSave?.quest||0, gunlock:realSave?.gunlock||{},
     };
+    if(p.charId){const old=activeCharacterSockets.get(p.charId);if(old&&old!==ws){const oldP=clients.get(old);if(oldP){oldP.gameplayAuthority=false;p.map=oldP.map;p.x=oldP.x;p.y=oldP.y;p.hp=oldP.hp;p.dead=oldP.dead;p.respawnAt=oldP.respawnAt;p.skillCd={...(oldP.skillCd||{})};p.basicCdUntil=oldP.basicCdUntil||0;p.lastDamageAt=oldP.lastDamageAt||0}send(old,{type:'session_replaced'});old.close(4001,'Sessão substituída')}activeCharacterSockets.set(p.charId,ws)}
     clients.set(ws, p);
     // Fase 5.8: guilda e persistente (Supabase), nao efemera como Party --
     // carrega a filiacao real do banco no join/reconnect pra rotear
     // guild_chat sem bater no banco a cada mensagem.
     if (p.charId) { try { const brief = await loadCharGuildBrief(p.charId); if (brief) { p.guildId=brief.guildId; p.guildRole=brief.role; p.guildTag=brief.tag; p.guildName=brief.name; } } catch (err) { console.error('ws_join_guild_error', err.message); } }
     if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
-    send(ws, {type:'welcome', id:p.id, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
+    send(ws, {type:'welcome', id:p.id, sessionKey:p.sessionKey, hp:p.hp, maxHp:p.maxHp, dead:p.dead, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
     send(ws, eventStatePayload(p));
     const wbMap=p.charId&&worldBossByChar.get(p.charId),instance=wbMap&&worldBossInstances.get(wbMap),member=instance&&instance.members.get(p.charId);
     if(member&&member.userId===p.userId&&instance.state!=='ended'){member.online=true;p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{...WORLD_BOSS.publicWorldBossState(instance),type:'world_boss_enter',spawn:{x:p.x,y:p.y},reconnect:true})}
@@ -2449,6 +2535,10 @@ wss.on('connection', ws => {
     let p = clients.get(ws);
     if (msg.type === 'join' && !p) { await handleWsJoin(ws, msg); return; }
     if (!p) return;
+    if(!isAuthoritativeSocket(p.charId,ws)){securityReject(p,'STALE_SESSION');return}
+    if(p.authed&&['mob_damage','player_damage','cast_skill','state'].includes(msg.type)&&['atk','damage','hp','maxHp','sk'].some(k=>Object.prototype.hasOwnProperty.call(msg,k)))securityReject(p,'FORGED_COMBAT');
+    const packetPolicy={state:[35,1000],mob_damage:[16,1000],player_damage:[16,1000],cast_skill:[10,1000],event_register:[4,5000],event_unregister:[4,5000],dungeon_enter:[3,5000]};
+    if(packetPolicy[msg.type]&&!allowPacket(p,msg.type,...packetPolicy[msg.type]))return;
     if (msg.type === 'event_status') {
       send(ws,eventStatePayload(p));
     } else if (msg.type === 'event_register') {
@@ -2470,7 +2560,7 @@ wss.on('connection', ws => {
       if(result.ok&&result.members)for(const member of result.members)sendToWorldBossMember(member,eventStatePayload(activeCharacterForUser(member.userId)?.p||member));
     } else if (msg.type === 'state') {
       const map = cleanText(msg.map,24);
-      if (!isAllowedMap(map)) return;
+      if (!isAllowedMap(map)) { securityReject(p,'INVALID_MAP'); return; }
       // Instancia de masmorra (`_d#id`): so pode "continuar" na que o
       // proprio dungeon_enter ja colocou o personagem (p.map) -- nunca
       // trocar pra outra instancia, nem pra `_d` sem instancia, so
@@ -2484,8 +2574,12 @@ wss.on('connection', ws => {
       // realmente pertence a essa TvTInstance (tvtByChar) pode reportar
       // estado nesse mapId, e so nessa mesma instancia que ja estava.
       if (TVT_MAP_RE.test(map) && (!tvtByChar.has(p.charId)||tvtByChar.get(p.charId)!==map||map!==p.map)) return;
-      const x = Number(msg.x), y = Number(msg.y);
-      if (!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>2880||y>2112) return;
+      if(p.dead)return;
+      let x = Number(msg.x), y = Number(msg.y);
+      if (!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>2880||y>2112) { securityReject(p,'INVALID_MOVEMENT'); send(ws,{type:'position_resync',x:p.x,y:p.y,map:p.map}); return; }
+      if(map!==p.map){if(!allowedFieldTransition(p,map)){securityReject(p,'INVALID_MAP');send(ws,{type:'position_resync',x:p.x,y:p.y,map:p.map});return}p.map=map;p.x=x;p.y=y;p.lastMoveAt=Date.now();broadcast({type:'state',player:publicPlayer(p)},ws);return}
+      const moveNow=Date.now(),movement=p.authed?validateMovement(p,x,y,moveNow):{ok:true,x,y};x=movement.x;y=movement.y;
+      if(!movement.ok){securityReject(p,movement.code);send(ws,{type:'position_resync',x,y,map:p.map})}p.lastMoveAt=moveNow;
       const atkT=Math.max(0,Math.min(.4,Number(msg.atkT)||0)),atkAng=Number(msg.atkAng)||0;
       // Personagem autenticado (charId real, ver handleWsJoin): nivel so
       // muda pelo que o proprio servidor ja sabe (kill_reward/quest/PUT),
@@ -2544,8 +2638,9 @@ wss.on('connection', ws => {
       send(ws,{type:'map_state',map,mobs:[...state.mobs.values()]});
     } else if (msg.type === 'cast_skill') {
       const map=cleanText(msg.map,24);if(map!==p.map)return;
-      const id=cleanText(msg.id,16),sk=Math.max(1,Math.min(3,Math.round(Number(msg.sk))||1)),atk=clampAtk(msg.atk);
-      if(!(CLASS_SKILLS[p.cls]||[]).includes(id))return;
+      const id=cleanText(msg.id,16),sk=Math.max(1,Math.min(3,Math.round(Number(p.combat?.skills?.[id]))||1));
+      if(p.dead)return;
+      if(!(CLASS_SKILLS[p.cls]||[]).includes(id)||!p.combat?.skills?.[id]||p.lvl<(SKILL_REQ[id]||99)){securityReject(p,'INVALID_SKILL');return}
       // Fase 5.7: dentro do TvT, warcry/barrier/evade/heal (nao-dano) sao
       // resolvidos 100% por TVT.resolveTvtIntent (chance/custo/estado
       // proprios da instancia -- nada a ver com P.wc/P.shield do mapa de
@@ -2564,15 +2659,19 @@ wss.on('connection', ws => {
       p.skillCd=p.skillCd||{};
       if(now<(p.skillCd[id]||0))return;
       p.skillCd[id]=now+(SKILL_CD_MS[id]||1000);
-      if(id==='warcry'){p.buffUntil=now+(6+2*(sk-1))*1000;p.buffAtk=.3+.1*(sk-1)}
+      if(id==='warcry'){p.buffUntil=now+(6+2*(sk-1))*1000;p.buffAtk=.3+.1*(sk-1);p.buffDef=4+2*(sk-1)}
+      if(id==='dash'||id==='evade')p.dashUntil=now+1000;
+      if(id==='evade')p.evadeUntil=now+500;
+      if(id==='barrier'){p.shield=40+6*p.lvl+20*(sk-1);p.shieldUntil=now+8000}
+      if(id==='heal'){p.hp=Math.min(p.maxHp,p.hp+45+5*p.lvl+18*(sk-1));send(ws,{type:'player_vitals',hp:p.hp,maxHp:p.maxHp,dead:false})}
       if(DAMAGE_SKILLS.has(id)){
         p.pendingSkill=p.pendingSkill||{};
-        p.pendingSkill[id]={dmg:Math.round(skBaseOf(p,atk)*skillDamageMul(id,sk)),expiresAt:now+(id==='thorns'?4000:2000)};
+        p.pendingSkill[id]={dmg:Math.round(skBaseOf(p)*skillDamageMul(id,sk)),expiresAt:now+(id==='thorns'?4000:2000)};
       }
     } else if (msg.type === 'mob_damage') {
       const map=cleanText(msg.map,24),state=maps.get(map);if(!state||map!==p.map)return;
       const mobId=cleanText(msg.id,48),mob=state.mobs.get(mobId);
-      if(!mob||mob.dead)return;
+      if(!mob||mob.dead||p.dead)return;
       if(state.isWorldBoss){const instance=state.worldBoss;if(!instance||mobId!=='ancient_titan'||worldBossByChar.get(p.charId)!==map)return;const result=WORLD_BOSS.resolveWorldBossDamage(instance,p.charId,{skill:msg.skill,splash:!!msg.splash},Date.now(),secureRandom);if(result.ok){worldBossPublicSync(instance);send(ws,{type:'world_boss_hit',damage:result.damage,bossHp:instance.boss.hp,bossMaxHp:instance.boss.maxHp})}return}
       // alcance plausivel: usa a posicao real do jogador (rastreada via
       // 'state') e a posicao do monstro simulada pelo servidor para rejeitar
@@ -2580,7 +2679,7 @@ wss.on('connection', ws => {
       // qualquer ataque do jogo (o maior caso real e a Flecha Perfurante,
       // que viaja ate ~476; roots/thorns podem mirar ate 320 de distancia
       // + 90 de raio).
-      if(Math.hypot(mob.x-p.x,mob.y-p.y)>550)return;
+      if(Math.hypot(mob.x-p.x,mob.y-p.y)>attackRangeFor(p,cleanText(msg.skill,16)||'basic')){securityReject(p,'INVALID_RANGE');return}
       // anti-spam por (jogador,monstro): bloqueia macro/cliente adulterado
       // batendo no mesmo alvo rapido demais.
       const now=Date.now(),guard=state.hitGuard.get(mobId);
@@ -2648,24 +2747,21 @@ wss.on('connection', ws => {
         }
         return;
       }
-      // PvP: liberado fora da vila. O servidor nunca rastreia o HP do
-      // defensor -- reaproveita a mesma validacao de dano/cooldown do PvE
-      // (resolveAttackDamage) e manda o dano bruto pro alvo, que aplica a
-      // propria mitigacao (defesa/bloqueio/escudo) localmente, exatamente
-      // como ja faz contra ataques de monstro (hurtPlayer no cliente).
+      // PvP global: dano, mitigacao, HP e morte pertencem ao servidor.
       const map=mapEarly;if(map!==p.map||map==='vila')return;
       const targetId=cleanText(msg.targetId,64);if(!targetId||targetId===p.id)return;
-      let target=null;for(const other of clients.values())if(other.id===targetId&&other.map===map){target=other;break}
-      if(!target)return;
+      let target=null,targetWs=null;for(const [otherWs,other] of clients)if(other.id===targetId&&other.map===map){target=other;targetWs=otherWs;break}
+      if(!target||p.dead||target.dead||(target.charId&&activeCharacterSockets.get(target.charId)!==targetWs))return;
       if(p.userId&&target.userId){const pc=memberParty.get(p.userId),tc=memberParty.get(target.userId);if(pc&&pc===tc)return}
-      if(Math.hypot(target.x-p.x,target.y-p.y)>550)return;
+      if(Math.hypot(target.x-p.x,target.y-p.y)>attackRangeFor(p,cleanText(msg.skill,16)||'basic')){securityReject(p,'INVALID_RANGE');return}
       const state=mapState(map);
       const now=Date.now(),gk=p.id+'>'+targetId,lastHit=state.pvpGuard.get(gk);
       if(lastHit&&now-lastHit<80)return;
       const dmg=resolveAttackDamage(p,msg,now);
       if(!dmg)return;
       state.pvpGuard.set(gk,now);
-      broadcastMap(map,{type:'player_hit',map,targetId,attackerId:p.id,attackerName:p.name,dmg});
+      const result=applyGlobalPlayerDamage(target,dmg,now,secureRandom);if(!result)return;
+      broadcastMap(map,{type:'player_hit',map,targetId,attackerId:p.id,attackerName:p.name,dmg:result.damage,hp:result.hp,maxHp:result.maxHp,dead:result.dead,respawnAt:result.respawnAt});
     } else if (msg.type === 'projectile') {
       const map=cleanText(msg.map,24),id=cleanText(msg.id,64),kind=cleanText(msg.kind,12);
       if(map!==p.map||!isAllowedMap(map)||!id||!['arrow','bolt','leaf','fire'].includes(kind))return;
@@ -2690,7 +2786,7 @@ wss.on('connection', ws => {
       for (const [ws2,p2] of clients) if (p2.guildId===p.guildId && ws2.readyState===WebSocket.OPEN) ws2.send(payload);
     }
   });
-  ws.on('close', () => { const p=clients.get(ws);if(p){const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member)member.online=false;
+  ws.on('close', () => { const p=clients.get(ws);if(p){if(p.charId&&activeCharacterSockets.get(p.charId)===ws){activeCharacterSockets.delete(p.charId);characterRuntime.set(p.charId,{map:p.map,x:p.x,y:p.y,hp:p.hp,dead:p.dead,respawnAt:p.respawnAt,skillCd:p.skillCd||{},basicCdUntil:p.basicCdUntil||0,lastDamageAt:p.lastDamageAt||0,savedAt:Date.now()})}const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member)member.online=false;
     // Fase 5.7: desconectar NAO termina a partida nem pontua morte -- so
     // marca offline (mesma regra do World Boss). O personagem continua
     // pertencendo a instancia; reconectar com o mesmo userId/charId acha
@@ -2708,6 +2804,8 @@ wss.on('connection', ws => {
 setInterval(()=>{
   const now=Date.now();
   for(const state of maps.values())for(const mob of state.mobs.values())if(mob.dead&&mob.respawnAt&&now>=mob.respawnAt){mob.dead=false;mob.hp=mob.maxhp;mob.respawnAt=0;mob.x=Number.isFinite(mob.sx)?mob.sx:(Number(mob.x)||0);mob.y=Number.isFinite(mob.sy)?mob.sy:(Number(mob.y)||0);mob.state='idle';mob.tgt=null;mob.cd=0;mob.ret=0;mob.t=0;mob.hit=false;broadcastMap(state.id,{type:'mob_state',map:state.id,mob,killerId:null})}
+  for(const [ws,p] of clients){if(WORLD_BOSS_MAP_RE.test(p.map)||TVT_MAP_RE.test(p.map))continue;if(p.dead&&p.respawnAt&&now>=p.respawnAt){p.dead=false;p.respawnAt=0;p.map='vila';p.x=720;p.y=1258;p.hp=Math.ceil(p.maxHp*.5);p.lastMoveAt=now;send(ws,{type:'global_respawn',map:p.map,x:p.x,y:p.y,hp:p.hp,maxHp:p.maxHp})}else if(!p.dead&&p.hp<p.maxHp&&now-(p.lastDamageAt||0)>6000){const rate={guerreiro:2.52,druida:3.96,mago:2.16,arqueiro:2.7}[p.cls]||2;p.hp=Math.min(p.maxHp,p.hp+rate);send(ws,{type:'player_vitals',hp:p.hp,maxHp:p.maxHp,dead:false})}}
+  for(const [charId,runtime] of characterRuntime)if(now-runtime.savedAt>30*60*1000)characterRuntime.delete(charId);
   dungeonCleanupTick();
 },1000).unref();
 
@@ -2737,7 +2835,7 @@ const SLIME_TILE = 48; // = T no cliente (index.html)
 // morte de jogador) mais proximo de um monstro, dentre os presentes no mapa.
 function nearestPlayer(mob, present) {
   let best = null, bd = Infinity;
-  for (const pair of present) { const d = Math.hypot(pair[1].x - mob.x, pair[1].y - mob.y); if (d < bd) { bd = d; best = pair; } }
+  for (const pair of present) { if(pair[1].dead)continue;const d = Math.hypot(pair[1].x - mob.x, pair[1].y - mob.y); if (d < bd) { bd = d; best = pair; } }
   return best ? { ws: best[0], p: best[1], d: bd } : null;
 }
 const MOB_TARGET_LOCK_STATES = new Set(['wind','wind2','dash','slam','pounce','swoop','spit','blink','cast','gust','heal','leap','charge','meteor','recover']);
@@ -2815,7 +2913,7 @@ function stepSlime(mob, dt, present) {
   if (near && near.d < 30 && mob.cd <= 0) {
     mob.cd = 1.1;
     const stats = mobStats('slime', mob.lvl, false);
-    if (stats) send(near.ws, { type: 'mob_hit', map: mob.map, mobId: mob.id, dmg: stats.dmg });
+    if (stats) hitTarget([near.ws,near.p],mob,stats.dmg);
   }
   return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
 }
@@ -2863,7 +2961,7 @@ function stepGoblin(mob, dt, present) {
       if (mob.t <= 0) {
         if (mob.atk === 'dash') { mob.state = 'dash'; mob.t = mob.boss ? .3 : .24; }
         else {
-          if (target && Math.hypot(target[1].x - mob.x, (target[1].y - mob.y) * 1.15) < 80) send(target[0], { type: 'mob_hit', map: mob.map, mobId: mob.id, dmg: Math.round(st.dmg * 1.15) });
+          if (target && Math.hypot(target[1].x - mob.x, (target[1].y - mob.y) * 1.15) < 80) hitTarget(target,mob,st.dmg*1.15);
           mob.state = 'recover'; mob.t = 1.1; mob.cd = 1.6;
         }
       }
@@ -2871,7 +2969,7 @@ function stepGoblin(mob, dt, present) {
     case 'dash': {
       mob.t -= dt;
       moveMob(mob, mob.lx * 470 * dt, mob.ly * 470 * dt);
-      if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 34) { mob.hit = true; send(target[0], { type: 'mob_hit', map: mob.map, mobId: mob.id, dmg: st.dmg }); }
+      if (target && !mob.hit && Math.hypot(target[1].x - mob.x, target[1].y - mob.y) < 34) { mob.hit = true; hitTarget(target,mob,st.dmg); }
       if (mob.t <= 0) { mob.state = 'recover'; mob.t = mob.boss ? .75 : 1; mob.cd = 1.3; }
       break;
     }
@@ -2886,12 +2984,10 @@ function stepGoblin(mob, dt, present) {
   }
   return { id: mob.id, x: Math.round(mob.x), y: Math.round(mob.y), state: mob.state };
 }
-// Helper compartilhado: manda o dano bruto pro alvo (o cliente aplica
-// mitigacao via hurtPlayer(), igual PvP). delayedHit imita o tempo de voo
-// de um projetil (enemyShot no cliente) sem replicar visualmente o projetil
-// em si -- so preserva a janela de esquiva por tempo, nao a trajetoria.
-function hitTarget(target, mob, dmg) { if (target) send(target[0], { type: 'mob_hit', map: mob.map, mobId: mob.id, dmg: Math.round(dmg) }); }
-function delayedHit(target, mob, dmg, delayMs) { if (target) setTimeout(() => send(target[0], { type: 'mob_hit', map: mob.map, mobId: mob.id, dmg: Math.round(dmg) }), delayMs); }
+// Dano global de monstro e aplicado no runtime do servidor; o cliente so
+// renderiza o HP final. O atraso de projetil revalida sessao/mapa/alvo.
+function hitTarget(target, mob, dmg) { if (!target) return null;const [ws,p]=target;if(clients.get(ws)!==p||p.map!==mob.map||p.dead)return null;const result=applyGlobalPlayerDamage(p,dmg);if(result)send(ws,{type:'mob_hit',map:mob.map,mobId:mob.id,dmg:result.damage,hp:result.hp,maxHp:result.maxHp,dead:result.dead,respawnAt:result.respawnAt});return result; }
+function delayedHit(target, mob, dmg, delayMs) { if (target) setTimeout(() => hitTarget(target,mob,dmg),delayMs).unref(); }
 
 // ===== Fase 2, unidades 3-12: os 10 tipos restantes =====
 // Todas seguem o mesmo padrao de stepGoblin (mob.tgt trava o alvo ao entrar
@@ -3482,6 +3578,10 @@ module.exports = {
   grantItem, gearLevelForMob, rollGearDrop, applyGearDrops, GEAR_DROP_RATES, DROP_TYPES_BY_CLASS,
   // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   rollEnchantSuccess, applyEnchant, attemptEnchant,
+  // Fase 5.12 -- primitivas puras do runtime autoritativo:
+  resolveAttackDamage, applyGlobalPlayerDamage, mitigatePlayerDamage, consumeRuntimePotion,
+  validateMovement, allowedFieldTransition, allowPacket, attackRangeFor,
+  isAuthoritativeSocket, activeCharacterSockets,
   // Fase 5.5 -- agenda/lifecycle puro e manager runtime (sem Supabase):
   EVENT_DATA, eventManager, eventStatePayload,
   // Fase 5.6 -- World Boss (nucleo puro + runtime em memoria):

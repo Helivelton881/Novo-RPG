@@ -19,12 +19,12 @@ const DAMAGE_SKILLS=new Set(['spin','dash','roots','thorns','fireball','frost','
 const SKILL_CD_MS=Object.freeze({spin:5000,dash:4000,roots:9000,thorns:10000,fireball:4000,frost:7000,multi:4000,pierce:8000});
 function skillMul(id,r){return({spin:1.4+.3*(r-1),dash:1.2+.25*(r-1),roots:.8+.2*(r-1),thorns:.45+.1*(r-1),fireball:1.8+.4*(r-1),frost:1+.25*(r-1),multi:.75+.05*(r-1),pierce:2.2+.4*(r-1)})[id]||0}
 function finite(v,fallback=0){v=Number(v);return Number.isFinite(v)?v:fallback}
-function equipmentTotals(eq={}){let atk=0,def=0,hp=0,block=0;for(const it of Object.values(eq||{})){if(!it)continue;atk+=finite(it.atk);def+=finite(it.def);hp+=finite(it.hp);block+=finite(it.blk)}return{atk,def,hp,block}}
+function equipmentTotals(eq={}){let atk=0,def=0,hp=0,block=0,speed=0;for(const it of Object.values(eq||{})){if(!it)continue;atk+=finite(it.atk);def+=finite(it.def);hp+=finite(it.hp);block+=finite(it.blk);speed+=finite(it.spd)}return{atk,def,hp,block,speed}}
 function combatSnapshot({userId,charId,name,cls,lvl,save}){
   cls=CLASS_BASE[cls]?cls:'guerreiro';lvl=Math.max(1,Math.min(99,Math.round(finite(lvl,1))));const base=CLASS_BASE[cls],gear=equipmentTotals(save&&save.eq);
   const skills={};for(const id of CLASS_SKILLS[cls])skills[id]=Math.max(1,Math.min(3,Math.round(finite(save&&save.sk&&save.sk[id],1))));
   const weaponMul=cls==='guerreiro'?1.3:cls==='arqueiro'?1.2:1.15;
-  return Object.freeze({userId,charId,name:String(name||'Herói').slice(0,14),cls,lvl,skills,atk:Math.round(gear.atk*weaponMul),def:Math.round(base.def0+gear.def),maxHp:Math.max(50,Math.round(base.hp0+base.hpL*(lvl-1)+gear.hp)),block:Math.max(0,Math.min(.5,gear.block)),basicCdMs:BASIC_CD_MS[cls]});
+  return Object.freeze({userId,charId,name:String(name||'Herói').slice(0,14),cls,lvl,skills,atk:Math.round(gear.atk*weaponMul),def:Math.round(base.def0+gear.def),maxHp:Math.max(50,Math.round(base.hp0+base.hpL*(lvl-1)+gear.hp)),block:Math.max(0,Math.min(.5,gear.block)),speed:Math.max(0,Math.min(.8,gear.speed)),basicCdMs:BASIC_CD_MS[cls]});
 }
 function estimateWorldBossDps(p){
   const base=CLASS_BASE[p.cls]||CLASS_BASE.guerreiro,basic=Math.max(1,base.dmg0+base.dmgL*(p.lvl-1)+p.atk),basicDps=basic/(p.basicCdMs/1000);
