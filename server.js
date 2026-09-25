@@ -1556,6 +1556,22 @@ const ADMIN_PERMS = Object.freeze({
   support:   ['view_dashboard','search_players','view_guilds','view_events'],
 });
 function adminHasPerm(role, perm) { return !!(ADMIN_PERMS[role] || []).includes(perm); }
+// Hierarquia de cargo (corrigido apos revisao pre-merge, achado real):
+// nada impedia um moderator de banir/mutar/expulsar um admin ou o
+// proprio owner -- so a permissao nomeada (kick/ban/mute) era checada,
+// nunca o cargo do ALVO. Agora toda acao sobre outra conta exige que o
+// alvo tenha um cargo estritamente MENOR que o do ator (ou nenhum
+// cargo -- rank -1, sempre alvo valido). owner nunca e bloqueado agindo
+// sobre ninguem.
+const ADMIN_RANK = Object.freeze({owner:3, admin:2, moderator:1, support:0});
+async function targetAdminRank(userId) {
+  const rows = await supabase('admin_roles', {query:`?select=role&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
+  return rows[0] ? (ADMIN_RANK[rows[0].role] ?? 0) : -1;
+}
+async function canActOnTarget(actor, targetUserId) {
+  const targetRank = await targetAdminRank(targetUserId);
+  return targetRank < (ADMIN_RANK[actor.role] ?? -1);
+}
 async function resolveAdmin(req) {
   const user = await resolveUser(req);
   if (!user) return null;
@@ -1567,12 +1583,17 @@ function activeAmong(rows) {
   const now = Date.now();
   return rows.find(r => !r.revoked_at && (!r.expires_at || new Date(r.expires_at).getTime() > now)) || null;
 }
+// Achado na revisao pre-merge: limit=5 podia esconder um ban PERMANENTE
+// antigo atras de 5 bans/mutes temporarios mais recentes ja vencidos --
+// filtra revoked_at=is.null no proprio banco (so linhas ainda "abertas"
+// contam de verdade) antes de paginar, entao o limite so protege contra
+// um numero anormal de linhas abertas, nunca esconde a que importa.
 async function activeBanFor(userId) {
-  const rows = await supabase('player_bans', {query:`?select=id,reason,expires_at,revoked_at&user_id=eq.${encodeURIComponent(userId)}&order=created_at.desc&limit=5`});
+  const rows = await supabase('player_bans', {query:`?select=id,reason,expires_at,revoked_at&user_id=eq.${encodeURIComponent(userId)}&revoked_at=is.null&order=created_at.desc&limit=20`});
   return activeAmong(rows);
 }
 async function activeMuteFor(userId) {
-  const rows = await supabase('player_mutes', {query:`?select=id,reason,expires_at,revoked_at&user_id=eq.${encodeURIComponent(userId)}&order=created_at.desc&limit=5`});
+  const rows = await supabase('player_mutes', {query:`?select=id,reason,expires_at,revoked_at&user_id=eq.${encodeURIComponent(userId)}&revoked_at=is.null&order=created_at.desc&limit=20`});
   return activeAmong(rows);
 }
 // Lista de campos que NUNCA entram no audit log, mesmo que alguem passe
@@ -1600,11 +1621,11 @@ async function writeAdminAudit(actorUserId, action, {targetUserId, targetCharact
 // Fecha AGORA toda conexao WS ativa de uma conta -- usado por kick e como
 // efeito colateral de ban (nunca deixa quem acabou de ser banido
 // continuar jogando ate a proxima reconexao).
-function kickUserSockets(userId, code, reason) {
+function kickUserSockets(userId, code, reason, message) {
   const set = accountSockets.get(userId);
   if (!set) return 0;
   let n = 0;
-  for (const ws of [...set]) { try { ws.close(code, reason); n++; } catch { /* socket ja fechando */ } }
+  for (const ws of [...set]) { try { if (message) send(ws, message); ws.close(code, reason); n++; } catch { /* socket ja fechando */ } }
   return n;
 }
 async function handleAdmin(req, res, pathname) {
@@ -1620,10 +1641,16 @@ async function handleAdmin(req, res, pathname) {
     if (pathname === '/api/admin/dashboard' && req.method === 'GET') {
       if (!adminHasPerm(admin.role,'view_dashboard')) { json(res,403,{error:'Sem permissão'}); return true; }
       const onlineTotal = new Set([...clients.values()].filter(p=>p.authed).map(p=>p.userId)).size;
+      // Achado na revisao pre-merge: o dashboard mandava recentAudit pra
+      // QUALQUER cargo com view_dashboard (inclusive support, que nunca
+      // tem view_security_log) -- vazava o log de auditoria por uma
+      // rota que nao deveria expor isso. So busca/inclui quando o cargo
+      // realmente tem a permissao certa.
+      const canSeeAudit = adminHasPerm(admin.role,'view_security_log');
       const [bansOpen, mutesOpen, recentAudit] = await Promise.all([
         supabase('player_bans', {query:'?select=id,expires_at&revoked_at=is.null'}),
         supabase('player_mutes', {query:'?select=id,expires_at&revoked_at=is.null'}),
-        supabase('admin_audit_log', {query:'?select=id,action,actor_user_id,target_user_id,reason,created_at&order=created_at.desc&limit=25'}),
+        canSeeAudit ? supabase('admin_audit_log', {query:'?select=id,action,actor_user_id,target_user_id,reason,created_at&order=created_at.desc&limit=25'}) : Promise.resolve([]),
       ]);
       // ban/mute com prazo ja vencido ainda aparece como "revoked_at is
       // null" no banco (nunca reescrevemos a linha so por ela ter
@@ -1666,7 +1693,12 @@ async function handleAdmin(req, res, pathname) {
       if (!adminHasPerm(admin.role,'kick')) { json(res,403,{error:'Sem permissão'}); return true; }
       const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200)||'Sem motivo informado';
       if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
-      const n = kickUserSockets(targetUserId, 4004, 'Expulso por um administrador');
+      if (!(await canActOnTarget(admin, targetUserId))) { json(res,403,{error:'Não é possível agir sobre uma conta com cargo igual ou superior ao seu.'}); return true; }
+      // Achado na revisao pre-merge: kickUserSockets so fechava o
+      // socket, nunca avisava o cliente do motivo -- o jogador so via
+      // uma reconexao de 2.5s sem explicacao nenhuma. Manda a mensagem
+      // 'kicked' antes do close, pro cliente mostrar um aviso real.
+      const n = kickUserSockets(targetUserId, 4004, 'Expulso por um administrador', {type:'kicked', reason});
       await writeAdminAudit(admin.id, 'kick', {targetUserId, reason, metadata:{socketsClosed:n}});
       json(res,200,{ok:true, socketsClosed:n}); return true;
     }
@@ -1676,9 +1708,18 @@ async function handleAdmin(req, res, pathname) {
       const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200);
       const durationMs = Number.isFinite(Number(input.durationMs)) && Number(input.durationMs) > 0 ? Number(input.durationMs) : null;
       if (!targetUserId || !reason) { json(res,400,{error:'userId e reason obrigatórios'}); return true; }
+      if (!(await canActOnTarget(admin, targetUserId))) { json(res,403,{error:'Não é possível agir sobre uma conta com cargo igual ou superior ao seu.'}); return true; }
       const expiresAt = durationMs ? new Date(Date.now()+durationMs).toISOString() : null;
       await supabase('player_bans', {method:'POST', body:{user_id:targetUserId, reason, banned_by:admin.id, expires_at:expiresAt}, prefer:'return=minimal'});
-      const n = kickUserSockets(targetUserId, 4003, 'Banido');
+      // Achado na revisao pre-merge: banir so fechava o socket ativo, mas
+      // o token de sessao (ate 30 dias) continuava valido pra qualquer
+      // rota HTTP que nao exige WS aberto (Mercado, guilda, salvar
+      // personagem). Apaga TODAS as sessoes da conta na hora -- forca
+      // reautenticacao (que agora falha, ver o check de ban no login).
+      try { await supabase('sessions', {method:'DELETE', query:`?user_id=eq.${encodeURIComponent(targetUserId)}`}); } catch (err) { console.error('ban_session_purge_error', err.message); }
+      // Mesmo achado do kick acima -- manda 'banned' antes do close, pro
+      // cliente saber o motivo/prazo em vez de so tentar reconectar.
+      const n = kickUserSockets(targetUserId, 4003, 'Banido', {type:'banned', reason, expiresAt});
       await writeAdminAudit(admin.id, 'ban', {targetUserId, reason, metadata:{expiresAt, socketsClosed:n}});
       json(res,200,{ok:true}); return true;
     }
@@ -1697,6 +1738,7 @@ async function handleAdmin(req, res, pathname) {
       const input = await readJson(req), targetUserId = cleanText(input.userId,64), reason = cleanText(input.reason,200);
       const durationMs = Number.isFinite(Number(input.durationMs)) && Number(input.durationMs) > 0 ? Number(input.durationMs) : null;
       if (!targetUserId || !reason) { json(res,400,{error:'userId e reason obrigatórios'}); return true; }
+      if (!(await canActOnTarget(admin, targetUserId))) { json(res,403,{error:'Não é possível agir sobre uma conta com cargo igual ou superior ao seu.'}); return true; }
       const expiresAt = durationMs ? new Date(Date.now()+durationMs).toISOString() : null;
       await supabase('player_mutes', {method:'POST', body:{user_id:targetUserId, reason, muted_by:admin.id, expires_at:expiresAt}, prefer:'return=minimal'});
       // aplica em tempo real pra quem ja esta conectado -- nunca precisa
@@ -1727,7 +1769,21 @@ async function handleAdmin(req, res, pathname) {
       if (!adminHasPerm(admin.role,'manage_roles')) { json(res,403,{error:'Sem permissão'}); return true; }
       const input = await readJson(req), targetUserId = cleanText(input.userId,64), role = cleanText(input.role,16);
       if (!targetUserId || !Object.keys(ADMIN_PERMS).includes(role)) { json(res,400,{error:'userId e role válidos são obrigatórios'}); return true; }
-      await supabase('admin_roles', {method:'POST', query:'?on_conflict=user_id', body:{user_id:targetUserId, role, granted_by:admin.id}, prefer:'resolution=merge-duplicates,return=minimal'});
+      // withCharLock (mesmo mutex de sempre, reusado por uma chave fixa)
+      // serializa toda escrita em admin_roles dentro desta instancia --
+      // fecha a corrida entre "ler quantos owners existem" e "escrever"
+      // que duas chamadas concorrentes (grant+revoke, ou dois revokes)
+      // conseguiam explorar antes. So protege dentro desta instancia
+      // Node (mesma limitacao ja documentada de withCharLock/economia).
+      const result = await withCharLock('__admin_roles__', async () => {
+        const owners = await supabase('admin_roles', {query:'?select=user_id&role=eq.owner'});
+        if (role !== 'owner' && owners.length <= 1 && owners.some(o => o.user_id === targetUserId)) {
+          return {ok:false, error:'Não é possível rebaixar o último owner.'};
+        }
+        await supabase('admin_roles', {method:'POST', query:'?on_conflict=user_id', body:{user_id:targetUserId, role, granted_by:admin.id}, prefer:'resolution=merge-duplicates,return=minimal'});
+        return {ok:true};
+      });
+      if (!result.ok) { json(res,400,{error:result.error}); return true; }
       await writeAdminAudit(admin.id, 'role_grant', {targetUserId, metadata:{role}});
       json(res,200,{ok:true}); return true;
     }
@@ -1737,9 +1793,15 @@ async function handleAdmin(req, res, pathname) {
       if (!targetUserId) { json(res,400,{error:'userId obrigatório'}); return true; }
       // nunca deixa o ultimo owner se auto-revogar (ou ser revogado) --
       // travaria o painel inteiro sem ninguem pra conceder cargo de novo.
-      const owners = await supabase('admin_roles', {query:`?select=user_id&role=eq.owner`});
-      if (owners.length <= 1 && owners.some(o=>o.user_id===targetUserId)) { json(res,400,{error:'Não é possível remover o último owner.'}); return true; }
-      await supabase('admin_roles', {method:'DELETE', query:`?user_id=eq.${encodeURIComponent(targetUserId)}`});
+      // Mesmo lock de /api/admin/roles (POST) -- fecha a corrida de dois
+      // owners se revogando ao mesmo tempo.
+      const result = await withCharLock('__admin_roles__', async () => {
+        const owners = await supabase('admin_roles', {query:'?select=user_id&role=eq.owner'});
+        if (owners.length <= 1 && owners.some(o => o.user_id === targetUserId)) return {ok:false, error:'Não é possível remover o último owner.'};
+        await supabase('admin_roles', {method:'DELETE', query:`?user_id=eq.${encodeURIComponent(targetUserId)}`});
+        return {ok:true};
+      });
+      if (!result.ok) { json(res,400,{error:result.error}); return true; }
       await writeAdminAudit(admin.id, 'role_revoke', {targetUserId});
       json(res,200,{ok:true}); return true;
     }
@@ -2572,8 +2634,15 @@ async function startTvtEvent(event,registrations){
       if(member.kind==='ai'){
         // Fase 5.16: spawna a entidade de IA de verdade (runtime) ja no
         // slot atribuido -- nunca uma conta persistente, nunca aparece
-        // em reserva humana nenhuma.
-        if(aiEntities.size>=AI_MAX_POPULATION)continue;
+        // em reserva humana nenhuma. NUNCA respeita AI_MAX_POPULATION
+        // aqui (bug corrigido apos revisao pre-merge): esse membro ja
+        // foi contado em balanceTvtTeams/instance.players antes deste
+        // loop -- pular o spawn aqui criaria um "fantasma" (ocupa vaga
+        // de time, nunca se move/luta). Preenchimento de fila e uma
+        // resposta direta a um pedido humano real, sempre tem
+        // prioridade sobre o teto ambiental de IA de campo (que
+        // continua valendo em aiPopulationTick); alem disso ja e
+        // limitado sozinho por TVT_MAX_PLAYERS.
         const personality=AI_PERSONALITY_KINDS[Math.floor(Math.random()*AI_PERSONALITY_KINDS.length)];
         const entity={
           id:member.charId,kind:'ai',name:member.name,cls:member.cls,lvl:member.lvl,map:instance.mapId,
@@ -3005,6 +3074,24 @@ function sendDungeonStateTo(ws, state, extra) {
 // desbloqueio validado no banco (nunca herda do lider). Membros que nao
 // estavam online no momento do start simplesmente ficam de fora (late
 // join depois disso nao entra nessa instancia -- por design).
+// Achado na revisao pre-merge: um lider de Party podia efetivamente
+// "sequestrar" um membro que ja estivesse numa partida de TvT/World
+// Boss ativa (ou ja em outra masmorra de zona diferente), teleportando
+// ele no meio da outra partida sem nenhuma checagem. Nunca a mesma
+// zona que o proprio charId esta tentando (re)entrar agora --
+// ownedDungeonInstance ja trata reconexao normal antes de qualquer
+// chamada a esta funcao.
+function charBusyElsewhere(charId, zone) {
+  if (tvtByChar.get(charId)) return true;
+  if (worldBossByChar.get(charId)) return true;
+  const owned = dungeonByOwner.get(charId);
+  if (owned) for (const [dZone, dMapId] of owned) {
+    if (dZone === zone) continue;
+    const dState = maps.get(dMapId);
+    if (dState && dState.isDungeon) return true;
+  }
+  return false;
+}
 async function handleDungeonEnter(ws, p, msg) {
   const zone = cleanText(msg.zone, 16);
   const cfg = DUNGEON_CFG[zone];
@@ -3037,9 +3124,9 @@ async function handleDungeonEnter(ws, p, msg) {
     if (inRealParty) {
       for (const userId of party.members.keys()) {
         const active = activeCharacterForUser(userId);
-        if (active) candidates.push({userId, charId: active.p.charId, cls: active.p.cls, ws: active.ws});
+        if (active && !charBusyElsewhere(active.p.charId, zone)) candidates.push({userId, charId: active.p.charId, cls: active.p.cls, ws: active.ws});
       }
-    } else {
+    } else if (!charBusyElsewhere(p.charId, zone)) {
       candidates.push({userId: p.userId, charId: p.charId, cls: p.cls, ws});
     }
 
@@ -3157,7 +3244,12 @@ async function formDungeonGroup(zone, group) {
       const row = rows[0]; if (!row) continue;
       const save = sanitizeSave(row.save, row.lvl);
       const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
-      if (unlocked) validMembers.push({userId, charId:e.charId, cls:e.cls});
+      // Mesmo achado de handleDungeonEnter: nunca pareia alguem que ja
+      // esta ocupado numa partida de TvT/World Boss/outra masmorra --
+      // simplesmente nao entra no grupo formado, sem erro (a fila
+      // continua com a entrada dele ate ele estar livre de novo, ou o
+      // proprio tick remove por outro motivo).
+      if (unlocked && !charBusyElsewhere(e.charId, zone)) validMembers.push({userId, charId:e.charId, cls:e.cls});
     } catch (err) { console.error('dungeon_queue_match_check_error', userId, err.message); }
   }
   if (!validMembers.length) return;
@@ -3179,8 +3271,14 @@ async function formDungeonGroup(zone, group) {
   const aiFillMembers = [];
   if (anyAllowAiFill && validMembers.length < DUNGEON_QUEUE_PREFERRED_SIZE) {
     const [lo, hi] = aiZoneLevelRange(zone);
+    // NUNCA respeita AI_MAX_POPULATION aqui (bug corrigido apos revisao
+    // pre-merge): em producao, a IA de campo ambiental fica permanentemente
+    // no teto (aiPopulationTick sempre repovoa) -- se o preenchimento de
+    // fila respeitasse o mesmo teto, allowAiFill nunca funcionaria de
+    // verdade. Resposta direta a um pedido humano real sempre tem
+    // prioridade; alem disso ja e limitado sozinho a no maximo 4 (slots).
     const slots = DUNGEON_QUEUE_PREFERRED_SIZE - validMembers.length;
-    for (let i = 0; i < slots && aiEntities.size < AI_MAX_POPULATION; i++) {
+    for (let i = 0; i < slots; i++) {
       const haveClasses = new Set([...validMembers.map(m => m.cls), ...aiFillMembers.map(m => m.cls)]);
       const cls = AI_CLASS_POOL.find(c => !haveClasses.has(c)) || AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
       const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
@@ -3506,6 +3604,18 @@ function aiDoRespawn(ai, now) {
   aiTransition(ai, 'idle', now);
 }
 function aiStep(ai, now) {
+  // Fase 5.16 Tier 2 (bug corrigido apos revisao pre-merge): IA
+  // preenchendo TvT NUNCA passa pelo dead/respawnAt generico -- morte e
+  // respawn de TvT sao inteiramente governados por instance.players e
+  // TVT.tickTvtRespawns (o mesmo sistema autoritativo dos humanos).
+  // Antes desta checagem, aiDoTvt copiava tp.dead=true pra ai.dead mas
+  // nunca ai.respawnAt (fica em 0) -- no tick seguinte, ai.dead=true
+  // com respawnAt=0 sempre satisfaz now>=respawnAt, entao aiDoRespawn
+  // rodava IMEDIATAMENTE (antes do respawn real do TvT), resetava fsm
+  // pra 'idle'/'wander' e a IA nunca mais lutava depois da primeira
+  // morte. aiDoTvt ja checa tp.dead sozinho e so espera -- nunca tenta
+  // se ressuscitar por conta propria.
+  if (ai.slot && ai.slot.kind === 'tvt') { aiDoTvt(ai, now); return; }
   if (ai.dead) { if (now >= ai.respawnAt) aiDoRespawn(ai, now); return; }
   switch (ai.fsm) {
     case 'wander': aiDoWander(ai, now); return;
@@ -3521,6 +3631,9 @@ function aiStep(ai, now) {
     // inimigo, nunca mob). 'party'/'queue' sao marcadores transitorios
     // curtos (preenchimento em andamento), nunca um estado "de trabalho"
     // continuo -- nunca deveriam ser observados por mais de um tick.
+    // 'tvt' normalmente nunca chega aqui (o guard de ai.slot.kind==='tvt'
+    // no topo da funcao ja intercepta antes do switch) -- mantido so
+    // como retaguarda defensiva caso fsm='tvt' exista sem slot.kind='tvt'.
     case 'dungeon': aiDoIdle(ai, now); return;
     case 'tvt': aiDoTvt(ai, now); return;
     case 'party': case 'queue': return;
@@ -3567,7 +3680,17 @@ function aiDoTvt(ai, now) {
     return;
   }
   ai.moving = false;
-  TVT.resolveTvtIntent(instance, ai.id, {skill:'basic', targetId:nearest.charId}, now, secureRandom);
+  // Achado na revisao pre-merge: o resultado do ataque era descartado
+  // -- os jogadores so viam o dano da IA na proxima sincronizacao
+  // por acaso (a partida ainda terminava certo, tickTvt ja checa
+  // checkTvtEnd todo tick independente disso, mas o dano em si
+  // ficava invisivel em tempo real). Mesmo broadcast que o caminho de
+  // um humano ja faz (player_damage/TVT_MAP_RE).
+  const result = TVT.resolveTvtIntent(instance, ai.id, {skill:'basic', targetId:nearest.charId}, now, secureRandom);
+  if (result.ok) {
+    tvtPublicSync(instance);
+    if (result.kind === 'damage' && !result.evaded && result.blocked !== 'protection') broadcastMap(instance.mapId, {type:'tvt_hit', attackerId:ai.id, targetId:result.targetId, damage:result.damage, skill:result.skill, killed:!!result.killed});
+  }
 }
 // Roda junto do resto do tick de 1s (setInterval perto do fim do
 // arquivo) -- nunca um setInterval novo por entidade (zero timer pra

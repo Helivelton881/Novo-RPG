@@ -3169,6 +3169,26 @@ function netConnect(){
       clearTimeout(netRetry);
       showSessionReplacedModal();
     }
+    else if(m.type==='banned'){
+      // Fase 5.16 (achado na revisao pre-merge): o servidor ja mandava
+      // 'banned' no join e fechava com 4003, mas o cliente nunca tratava
+      // essa mensagem -- reconectava a cada 2.5s pra sempre. Mesmo
+      // padrao terminal do Hotfix 5.12.1 (sessionReplaced): nunca
+      // reconecta, mostra o motivo/prazo real, OK volta pro login.
+      sessionReplaced=true;
+      clearTimeout(netRetry);
+      const t=$('#sessionReplacedText');
+      if(t)t.textContent='Sua conta foi banida.'+(m.reason?(' Motivo: '+m.reason):'')+(m.expiresAt?(' Até '+new Date(m.expiresAt).toLocaleString('pt-BR')+'.'):' (permanente).');
+      showSessionReplacedModal();
+    }
+    else if(m.type==='kicked'){
+      // Kick nunca impede reconectar depois (diferente de ban) -- so
+      // avisa o motivo antes do onclose reagendar a reconexao normal.
+      toast('Você foi expulso por um administrador'+(m.reason?(': '+m.reason):'')+'.');
+    }
+    else if(m.type==='muted'){
+      toast('Você está impedido de conversar no chat'+(m.reason?(': '+m.reason):'')+'.');
+    }
     else if(m.type==='dungeon_reward'){
       // Fase 5.2: recompensa de mob/chefe de masmorra -- sempre autoritativa
       // do servidor (ouro/gema/pocao/itens), nunca calculada aqui. bag/eq
@@ -3182,9 +3202,20 @@ function netConnect(){
       if(m.dropLost)toast('Mochila cheia — equipamento '+GEAR_DATA.RARITY[m.dropLost.rarity].label+' não foi coletado.');
     }
   };
-  NET.onclose=()=>{
+  NET.onclose=(ev)=>{
     NET_ID=null;NET_SESSION='';NET_MAP='';REMOTE.clear();
     if(sessionReplaced){netLabel('Sessão encerrada',false);return} // Hotfix 5.12.1: nunca reconecta nesse caso
+    // Fase 5.16 (achado na revisao pre-merge): rede de seguranca pelo
+    // codigo de fechamento -- mesmo que a mensagem 'banned' tenha se
+    // perdido numa corrida entre o send() do servidor e o close(), o
+    // codigo 4003 sozinho ja e suficiente pra nunca reconectar um banido.
+    if(ev&&ev.code===4003){
+      sessionReplaced=true;
+      const t=$('#sessionReplacedText');
+      if(t)t.textContent='Sua conta foi banida.';
+      showSessionReplacedModal();
+      return;
+    }
     netLabel('Reconectando...',false);clearTimeout(netRetry);netRetry=setTimeout(netConnect,2500);
   };
   NET.onerror=()=>NET.close();
