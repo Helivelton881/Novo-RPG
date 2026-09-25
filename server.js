@@ -2542,6 +2542,10 @@ async function handleWsJoin(ws, msg) {
         break;
       }
     }
+    // Fase 5.13.2: reconectar dentro da tolerancia de desconexao da fila
+    // de matchmaking limpa o disconnectedAt -- volta a valer pra formar
+    // grupo de novo, sem perder a posicao/tempo de espera acumulado.
+    if(p.userId){const qz=userQueueZone.get(p.userId);const qe=qz&&dungeonQueue.get(qz)?.get(p.userId);if(qe)qe.disconnectedAt=0}
     broadcast({type:'player_join', player:publicPlayer(p)}, ws);
   } finally { joining.delete(ws); }
 }
@@ -2598,6 +2602,7 @@ async function handleDungeonEnter(ws, p, msg) {
   const cfg = DUNGEON_CFG[zone];
   if (!cfg) { send(ws, {type:'dungeon_error', error:'Masmorra inválida'}); return; }
   if (!p.authed || !p.userId || !p.charId) { send(ws, {type:'dungeon_error', error:'Entre com uma conta online para acessar masmorras'}); return; }
+  dungeonQueueLeaveInternal(p.userId); // entrada manual/direta cancela qualquer fila de matchmaking pendente (nunca fica em dois estados ao mesmo tempo)
   try {
     // Ja pertence a uma instancia ativa dessa zona (solo ou party, criada
     // por ele ou por outro lider)? Reusa -- reconexao/reenvio de
@@ -2661,6 +2666,146 @@ async function handleDungeonEnter(ws, p, msg) {
     send(ws, {type:'dungeon_error', error:'Não foi possível entrar na masmorra. Tente novamente.'});
   }
 }
+
+// ===== Fase 5.13.2: Matchmaking de Dungeon =====
+// Fila em memoria (efemera, como Party/masmorra -- sem tabela), somente
+// humanos: preenchimento por IA fica pra Fase 5.16 (o campo allowAiFill
+// so e guardado aqui, nunca lido por nada que spawne IA nesta fase).
+// Chaveada por userId (mesma granularidade de Party/activeCharacterForUser),
+// nunca charId -- um personagem "e" a conta ativa no momento do match.
+const DUNGEON_QUEUE_PREFERRED_SIZE = 4;
+const DUNGEON_QUEUE_FALLBACK_3_MS = 25000; // so 3 na fila ha esse tempo -> fecha com 3
+const DUNGEON_QUEUE_FALLBACK_2_MS = 45000; // so 2 na fila ha esse tempo -> fecha com 2
+const DUNGEON_QUEUE_FALLBACK_SOLO_MS = 60000; // sozinho ha esse tempo E soloOptIn -> entra sozinho
+const DUNGEON_QUEUE_DISCONNECT_GRACE_MS = 20000; // desconectar na fila nao remove na hora (rede instavel) -- so depois desse prazo sem reconectar
+const dungeonQueue = new Map(); // zone -> Map<userId, {charId,cls,queuedAt,allowAiFill,soloOptIn,disconnectedAt}>
+const userQueueZone = new Map(); // userId -> zone (nunca duas entradas simultaneas pro mesmo usuario)
+function dungeonQueueLeaveInternal(userId) {
+  const zone = userQueueZone.get(userId);
+  if (zone) { const q = dungeonQueue.get(zone); if (q) { q.delete(userId); if (!q.size) dungeonQueue.delete(zone); } }
+  userQueueZone.delete(userId);
+}
+function dungeonQueueStatusPayload(userId) {
+  const zone = userQueueZone.get(userId);
+  const entry = zone && dungeonQueue.get(zone)?.get(userId);
+  if (!zone || !entry) return {type:'dungeon_queue_state', inQueue:false};
+  const q = dungeonQueue.get(zone);
+  const size = [...q.values()].filter(e => !e.disconnectedAt).length;
+  return {type:'dungeon_queue_state', inQueue:true, zone, queuedAt:entry.queuedAt, size, preferredSize:DUNGEON_QUEUE_PREFERRED_SIZE};
+}
+async function handleDungeonQueueJoin(ws, p, msg) {
+  const zone = cleanText(msg.zone, 16);
+  const cfg = DUNGEON_CFG[zone];
+  if (!cfg) { send(ws, {type:'dungeon_queue_error', error:'Masmorra inválida'}); return; }
+  if (!p.authed || !p.userId || !p.charId) { send(ws, {type:'dungeon_queue_error', error:'Entre com uma conta online para usar o matchmaking'}); return; }
+  try {
+    const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
+    const row = rows[0];
+    if (!row) { send(ws, {type:'dungeon_queue_error', error:'Personagem não encontrado'}); return; }
+    const save = sanitizeSave(row.save, row.lvl);
+    const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
+    if (!unlocked) { send(ws, {type:'dungeon_queue_error', error:'Região ainda não liberada'}); return; }
+  } catch (err) {
+    console.error('dungeon_queue_join_check_error', err.message);
+    send(ws, {type:'dungeon_queue_error', error:'Não foi possível entrar na fila. Tente novamente.'}); return;
+  }
+  dungeonQueueLeaveInternal(p.userId);
+  if (!dungeonQueue.has(zone)) dungeonQueue.set(zone, new Map());
+  dungeonQueue.get(zone).set(p.userId, {charId:p.charId, cls:p.cls, queuedAt:Date.now(), allowAiFill:!!msg.allowAiFill, soloOptIn:!!msg.soloOptIn, disconnectedAt:0});
+  userQueueZone.set(p.userId, zone);
+  send(ws, dungeonQueueStatusPayload(p.userId));
+}
+function handleDungeonQueueLeave(ws, p) {
+  if (p.userId) dungeonQueueLeaveInternal(p.userId);
+  send(ws, {type:'dungeon_queue_state', inQueue:false});
+}
+// Preferencia de diversidade de classe, sem bloquear indefinidamente: o
+// mais antigo da fila sempre entra (justica por ordem de chegada); depois
+// disso prioriza quem tem uma classe ainda nao escolhida no grupo, e so
+// preenche o resto com quem sobrar (mais antigo primeiro) se a diversidade
+// se esgotar -- nunca deixa o grupo incompleto so por falta de variedade.
+function dungeonQueuePickGroup(entries, n) {
+  const picked = [entries[0]];
+  const usedClasses = new Set([entries[0][1].cls]);
+  const rest = entries.slice(1);
+  for (let i = 0; i < rest.length && picked.length < n; i++) {
+    if (!usedClasses.has(rest[i][1].cls)) { picked.push(rest[i]); usedClasses.add(rest[i][1].cls); rest.splice(i, 1); i--; }
+  }
+  for (let i = 0; i < rest.length && picked.length < n; i++) picked.push(rest[i]);
+  return picked;
+}
+// Fecha um grupo encontrado pelo matchmaking: revalida desbloqueio de
+// CADA membro no banco (o check da entrada na fila pode ter ficado
+// velho), monta uma Party de verdade pra eles (reusa o mesmo sistema da
+// Fase 5.13.1 -- nunca uma estrutura paralela; membro que já estivesse
+// numa Party manual é desligado dela, o pareamento sempre monta um grupo
+// novo só pra essa partida) e entra na masmorra pelo mesmo
+// buildDungeonInstance/sendDungeonStateTo de sempre.
+async function formDungeonGroup(zone, group) {
+  const validMembers = [];
+  for (const [userId, e] of group) {
+    try {
+      const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(e.charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
+      const row = rows[0]; if (!row) continue;
+      const save = sanitizeSave(row.save, row.lvl);
+      const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
+      if (unlocked) validMembers.push({userId, charId:e.charId, cls:e.cls});
+    } catch (err) { console.error('dungeon_queue_match_check_error', userId, err.message); }
+  }
+  if (!validMembers.length) return;
+  if (validMembers.length > 1) {
+    for (const m of validMembers) leaveParty(m.userId);
+    let code; do { code = genPartyCode(); } while (parties.has(code));
+    const membersMap = new Map();
+    for (const m of validMembers) { const active = activeCharacterForUser(m.userId); membersMap.set(m.userId, (active && active.p.name) || 'Aventureiro'); }
+    parties.set(code, {ownerId: validMembers[0].userId, members: membersMap});
+    for (const m of validMembers) memberParty.set(m.userId, code);
+  }
+  const state = buildDungeonInstance(zone, validMembers);
+  if (!state) return;
+  for (const m of validMembers) {
+    rememberDungeonInstance(m.charId, zone, state.id);
+    const memberWs = wsForChar(m.charId);
+    if (memberWs) {
+      const memberP = clients.get(memberWs); if (memberP) memberP.map = state.id;
+      send(memberWs, {type:'dungeon_queue_matched', zone, size:validMembers.length});
+      sendDungeonStateTo(memberWs, state, validMembers.length > 1 ? {party:true} : undefined);
+    }
+  }
+}
+// Roda junto do resto da limpeza periodica (ver setInterval perto do fim
+// do arquivo). A cada tick: remove quem excedeu a tolerancia de
+// desconexao, depois tenta fechar o maior grupo viavel por zona -- 4 na
+// hora se ja tiver gente suficiente, ou 3/2/1 (solo so com opt-in) assim
+// que o respectivo prazo de fallback for atingido, medido a partir de
+// quem espera ha mais tempo (fila = ordem de chegada).
+function dungeonQueueTick() {
+  const now = Date.now();
+  for (const [zone, q] of [...dungeonQueue]) {
+    for (const [userId, e] of [...q]) {
+      if (e.disconnectedAt && now - e.disconnectedAt > DUNGEON_QUEUE_DISCONNECT_GRACE_MS) { q.delete(userId); userQueueZone.delete(userId); }
+    }
+    if (!q.size) { dungeonQueue.delete(zone); continue; }
+    const entries = [...q.entries()].filter(([, e]) => !e.disconnectedAt).sort((a, b) => a[1].queuedAt - b[1].queuedAt);
+    while (entries.length) {
+      const waited = now - entries[0][1].queuedAt;
+      let targetSize = 0;
+      if (entries.length >= DUNGEON_QUEUE_PREFERRED_SIZE) targetSize = DUNGEON_QUEUE_PREFERRED_SIZE;
+      else if (entries.length === 3 && waited >= DUNGEON_QUEUE_FALLBACK_3_MS) targetSize = 3;
+      else if (entries.length === 2 && waited >= DUNGEON_QUEUE_FALLBACK_2_MS) targetSize = 2;
+      else if (entries.length === 1 && entries[0][1].soloOptIn && waited >= DUNGEON_QUEUE_FALLBACK_SOLO_MS) targetSize = 1;
+      if (!targetSize) break;
+      const group = dungeonQueuePickGroup(entries, targetSize);
+      for (const [userId] of group) {
+        q.delete(userId); userQueueZone.delete(userId);
+        const i = entries.findIndex(e => e[0] === userId); if (i >= 0) entries.splice(i, 1);
+      }
+      formDungeonGroup(zone, group).catch(err => console.error('dungeon_queue_form_error', err.message));
+    }
+    if (!q.size) dungeonQueue.delete(zone);
+  }
+}
+
 wss.on('connection', ws => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
@@ -2672,7 +2817,7 @@ wss.on('connection', ws => {
     if (!p) return;
     if(!isAuthoritativeSocket(p.charId,ws)){securityReject(p,'STALE_SESSION');return}
     if(p.authed&&['mob_damage','player_damage','cast_skill','state'].includes(msg.type)&&['atk','damage','hp','maxHp','sk'].some(k=>Object.prototype.hasOwnProperty.call(msg,k)))securityReject(p,'FORGED_COMBAT');
-    const packetPolicy={state:[35,1000],mob_damage:[16,1000],player_damage:[16,1000],cast_skill:[10,1000],event_register:[4,5000],event_unregister:[4,5000],dungeon_enter:[3,5000]};
+    const packetPolicy={state:[35,1000],mob_damage:[16,1000],player_damage:[16,1000],cast_skill:[10,1000],event_register:[4,5000],event_unregister:[4,5000],dungeon_enter:[3,5000],dungeon_queue_join:[4,5000],dungeon_queue_leave:[4,5000]};
     if(packetPolicy[msg.type]&&!allowPacket(p,msg.type,...packetPolicy[msg.type]))return;
     if (msg.type === 'event_status') {
       send(ws,eventStatePayload(p));
@@ -2728,6 +2873,10 @@ wss.on('connection', ws => {
       broadcast({type:'state',player:publicPlayer(p)},ws);
     } else if (msg.type === 'dungeon_enter') {
       await handleDungeonEnter(ws, p, msg);
+    } else if (msg.type === 'dungeon_queue_join') {
+      await handleDungeonQueueJoin(ws, p, msg);
+    } else if (msg.type === 'dungeon_queue_leave') {
+      handleDungeonQueueLeave(ws, p);
     } else if (msg.type === 'map_join') {
       const map=cleanText(msg.map,24);if(!isAllowedMap(map)||map!==p.map)return;
       const state=mapState(map),defs=Array.isArray(msg.mobs)?msg.mobs.slice(0,120):[];
@@ -2951,6 +3100,12 @@ wss.on('connection', ws => {
     // World Boss/TvT). Reconectar acha a mesma instancia de novo (ver
     // bloco de reconexao em handleWsJoin).
     if(p.charId){const dOwned=dungeonByOwner.get(p.charId);if(dOwned)for(const dMapId of dOwned.values()){const dState=maps.get(dMapId);const dMember=dState&&dState.members.get(p.charId);if(dMember){dMember.online=false;break}}}
+    // Fase 5.13.2: cair da fila de matchmaking nao remove na hora --
+    // marca disconnectedAt e da uma tolerancia (DUNGEON_QUEUE_DISCONNECT_
+    // GRACE_MS) pra reconectar sem perder a posicao; dungeonQueueTick
+    // remove de vez so depois do prazo, e nunca forma grupo com quem
+    // esta desconectado nesse meio-tempo.
+    if(p.userId){const qz=userQueueZone.get(p.userId);const qe=qz&&dungeonQueue.get(qz)?.get(p.userId);if(qe)qe.disconnectedAt=Date.now()}
     clients.delete(ws);if(p.userId){const s=accountSockets.get(p.userId);if(s){s.delete(ws);if(!s.size)accountSockets.delete(p.userId)}}broadcast({type:'player_leave',id:p.id})} });
 });
 
@@ -2966,6 +3121,7 @@ setInterval(()=>{
   for(const [ws,p] of clients){if(WORLD_BOSS_MAP_RE.test(p.map)||TVT_MAP_RE.test(p.map))continue;if(p.dead&&p.respawnAt&&now>=p.respawnAt){p.dead=false;p.respawnAt=0;p.map='vila';p.x=720;p.y=1258;p.hp=Math.ceil(p.maxHp*.5);p.lastMoveAt=now;send(ws,{type:'global_respawn',map:p.map,x:p.x,y:p.y,hp:p.hp,maxHp:p.maxHp})}else if(!p.dead&&p.hp<p.maxHp&&now-(p.lastDamageAt||0)>6000){const rate={guerreiro:2.52,druida:3.96,mago:2.16,arqueiro:2.7}[p.cls]||2;p.hp=Math.min(p.maxHp,p.hp+rate);send(ws,{type:'player_vitals',hp:p.hp,maxHp:p.maxHp,dead:false})}}
   for(const [charId,runtime] of characterRuntime)if(now-runtime.savedAt>30*60*1000)characterRuntime.delete(charId);
   dungeonCleanupTick();
+  dungeonQueueTick();
 },1000).unref();
 
 setInterval(()=>{
@@ -3733,6 +3889,10 @@ module.exports = {
   startingSave, ECONOMY_LOCK_FIELDS, createDungeonInstance, dungeonCleanupTick,
   // Fase 5.13.1 -- masmorra em party (nucleo puro, sem HTTP/WS/Supabase):
   buildDungeonInstance, dungeonMemberEligible, DUNGEON_ELIGIBLE_IDLE_MS,
+  // Fase 5.13.2 -- matchmaking de masmorra (nucleo puro + runtime em memoria):
+  dungeonQueue, userQueueZone, dungeonQueueTick, dungeonQueuePickGroup, dungeonQueueLeaveInternal,
+  DUNGEON_QUEUE_PREFERRED_SIZE, DUNGEON_QUEUE_FALLBACK_3_MS, DUNGEON_QUEUE_FALLBACK_2_MS,
+  DUNGEON_QUEUE_FALLBACK_SOLO_MS, DUNGEON_QUEUE_DISCONNECT_GRACE_MS,
   moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):
