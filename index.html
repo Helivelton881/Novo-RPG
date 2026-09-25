@@ -800,10 +800,21 @@ function whiteOf(img){const c=document.createElement('canvas');c.width=img.width
 /* ================= carregar imagens ================= */
 const IMG={};
 let DUN_IMG=null;
+// Fase — Dungeon Asset Pack (Covil dos Goblins): atlas empacotado a partir
+// do pacote enviado (tileset+props reais, recortados e reempacotados num
+// unico PNG -- ver assets/dungeon-goblin-atlas.{png,json}). So essa UMA
+// masmorra (theme==='floresta') usa render por tile de verdade; as outras
+// 6 continuam 100% no sistema procedural existente (SP.*/DUNGEON_THEME_KIT),
+// intocado. Mesmo padrao de fallback gracioso do DUN_IMG: se o atlas falhar
+// ao carregar, paintGoblinDungeonTiles/decorateGoblinDungeon simplesmente
+// nao desenham nada extra (checam DUN2_IMG antes de tudo) e a masmorra cai
+// de volta pro visual procedural antigo -- nunca uma tela quebrada.
+let DUN2_IMG=null;
 const loadImg = src => new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=src});
 async function loadAssets(){
   await Promise.all(Object.keys(SPR).map(async k=>{IMG[k]=await loadImg(SPR[k].img)}));
   try{DUN_IMG=await loadImg('./tileset-masmorras-original.png')}catch(e){console.warn('Tileset das masmorras indisponível; usando cenário procedural.',e)}
+  try{DUN2_IMG=await loadImg('./assets/dungeon-goblin-atlas.png')}catch(e){console.warn('Atlas do Covil dos Goblins indisponível; usando cenário procedural.',e)}
 }
 
 /* ================= construção do mundo ================= */
@@ -6445,6 +6456,307 @@ function decorateMasmorra(w,rooms,theme,pr){
   }
   statics.sort((a,b)=>a.sy-b.sy);
 }
+// ===================================================================
+// COVIL DOS GOBLINS -- REWORK VISUAL COMPLETO (Dungeon Asset Pack)
+// ===================================================================
+// Pedido explicito do usuario: nao um reskin do sistema procedural
+// (SP.*/DUNGEON_THEME_KIT/paintGround) acima -- um pipeline de tile de
+// VERDADE, com imagens reais recortadas do pacote enviado (tileset +
+// props), reempacotadas num unico atlas (assets/dungeon-goblin-atlas.png,
+// gerado por script a partir do pacote original -- ver
+// assets/dungeon-goblin-atlas.json pros rects exatos). SO esta masmorra
+// (theme==='floresta', a unica pedida -- "Covil dos Goblins" bate exato
+// com o titulo do pacote) usa este caminho; as outras 6 continuam 100%
+// com decorateMasmorra/paintGround de sempre, intocadas.
+//
+// REGRA ABSOLUTA (visual == colisao == runtime): nada aqui inventa
+// geometria nova. rooms/layout.rects continuam vindo 100% de
+// DUNGEON_GEN.dungeonLayout() (Fase 5.13/5.16.3, servidor e cliente
+// compartilham a mesma fonte via game-data/dungeon-generation.js) --
+// estas funcoes so LEEM esse mesmo layout e o mesmo kind[]/kPx que a
+// colisao ja usa (buildMasmorra continua chamando addBlock(layout.rects)
+// exatamente como antes) e desenham PIXELS em cima. Nenhuma parede visual
+// existe em lugar nenhum que nao seja tambem um rect de colisao real.
+const DUN2_ATLAS_RECTS = {
+  door_arch_open: {x:789,y:457,w:125,h:124},
+  door_gate_iron: {x:1049,y:457,w:114,h:123},
+  door_wood: {x:234,y:594,w:88,h:114},
+  floor_clean_a: {x:485,y:712,w:83,h:83},
+  floor_clean_b: {x:570,y:712,w:84,h:83},
+  floor_clean_c: {x:656,y:712,w:88,h:83},
+  floor_dark_a: {x:746,y:712,w:85,h:83},
+  floor_dark_b: {x:833,y:712,w:86,h:83},
+  floor_dark_c: {x:921,y:712,w:84,h:83},
+  floor_dark_d: {x:2,y:712,w:88,h:86},
+  floor_moss_a: {x:1007,y:712,w:86,h:83},
+  floor_moss_b: {x:1149,y:594,w:86,h:88},
+  floor_moss_c: {x:1237,y:594,w:85,h:87},
+  floor_moss_d: {x:1324,y:594,w:86,h:87},
+  floor_moss_e: {x:1412,y:594,w:85,h:87},
+  floor_rubble_a: {x:772,y:594,w:79,h:91},
+  floor_rubble_b: {x:92,y:712,w:84,h:86},
+  floor_rubble_c: {x:178,y:712,w:83,h:86},
+  floor_rubble_d: {x:263,y:712,w:84,h:86},
+  p_altar: {x:476,y:289,w:225,h:149},
+  p_banner_a: {x:2,y:2,w:121,h:285},
+  p_banner_b: {x:125,y:2,w:88,h:259},
+  p_banner_c: {x:215,y:2,w:99,h:234},
+  p_bookshelf_a: {x:652,y:2,w:152,h:186},
+  p_bookshelf_b: {x:1466,y:2,w:120,h:169},
+  p_brazier: {x:989,y:2,w:73,h:173},
+  p_candle: {x:425,y:800,w:35,h:69},
+  p_candle2: {x:1095,y:712,w:57,h:83},
+  p_chain_a: {x:756,y:457,w:31,h:126},
+  p_chain_b: {x:485,y:2,w:73,h:192},
+  p_chandelier: {x:1020,y:289,w:139,h:144},
+  p_chest_closed: {x:2,y:594,w:145,h:116},
+  p_chest_gold: {x:1165,y:457,w:109,h:122},
+  p_chest_ornate: {x:1499,y:594,w:90,h:87},
+  p_cloth_drape: {x:1154,y:712,w:146,h:81},
+  p_cobweb_a: {x:1216,y:2,w:113,h:171},
+  p_cobweb_b: {x:387,y:2,w:96,h:193},
+  p_crystal_pedestal: {x:836,y:289,w:61,h:146},
+  p_door_bars_a: {x:703,y:289,w:131,h:147},
+  p_door_bars_b: {x:198,y:457,w:114,h:134},
+  p_door_wood_arch: {x:899,y:289,w:119,h:146},
+  p_gate_fence: {x:2,y:457,w:115,h:135},
+  p_gate_square: {x:611,y:594,w:95,h:105},
+  p_gate_window: {x:1432,y:712,w:86,h:75},
+  p_grave_arch: {x:401,y:457,w:80,h:132},
+  p_grave_pointed: {x:54,y:289,w:99,h:162},
+  p_grave_round: {x:531,y:594,w:78,h:112},
+  p_lantern: {x:2,y:289,w:50,h:166},
+  p_lectern: {x:1415,y:289,w:76,h:138},
+  p_mushroom_blue: {x:1073,y:594,w:74,h:89},
+  p_mushroom_orange: {x:128,y:800,w:85,h:72},
+  p_mushroom_red: {x:349,y:712,w:134,h:85},
+  p_pillar_a: {x:338,y:289,w:76,h:159},
+  p_pillar_b: {x:119,y:457,w:77,h:134},
+  p_pillar_c: {x:155,y:289,w:69,h:161},
+  p_pillar_d: {x:416,y:289,w:58,h:151},
+  p_pillar_e: {x:226,y:289,w:110,h:160},
+  p_planks_broken: {x:916,y:457,w:131,h:124},
+  p_rubble_a: {x:629,y:800,w:35,h:45},
+  p_rubble_b: {x:1493,y:289,w:82,h:137},
+  p_rubble_c: {x:318,y:800,w:105,h:70},
+  p_rubble_d: {x:1064,y:2,w:150,h:172},
+  p_sarcophagus: {x:1161,y:289,w:252,h:141},
+  p_shrine_relief: {x:884,y:2,w:103,h:174},
+  p_skull_bones_small: {x:215,y:800,w:101,h:71},
+  p_skull_bones_wide: {x:2,y:800,w:124,h:74},
+  p_statue_a: {x:806,y:2,w:76,h:178},
+  p_statue_b: {x:560,y:2,w:90,h:190},
+  p_table_skull: {x:324,y:594,w:205,h:113},
+  p_tapestry: {x:621,y:457,w:133,h:127},
+  p_throne: {x:1331,y:2,w:133,h:171},
+  p_torch: {x:316,y:2,w:69,h:195},
+  p_urn_pair: {x:483,y:457,w:136,h:128},
+  p_urn_single: {x:929,y:594,w:60,h:91},
+  platform_a: {x:1389,y:457,w:101,h:119},
+  platform_b: {x:149,y:594,w:83,h:115},
+  rug_tile_a: {x:584,y:800,w:43,h:51},
+  rug_tile_b: {x:314,y:457,w:85,h:132},
+  rug_tile_c: {x:462,y:800,w:120,h:53},
+  wall_corner_a: {x:853,y:594,w:74,h:91},
+  wall_corner_b: {x:991,y:594,w:80,h:90},
+  wall_straight_a: {x:1376,y:712,w:54,h:78},
+  wall_straight_b: {x:1302,y:712,w:72,h:79},
+  wall_straight_c: {x:708,y:594,w:62,h:94},
+  wall_torch_bracket: {x:1276,y:457,w:111,h:121},
+};
+const DUN2_CACHE={};
+function dun2Sprite(name,scale=1){
+  if(!DUN2_IMG)return null;
+  const r=DUN2_ATLAS_RECTS[name];if(!r)return null;
+  const key=name+'_'+scale;if(DUN2_CACHE[key])return DUN2_CACHE[key];
+  const c=document.createElement('canvas');c.width=Math.max(1,Math.round(r.w*scale));c.height=Math.max(1,Math.round(r.h*scale));
+  const g=c.getContext('2d');g.imageSmoothingEnabled=true;
+  g.drawImage(DUN2_IMG,r.x,r.y,r.w,r.h,0,0,c.width,c.height);
+  return DUN2_CACHE[key]={c,ax:c.width/2,ay:c.height-4};
+}
+// Mesmo padrao de kitTorch (Fase 5.16.3): sprite real + registro em FX
+// pro brilho quente de verdade (nunca so um icone "apagado").
+function goblinTorch(x,y){const s=dun2Sprite('p_torch',.42);if(!s)return;addStatic(s,x,y,'dunkit');FX.push({kind:'fire',x,y})}
+function goblinProp(name,x,y,scale,block){
+  const s=dun2Sprite(name,scale);if(!s)return false;
+  addStatic(s,x,y,'dunkit');
+  if(block)addBlock(x-block[0]/2,y-block[1],block[0],block[1]);
+  return true;
+}
+const GOBLIN_FLOOR_MAIN=['floor_clean_a','floor_clean_b','floor_clean_c','floor_dark_a','floor_dark_b','floor_dark_c'];
+const GOBLIN_FLOOR_MOSS=['floor_moss_a','floor_moss_b','floor_moss_c','floor_moss_d','floor_moss_e'];
+const GOBLIN_FLOOR_RUBBLE=['floor_rubble_a','floor_rubble_b','floor_rubble_c','floor_rubble_d'];
+const GOBLIN_FLOOR_DARK=['floor_dark_a','floor_dark_b','floor_dark_c','floor_dark_d'];
+const GOBLIN_WALLS=['wall_straight_a','wall_straight_b','wall_straight_c'];
+// Piso muda de "sotaque" por sala nomeada -- nunca uma textura generica
+// unica -- pra reforcar a leitura da referencia (ala esquerda umida/
+// musgosa, ala direita em ruina, corredor final/chefe mais escuros).
+function goblinRoomFloorPool(roomId){
+  if(roomId==='salaEsquerda')return GOBLIN_FLOOR_MOSS;
+  if(roomId==='salaDireita')return GOBLIN_FLOOR_RUBBLE;
+  if(roomId==='boss'||roomId==='corredorFinal')return GOBLIN_FLOOR_DARK;
+  return GOBLIN_FLOOR_MAIN;
+}
+// Desenha piso/parede REAIS em cima do MESMO kind[]/layout que a colisao
+// ja usa -- pra cada tile T x T dentro da bounding box da masmorra,
+// amostra kPx no CENTRO do tile (mesma leitura que qualquer outro ponto
+// do jogo ja faz pra decidir "isso e parede ou chao") e desenha o
+// sprite correspondente. Nunca uma segunda fonte de geometria: se
+// kind mudar (layout.rects mudou), o desenho muda junto automaticamente.
+function paintGoblinDungeonTiles(g,rooms){
+  if(!DUN2_IMG)return;
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for(const rid in rooms){const r=rooms[rid];minX=Math.min(minX,r.x);minY=Math.min(minY,r.y);maxX=Math.max(maxX,r.x+r.w);maxY=Math.max(maxY,r.y+r.h)}
+  const roomOf=(tx,ty)=>{for(const rid in rooms){const r=rooms[rid];if(tx>=r.x&&tx<r.x+r.w&&ty>=r.y&&ty<r.y+r.h)return rid}return null};
+  g.imageSmoothingEnabled=true;
+  // +1 tile de margem em cada direcao -- a fiada mais externa de parede
+  // (o anel ao redor do bbox das salas, pintado por paintRect(minX,minY,
+  // maxX,maxY,4) em buildMasmorra) senao ficava de fora deste loop
+  // (achado no QA visual: grama vazando na borda da Entrada).
+  for(let ty=minY-1;ty<=maxY;ty++)for(let tx=minX-1;tx<=maxX;tx++){
+    const px=tx*T,py=ty*T,k=kPx(px+T/2,py+T/2);
+    if(k===4){
+      const spr=dun2Sprite(GOBLIN_WALLS[(tx*7+ty*13)%GOBLIN_WALLS.length],1);
+      if(spr)g.drawImage(spr.c,px,py,T,T);
+    }else if(k===3){
+      const rid=roomOf(tx,ty),pool=goblinRoomFloorPool(rid);
+      const spr=dun2Sprite(pool[(tx*11+ty*17+(rid?rid.length:0))%pool.length],1);
+      if(spr)g.drawImage(spr.c,px,py,T,T);
+    }
+  }
+  // Cantos reais nos 4 vertices GEOMETRICOS de cada sala nomeada --
+  // sempre parede ali (WALL=1 de espessura envolve toda sala por
+  // construcao de buildFixedDungeonLayout, nunca um palpite).
+  const corner=dun2Sprite('wall_corner_a',1);
+  if(corner){
+    for(const rid in rooms){
+      const r=rooms[rid];
+      const draw=(cx,cy,rot)=>{g.save();g.translate(cx+T/2,cy+T/2);g.rotate(rot);g.drawImage(corner.c,-T/2,-T/2,T,T);g.restore()};
+      draw(r.x*T,r.y*T,0);
+      draw((r.x+r.w-1)*T,r.y*T,Math.PI/2);
+      draw((r.x+r.w-1)*T,(r.y+r.h-1)*T,Math.PI);
+      draw(r.x*T,(r.y+r.h-1)*T,-Math.PI/2);
+    }
+  }
+}
+// Ponto medio (mundo, px) de cada uma das 8 conexoes de
+// DUNGEON_CONNECTIONS_V2 -- mesma matematica de abertura que
+// buildFixedDungeonLayout ja usa server+client (so o ponto medio, nao o
+// rect de colisao inteiro, que continua vindo so do servidor/layout.rects).
+function goblinDoorPositions(rooms){
+  const out=[];
+  for(const [idA,sideA,idB] of DUNGEON_GEN.DUNGEON_CONNECTIONS_V2){
+    const A=rooms[idA],B=rooms[idB];let x,y,vertical;
+    if(sideA==='E'||sideA==='W'){
+      const from=Math.max(A.y,B.y),to=Math.min(A.y+A.h,B.y+B.h),mid=(from+to)/2;
+      x=(sideA==='E'?A.x+A.w:A.x)*T;y=mid*T;vertical=true;
+    }else{
+      const from=Math.max(A.x,B.x),to=Math.min(A.x+A.w,B.x+B.w),mid=(from+to)/2;
+      x=mid*T;y=(sideA==='N'?A.y:A.y+A.h)*T;vertical=false;
+    }
+    out.push({idA,sideA,idB,x,y,vertical});
+  }
+  return out;
+}
+// Decoracao 100% nova (props reais do atlas) -- substitui inteiramente
+// decorateMasmorra/DUNGEON_THEME_KIT SO pra esta masmorra. Progressao
+// por sala nomeada segue a referencia: Entrada (segura) -> Corredor
+// Inicial (ruina leve) -> Encruzilhada (hub, pilares+bandeiras) ->
+// Sala Esquerda (cogumelos/umidade) / Sala Direita (sangue/prisao) ->
+// Sala de Elite (estatuas guardias) -> Corredor Final (sombrio) ->
+// Sala do Boss (trono real + tapete + bandeiras).
+function decorateGoblinDungeon(w,rooms,pr){
+  const c=id=>DUNGEON_GEN.roomCenter(rooms[id]);
+  const doors=goblinDoorPositions(rooms);
+  // Portas reais so nos vaos N/S (a arte e desenhada de frente -- os
+  // vaos E/W, ramos esquerda/direita, ficam sem porta rotacionada e
+  // flanqueados por tocha em vez disso, documentado aqui de proposito
+  // em vez de girar a arte 90 graus e ficar com leitura errada).
+  for(const d of doors){
+    if(d.vertical){goblinTorch(d.x,d.y-26);continue}
+    let spr='door_wood';
+    if(d.idA==='salaElite'||d.idB==='salaElite')spr='door_bars_a';
+    if(d.idA==='corredorFinal'&&d.idB==='boss')spr='door_arch_open';
+    const s=dun2Sprite(spr==='door_bars_a'?'p_door_bars_a':spr,.6);
+    if(s)addStatic(s,d.x,d.y,'dunkit');
+  }
+  // 1. Entrada -- segura, acolhedora, poucos sinais de ruina.
+  {const r=rooms.entrada;
+    goblinTorch(r.x*T+22,(r.y+r.h*.4)*T);goblinTorch((r.x+r.w)*T-22,(r.y+r.h*.4)*T);
+    goblinProp('p_planks_broken',r.x*T+r.w*T*.18,(r.y+r.h*.78)*T,.42,[30,18]);
+  }
+  // 2. Corredor inicial -- primeiro sinal de ruina.
+  {const r=rooms.corredorInicial;
+    goblinProp('p_rubble_b',(r.x+r.w*.28)*T,(r.y+r.h*.5)*T,.36,[24,16]);
+    goblinProp('p_skull_bones_small',(r.x+r.w*.7)*T,(r.y+r.h*.6)*T,.38);
+    goblinTorch((r.x+r.w/2)*T,r.y*T+16);
+  }
+  // 3. Encruzilhada -- HUB de verdade: 4 pilares reais nos cantos
+  // internos, bandeira central, tochas nas bordas.
+  {const r=rooms.encruzilhada,pad=46,ct=c('encruzilhada');
+    goblinProp('p_pillar_a',r.x*T+pad,r.y*T+pad,.42,[26,18]);
+    goblinProp('p_pillar_b',(r.x+r.w)*T-pad,r.y*T+pad,.42,[26,18]);
+    goblinProp('p_pillar_c',r.x*T+pad,(r.y+r.h)*T-pad,.42,[26,18]);
+    goblinProp('p_pillar_d',(r.x+r.w)*T-pad,(r.y+r.h)*T-pad,.42,[26,18]);
+    goblinTorch(r.x*T+16,ct.y);goblinTorch((r.x+r.w)*T-16,ct.y);
+    goblinProp('p_banner_a',ct.x,r.y*T+6,.34);
+  }
+  // 4. Sala esquerda -- ala opcional: cogumelos/umidade (3 cores) +
+  // ruina leve, como pedido explicitamente pro "damp/mushroom" tema.
+  {const r=rooms.salaEsquerda;
+    goblinProp('p_mushroom_blue',r.x*T+r.w*T*.18,r.y*T+r.h*T*.3,.55);
+    goblinProp('p_mushroom_red',r.x*T+r.w*T*.32,r.y*T+r.h*T*.68,.5);
+    goblinProp('p_mushroom_orange',r.x*T+r.w*T*.58,r.y*T+r.h*T*.4,.46);
+    goblinProp('p_rubble_d',r.x*T+r.w*T*.78,r.y*T+r.h*T*.6,.4,[30,20]);
+    goblinTorch(r.x*T+20,r.y*T+20);goblinTorch((r.x+r.w)*T-20,(r.y+r.h)*T-20);
+  }
+  // 5. Sala direita -- ala opcional: sangue/prisao/armaria, como pedido.
+  {const r=rooms.salaDireita;
+    goblinProp('p_chest_closed',r.x*T+r.w*T*.2,r.y*T+r.h*T*.32,.44,[30,20]);
+    goblinProp('p_chain_a',r.x*T+r.w*T*.4,r.y*T+r.h*T*.22,.5);
+    goblinProp('p_sarcophagus',r.x*T+r.w*T*.64,r.y*T+r.h*T*.62,.4,[40,22]);
+    goblinProp('p_gate_fence',(r.x+r.w)*T-26,r.y*T+r.h*T*.5,.42,[16,40]);
+    goblinTorch(r.x*T+20,(r.y+r.h)*T-20);goblinTorch((r.x+r.w)*T-20,r.y*T+20);
+  }
+  // 6. Sala de elite -- 2 estatuas guardias flanqueando a passagem
+  // central + lapides -- reforca "guarda de elite" (mesma decisao
+  // documentada desde a Fase 5.13/5.16.3: nunca um tier de combate
+  // novo, so leitura visual).
+  {const r=rooms.salaElite,ct=c('salaElite');
+    goblinProp('p_statue_a',ct.x-70,r.y*T+34,.5,[26,20]);
+    goblinProp('p_statue_b',ct.x+70,r.y*T+34,.5,[26,20]);
+    goblinProp('p_grave_arch',r.x*T+22,(r.y+r.h)*T-24,.38,[22,16]);
+    goblinProp('p_grave_pointed',(r.x+r.w)*T-22,(r.y+r.h)*T-24,.38,[22,16]);
+    goblinTorch(r.x*T+14,ct.y);goblinTorch((r.x+r.w)*T-14,ct.y);
+  }
+  // 7. Corredor final -- mais sombrio: teias + ossos concentrados.
+  {const r=rooms.corredorFinal;
+    goblinProp('p_cobweb_b',r.x*T+8,r.y*T+8,.34);
+    goblinProp('p_skull_bones_wide',(r.x+r.w/2)*T,r.y*T+r.h*T*.5,.36);
+    goblinTorch(r.x*T+6,(r.y+r.h/2)*T);goblinTorch((r.x+r.w)*T-6,(r.y+r.h/2)*T);
+  }
+  // 8. Sala do boss -- trono real (nao mais um "landmark" procedural
+  // generico) + tapete real ate ele + bandeiras + tochas. Mesma
+  // orientacao sul->norte da Fase 5.16.3 (entrada pelo sul, trono no
+  // norte, layout.boss no centro pra combate em party nunca ficar
+  // coberto pelo tapete/trono).
+  {const r=rooms.boss,entryY=(r.y+r.h)*T,throneX=(r.x+r.w/2)*T,throneY=r.y*T+58;
+    const rugSpr=dun2Sprite('rug_tile_b',.62);
+    if(rugSpr){
+      const stepH=rugSpr.c.height,steps=Math.max(1,Math.round((entryY-throneY-50)/stepH));
+      for(let i=0;i<steps;i++){
+        const y=throneY+70+i*stepH;
+        addStatic({c:rugSpr.c,ax:rugSpr.ax,ay:rugSpr.c.height/2},throneX,y,'decal');
+      }
+    }
+    goblinProp('p_throne',throneX,throneY,.7,[40,10]);
+    goblinProp('p_banner_a',throneX-90,throneY-30,.36);
+    goblinProp('p_banner_c',throneX+90,throneY-30,.36);
+    goblinTorch(throneX-120,throneY+30);goblinTorch(throneX+120,throneY+30);
+    goblinProp('p_altar',throneX+150,entryY-90,.32,[36,18]);
+  }
+  statics.sort((a,b)=>a.sy-b.sy);
+}
 // Fase 5.13 -- DUNGEON MAP V2: layout FIXO (game-data/dungeon-generation.js
 // DUNGEON_ROOMS_V2), nao mais um labirinto procedural por seed. `seed`
 // continua chegando do servidor (dungeon_state) mas so alimenta o stream
@@ -6468,9 +6780,17 @@ function buildMasmorra(zoneId,seed,roster){
   // nunca duas matematicas que podem divergir.
   for(const r of layout.rects)addBlock(r.x,r.y,r.w,r.h);
   paintGround(cfg.theme,true);w.ground=ground;
+  // Covil dos Goblins (zoneId==='floresta'): rework visual completo --
+  // pipeline de tile real por cima do MESMO kind[]/layout.rects (nunca
+  // uma segunda geometria), substitui inteiramente a decoracao
+  // procedural pra esta masmorra especifica. As outras 6 continuam
+  // exatamente como sempre (decorateMasmorra/paintGround procedural).
+  const isGoblinRework=zoneId==='floresta'&&!!DUN2_IMG;
+  if(isGoblinRework)paintGoblinDungeonTiles(ground.getContext('2d'),rooms);
   addStatic(SP.portal,w.portal.x,w.portal.y);addBlock(w.portal.x-40,w.portal.y-30,80,30);
   const pr=mulberry(Number.isFinite(seed)?seed:555+zoneId.length);
-  decorateMasmorra(w,rooms,cfg.theme,pr);
+  if(isGoblinRework)decorateGoblinDungeon(w,rooms,pr);
+  else decorateMasmorra(w,rooms,cfg.theme,pr);
   if(Array.isArray(roster)){
     // roster server-autoritativo (Fase 5.2): tipo/nivel/HP/posicao de cada
     // mob vem inteiro do servidor, nunca sorteado aqui. Fase 5.13: posicao
