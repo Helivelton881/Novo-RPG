@@ -1597,5 +1597,50 @@ Os 16 testes puros rodam de verdade e passam — cobrem o núcleo inteiro (gera�
 - **Zona nunca visitada por humano fica sem mobs pra IA caçar** (`state.mobs` só é populado quando o primeiro `map_join` real de um jogador chega, com posições que só o cliente conhece) — IA nessas zonas só vagueia (`wander`) até um jogador real aparecer; decisão deliberada pra não inventar um sistema paralelo de posicionamento de mob sem colisão real. Nunca acontece nas zonas onde já existe atividade humana (o caso comum).
 - **Teto de população (10) não veio de um benchmark de carga real** — o pedido era "benchmark-então-teto"; não havia como gerar carga real de produção nesta sessão. Valor de partida conservador, documentado como tal, pronto pra ser recalibrado com dados reais depois do deploy.
 - **Dano recebido de mob não gera feedback visual pra outros jogadores olhando a IA** (`mob_hit` não é transmitido quando o alvo é IA) — simplificação deliberada: a IA não tem HP visível em `publicPlayer` mesmo (igual jogador remoto real, que também não mostra barra de vida pros outros), então o feedback visual não faria diferença nenhuma hoje.
-- **Fase 5.16 Tier 2 (AI Dungeon Fill / AI TvT Fill) ainda não implementada** — os estados `party`/`queue`/`dungeon`/`tvt` do FSM e o campo `ai.slot` já existem no núcleo, prontos pra serem preenchidos por essa fase seguinte, mas nenhuma integração com o matchmaking (Fase 5.13.2) ou TvT ainda chama `aiSpawnEntity` pra esse fim.
 - **Nenhuma migração de banco** — toda a camada de IA é em memória; nada foi persistido no Supabase (e nunca deveria ser, pela própria regra absoluta).
+
+# FASE 5.16 (TIER 2) — AI DUNGEON FILL + AI TVT FILL
+
+**Escopo**: integra o núcleo de IA (Tier 1) com o matchmaking de masmorra (Fase 5.13.2) e com Team vs Team — preenchendo vagas restantes só depois de esgotada a prioridade humana, nunca substituindo um humano disponível.
+
+## AI Dungeon Fill: só entra se pedido, só depois dos humanos resolvidos
+
+`formDungeonGroup` (Fase 5.13.2) já recebia `group` com o flag `allowAiFill` de cada entrada da fila. Depois de validar e montar a Party só com os humanos reais (nenhuma mudança nessa parte), se **alguém do grupo pediu `allowAiFill`** e ainda sobra vaga até 4, a IA entra pro resto — nunca antes disso, nunca reduzindo quantos humanos entrariam. Seleção de classe **consciente**: prioriza uma classe que o grupo ainda não tem (`AI_CLASS_POOL.find(c => !haveClasses.has(c))`), só cai pra aleatória se todas já estiverem representadas — nunca aleatória pura. A entidade de IA nasce direto dentro da instância (`map: state.id`, `fsm:'idle'`) — o mesmo idle→hunt→combat do núcleo de campo já funciona ali sem nenhuma mudança, porque uma instância de masmorra é só mais um `mapState()` com `.mobs` como qualquer outra. **IA nunca vira membro persistente de Party nenhuma** — só entra em `state.members` (memória da instância), nunca em `parties`/`memberParty`.
+
+`buildDungeonInstance` (Fase 5.13.1) ganhou um campo `kind` no `state.members` (`'human'` por padrão, `'ai'` quando vem de `formDungeonGroup`) — usado por `dungeonHandleMobDeath` pra nunca creditar um membro de IA, e a IA **conta pro cálculo de escala de HP** igual um humano (participante ativo de verdade, testado explicitamente: 1 humano + 1 IA escala pra 1.55×, igual 2 humanos escalariam).
+
+## AI TvT Fill: reservas humanas sempre primeiro, times sempre balanceados
+
+`startTvtEvent` mudou de "cancela se não bater o mínimo" pra: reserva humana tratada **antes** de qualquer IA existir (nenhuma mudança nisso), carrega os personagens reais, e só então `tvtFillTargetSize(loaded.length)` (núcleo puro, testado exaustivamente) decide o tamanho final do time — sempre par, sempre pelo menos `TVT_MIN_PLAYERS`, nunca acima de `TVT_MAX_PLAYERS`, **nunca descarta um humano que se inscreveu** pra caber num número par (o corte por imparidade que existia antes foi removido — agora a IA fecha a diferença). Nível da IA = média dos humanos reais carregados, pra ficar equilibrado. Os times (humanos + IA misturados) passam pelo **mesmo** `TVT.balanceTvtTeams` de sempre (powerScore + composição de classe) — a IA participa do balanceamento como qualquer jogador, nunca um "extra" desequilibrando o time.
+
+## Combate de TvT: a MESMA função autoritativa, nunca um caminho paralelo
+
+`aiDoTvt` chama `TVT.resolveTvtIntent(instance, ai.id, {skill:'basic', targetId}, now, secureRandom)` — a **exata mesma função** que resolve o ataque de um jogador humano real (mesmo cooldown via `attacker.lastAttackAt`/`snapshot.basicCdMs`, mesma fórmula de dano, mesma mitigação por `def`/bloqueio/barreira, mesma proteção de spawn de 3s). `instance.players` é sempre a fonte de verdade de HP/posição/morte — a entidade de IA só espelha esse estado (`ai.hp = tp.hp`, etc.) pra fins de broadcast/renderização, nunca o contrário.
+
+**Proibições explícitas de trapaça, cumpridas por construção**:
+- **Sem wallhack**: a IA só considera alvos que já estão em `instance.players` (a mesma informação que o cliente de um jogador real recebe via `tvt_state`), nunca nada fora disso.
+- **Sem mira instantânea**: precisa se mover de verdade até o alcance (mesma velocidade do núcleo de campo, `AI_MOVE_SPEED`) — nunca teleporta até o alvo.
+- **Sem bypass de cooldown**: `resolveTvtIntent` aplica o cooldown em cima do próprio `attacker.lastAttackAt`/`skillCd` — o mesmo campo que travaria um humano tentando atacar rápido demais.
+- **Sem bônus escondido**: usa o mesmo `snapshot` (atk/def/maxHp) derivado de `combatSnapshot`, a mesma fórmula de dano — nada de multiplicador secreto pra IA.
+- **Latência de reação simulada**: `ai.tvtEngageAt` atrasa 200-600ms o primeiro ataque contra um alvo recém-adquirido — testado explicitamente que a IA **nunca** ataca no mesmo tick em que avista alguém pela primeira vez.
+
+Abates/dano da IA contam pro **placar da partida** (`instance.score`, mesmo mecanismo de sempre — a IA participa do resultado de verdade) mas nunca são somados às estatísticas competitivas humanas permanentes: `grantTvtRewards` ganhou um guard `if (member.kind==='ai') continue;` logo no início do loop — nenhuma IA nunca chega perto de `bumpRankStat('tvt_kills', ...)`/`syncRankLevelXp`/gold/gem, mesmo que tenha acumulado `damageDone`/`kills` reais na partida.
+
+## Visibilidade e limpeza — reusa tudo do Tier 1
+
+`game-data/tvt.js` ganhou um campo `kind` em `createTvtInstance` (no player) e em `publicTvtState` (no payload público) — o cliente já reusa o mesmo `drawRemote` com o rótulo `[IA]` do Tier 1 pra jogadores dentro da arena, sem nenhum código novo. `aiTick` agora transmite `state` pra **toda** IA a cada tick (antes só fazia isso pra IA "livre" de campo — corrigido, senão IA preenchendo masmorra/TvT ficaria parada visualmente pros outros jogadores). Ao fim da partida/instância, `finishTvtInstance` e `dungeonCleanupTick` despacham (`aiDespawnEntity`) qualquer IA que estivesse alocada ali — nunca fica presa apontando pra uma instância que já acabou.
+
+## Testes
+
+`test/ai-fill.test.js` (novo arquivo): **11 testes puros** (sempre rodam, sem Supabase, sem esperar tick real): `tvtFillTargetSize` em toda a faixa relevante (par suficiente, abaixo do mínimo, ímpar acima do mínimo sempre arredonda pra cima nunca descarta humano, nunca ultrapassa o máximo), `buildDungeonInstance` com humano+IA misturados (`kind` correto, escala de HP conta a IA), a REGRA ABSOLUTA da masmorra com membros mistos (só o humano gera tentativa de crédito), `aiDoTvt` completo (nunca ataca no primeiro tick, ataca de verdade após a latência via `resolveTvtIntent`, nunca ataca morta), e a REGRA ABSOLUTA do TvT (`grantTvtRewards` tem o guard explícito) — mais **1 teste de integração real via matchmaking de masmorra** (`{skip:!hasSupabase()}`, 3 humanos reais + `allowAiFill`, esperando o prazo real de fallback de 25s — lento de propósito, mesmo espírito de outros testes de integração já existentes que priorizam correção sobre velocidade).
+
+## Verificação
+
+Os 11 testes puros rodam de verdade e passam. Além disso, o ciclo completo foi verificado manualmente em Node antes do teste formal: `buildDungeonInstance` com humano+IA misturados, e uma instância de TvT real (`TVT.createTvtInstance`) com um combate de verdade entre humano e IA rodado via `aiDoTvt` repetido — confirmando dano real aplicado e contribuição registrada em `instance.players`. Um teste WS de AI Dungeon Fill foi escrito mas não executado aqui (sem Supabase de teste neste sandbox); o teste de AI TvT Fill via fluxo HTTP/WS completo (agendamento real de evento) não foi escrito nesta sessão — a cobertura do combate de TvT em si (a parte de maior risco) já é extensiva nos testes puros. **Recomenda-se rodar `npm test` com Supabase de TESTE antes do merge**, junto com os pendentes de todas as fases anteriores.
+
+## Limitações conhecidas
+
+- **AI TvT Fill não tem teste de integração HTTP/WS de ponta a ponta** (agendamento real do evento, `startTvtEvent` chamado pelo EventManager de verdade) — só o núcleo de combate (`aiDoTvt`+`resolveTvtIntent`) e o dimensionamento (`tvtFillTargetSize`) foram testados isoladamente, com alta confiança, mas não o fluxo inteiro de agendamento-até-partida.
+- **AI Dungeon Fill: só um teste de integração real, com o caminho mais rápido (fallback de 3, 25s)** — os caminhos de 2 e 1 (solo com opt-in) usam a mesma lógica de preenchimento (código compartilhado), não foram testados separadamente via WS pela mesma lentidão real desses prazos (45s/60s).
+- **Nível da IA de TvT é sempre a média dos humanos da partida** — nunca varia por "papel"/build dentro da classe; uma calibração mais fina de dificuldade fica pra uma iteração futura, se pedida.
+- **Nenhuma migração de banco** — toda a integração é em memória.
