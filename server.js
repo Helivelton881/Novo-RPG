@@ -3062,7 +3062,16 @@ async function handleWsJoin(ws, msg) {
     // handleAdminMute pra quem ja estava conectado.
     if (userId) { try { const mute = await activeMuteFor(userId); p.muted = !!mute; p.muteReason = mute ? mute.reason : null; } catch (err) { console.error('ws_join_mute_check_error', err.message); } }
     if (userId) { if (!accountSockets.has(userId)) accountSockets.set(userId, new Set()); accountSockets.get(userId).add(ws); }
-    send(ws, {type:'welcome', id:p.id, sessionKey:p.sessionKey, hp:p.hp, maxHp:p.maxHp, dead:p.dead, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer)});
+    // Fase 5.16.2 (achado real, confirmado ao vivo em producao): o
+    // snapshot inicial de 'welcome' so incluia humanos (clients) --
+    // IA ja existente antes da conexao so aparecia pro cliente novo
+    // depois do proximo round do broadcast periodico de aiTick (ate
+    // ~1s de atraso, nunca invisibilidade permanente -- verificado que
+    // o broadcast periodico ja fecha essa lacuna sozinho, mas o
+    // snapshot inicial devia ja vir completo). Reusa o MESMO array
+    // `players` que o cliente ja sabe consumir (welcome handler faz
+    // REMOTE.set pra cada item) -- nenhum tipo de mensagem novo.
+    send(ws, {type:'welcome', id:p.id, sessionKey:p.sessionKey, hp:p.hp, maxHp:p.maxHp, dead:p.dead, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer).concat([...aiEntities.values()].map(aiPublicPlayer))});
     send(ws, eventStatePayload(p));
     const wbMap=p.charId&&worldBossByChar.get(p.charId),instance=wbMap&&worldBossInstances.get(wbMap),member=instance&&instance.members.get(p.charId);
     if(member&&member.userId===p.userId&&instance.state!=='ended'){member.online=true;p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{...WORLD_BOSS.publicWorldBossState(instance),type:'world_boss_enter',spawn:{x:p.x,y:p.y},reconnect:true})}
@@ -3553,10 +3562,23 @@ function aiPublicPlayer(ai) {
   // em nenhuma API/admin.
   return {id:ai.id, name:ai.name, cls:ai.cls, map:ai.map, x:ai.x, y:ai.y, dir:ai.dir, moving:!!ai.moving, lvl:ai.lvl, atkT:ai.atkT||0, atkAng:ai.atkAng||0, charId:null, kind:'ai'};
 }
+// Fase 5.16.2 (discoverability): antes escolhia um mob EXISTENTE
+// totalmente ao acaso como ancora -- verificado ao vivo em producao que
+// isso podia colocar uma IA a mais de 1000px do ponto onde o jogador
+// realmente entra na zona, tornando-a pratica encontravel so por sorte.
+// Agora prioriza os mobs mais PROXIMOS DO CENTROIDE de todos os mobs da
+// zona (posicao "tipica", nunca um outlier isolado num canto do mapa) --
+// nao inventa um "ponto de entrada" que o servidor nao conhece de
+// verdade (mapa de campo continua sem coordenadas de start conhecidas
+// no server, so o cliente sabe), so evita os extremos.
 function aiSpawnAnchor(zone) {
   const state = maps.get(zone);
   if (state && state.mobs.size) {
-    const mobs = [...state.mobs.values()], m = mobs[Math.floor(Math.random() * mobs.length)];
+    const mobs = [...state.mobs.values()];
+    const cx = mobs.reduce((s,m)=>s+m.x,0)/mobs.length, cy = mobs.reduce((s,m)=>s+m.y,0)/mobs.length;
+    const byDist = mobs.map(m=>({m,d:Math.hypot(m.x-cx,m.y-cy)})).sort((a,b)=>a.d-b.d);
+    const pool = byDist.slice(0, Math.max(1, Math.ceil(byDist.length*.5))); // metade mais perto do centro, nunca so o mais central sozinho (mantem alguma variedade)
+    const m = pool[Math.floor(Math.random()*pool.length)].m;
     return {x:Math.max(0, Math.min(MOB_WORLD_W, m.x + (Math.random() * 300 - 150))), y:Math.max(0, Math.min(MOB_WORLD_H, m.y + (Math.random() * 300 - 150)))};
   }
   return {x:MOB_WORLD_W * (.3 + Math.random() * .4), y:MOB_WORLD_H * (.3 + Math.random() * .4)};
