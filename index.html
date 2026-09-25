@@ -2122,7 +2122,7 @@ function scrMap(){
   const tab=(v,l,ok)=>`<button type="button" data-a="mv" data-v="${v}" class="${mapView===v?'on':''}"${ok?'':' disabled'}>${ok?l:l+' 🔒'}</button>`;
   return `<div class="tabs wrap">${tab('vila','Vila',true)}${tab('floresta','Floresta',canF)}${tab('cripta','Cripta',canC)}${tab('serra','Serra',canS)}${tab('pantano','Pântano',canP)}${tab('torre','Torre',canT)}${tab('ilhas','Ilhas',canI)}${tab('vulcao','Vulcão',canV)}</div>
   <div class="mapbox"><canvas id="bigMap" width="480" height="352"></canvas></div>
-  <div class="legend"><span><i style="background:#2f8cff"></i>Você</span><span><i style="background:#8a6bd8"></i>Portal</span><span><i style="background:#8be05a"></i>Slime</span><span><i style="background:#ffa03a"></i>Goblin</span><span><i style="background:#cbb8ff"></i>Esqueleto</span><span><i style="background:#9fd0ff"></i>Lobo</span><span><i style="background:#e09bff"></i>Morcego</span><span><i style="background:#7bffb0"></i>Tóxico</span><span><i style="background:#ff8ad8"></i>Acólito</span><span><i style="background:#ffe27a"></i>Celeste</span><span><i style="background:#ff7a3c"></i>Vulcânico</span><span><i style="background:#ff3a3a"></i>Chefe</span><span><i style="background:#ffd35c"></i>Missão</span></div>
+  <div class="legend"><span><i style="background:#2f8cff"></i>Você</span><span><i style="background:#5ad1ff"></i>Jogador</span><span><i style="background:#c9a6ff"></i>Aventureiro IA</span><span><i style="background:#8a6bd8"></i>Portal</span><span><i style="background:#8be05a"></i>Slime</span><span><i style="background:#ffa03a"></i>Goblin</span><span><i style="background:#cbb8ff"></i>Esqueleto</span><span><i style="background:#9fd0ff"></i>Lobo</span><span><i style="background:#e09bff"></i>Morcego</span><span><i style="background:#7bffb0"></i>Tóxico</span><span><i style="background:#ff8ad8"></i>Acólito</span><span><i style="background:#ffe27a"></i>Celeste</span><span><i style="background:#ff7a3c"></i>Vulcânico</span><span><i style="background:#ff3a3a"></i>Chefe</span><span><i style="background:#ffd35c"></i>Missão</span></div>
   <p><small>Você está em: <b class="gold">${esc(locName||'')}</b></small></p>`;
 }
 function drawBigMap(){
@@ -2137,6 +2137,13 @@ function drawBigMap(){
   for(const m of w.mobs)if(!m.dead)dot(f(m.x),f(m.y),m.boss?6:(m.type!=='slime'?3.4:2.8),m.boss?'#ff3a3a':(m.type==='cinza'?'#ff9a6a':m.type==='sala'?'#ff7a3c':m.type==='elem'?'#ffb03c':m.type==='calc'?'#ff9060':m.type==='sky'?'#ffe27a':m.type==='caster'?'#ff8ad8':m.type==='bat'?'#e09bff':m.type==='toxic'?'#7bffb0':m.type==='wolf'?'#9fd0ff':m.type==='skeleton'?'#cbb8ff':m.type==='goblin'?'#ffa03a':'#8be05a'),m.boss);
   const qt=questTarget();
   if(qt&&qt.world===mapView){const x=f(qt.x),y=f(qt.y);g.beginPath();g.arc(x,y,13,0,6.29);g.strokeStyle='rgba(255,211,92,.55)';g.lineWidth=3;g.stroke();dot(x,y,8,'#ffd35c',true);g.fillStyle='#3a2708';g.font='800 12px system-ui,sans-serif';g.fillText('!',x,y+4.5);g.lineWidth=3.5;g.textAlign='left';g.font='700 11px system-ui,sans-serif';g.strokeStyle='#0d0e0c';g.strokeText(qt.label,x+13,y+4);g.fillStyle='#ffe9a8';g.fillText(qt.label,x+13,y+4);g.textAlign='center'}
+  // Fase 5.16.2: jogadores remotos/Aventureiros IA no mapa grande -- so
+  // quando a aba selecionada e o mapa onde o jogador REALMENTE esta
+  // agora (W_===w), nunca pra uma zona so visitada/desbloqueada mas
+  // onde ele nao esta -- REMOTE ja e por mapId de instancia real, entao
+  // Dungeon/TvT/World Boss privados nunca aparecem aqui (mapView so
+  // cobre as 7 zonas de campo, nunca um mapId de instancia).
+  if(W_===w)for(const rp of REMOTE.values())if(rp.map===w.name)dot(f(rp.x),f(rp.y-10),4,rp.kind==='ai'?'#c9a6ff':'#5ad1ff',true);
   if(W_===w)dot(f(P.x),f(P.y-10),5,'#2f8cff',true);
 }
 /* --- Social --- */
@@ -3060,6 +3067,17 @@ function exitTvt(m){
 let netProjectileSeq=0;
 const MOB_NET_VISUAL_FIELDS=['t','t0','la','lx','ly','tx','ty','atk','k','heavy','bx','by','enr','face','moving','cmb','guard','al'];
 function netLabel(text,on){const e=$('#net');if(!e)return;e.textContent=text;e.classList.toggle('online',!!on);e.classList.toggle('offline',!on)}
+// Fase 5.16.2 (achado real, confirmado ao vivo em producao): o contador
+// so somava REMOTE.size+1, misturando humanos e Aventureiros IA sem
+// distincao nenhuma (ex.: "11 online" com 1 humano de verdade e 10 IA)
+// -- nunca deveria chamar IA de "jogador". Sempre separa as duas
+// contagens a partir do proprio kind ja presente em cada entrada de
+// REMOTE (population server-authoritative, nunca inferida aqui).
+function netCountsLabel(){
+  let humans=1, ai=0; // +1 pelo proprio jogador local, que nunca fica dentro de REMOTE
+  for(const p of REMOTE.values()) if(p.kind==='ai') ai++; else humans++;
+  return ai>0 ? (humans+(humans===1?' jogador':' jogadores')+' · '+ai+' IA') : (humans+' online');
+}
 function netMobById(id){return MOBS.find(m=>m.netId===id)}
 function netJoinMap(){
   if(!NET||NET.readyState!==1||!W_)return;NET_MAP=W_.netMap||W_.name;RPROJ.length=0;
@@ -3091,7 +3109,7 @@ function netConnect(){
   // novo no onclose) sempre manda um join novo, reautenticando do zero.
   ws.onopen=()=>{if(NET!==ws)return;netRetry=0;ws.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined,charId:(CUR_CHAR&&CUR_CHAR.id)||undefined,token:authToken()||undefined,clientInstanceId:CLIENT_INSTANCE_ID}))};
   ws.onmessage=e=>{if(NET!==ws)return;let m;try{m=JSON.parse(e.data)}catch(err){return}
-    if(m.type==='welcome'){NET_ID=m.id;NET_SESSION=m.sessionKey||'';if(Number.isFinite(m.hp))P.hp=m.hp;if(Number.isFinite(m.maxHp))P.maxhp=m.maxHp;P.dead=!!m.dead;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel((REMOTE.size+1)+' online',true);netJoinMap()}
+    if(m.type==='welcome'){NET_ID=m.id;NET_SESSION=m.sessionKey||'';if(Number.isFinite(m.hp))P.hp=m.hp;if(Number.isFinite(m.maxHp))P.maxhp=m.maxHp;P.dead=!!m.dead;REMOTE.clear();for(const p of m.players||[])REMOTE.set(p.id,p);netLabel(netCountsLabel(),true);netJoinMap()}
     else if(m.type==='event_state'){EVENT_STATE=m;EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(scrOpen==='events')renderScr()}
     else if(m.type==='event_announcement'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();chatAdd('Sistema',m.message,true);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.message)}
     else if(m.type==='event_registration'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(!m.ok)toast(m.error==='EVENT_UNAVAILABLE'?'Evento ainda não disponível':m.error==='AUTH_REQUIRED'?'Entre com uma conta online para se inscrever':'Não foi possível alterar a inscrição');else toast(m.action==='unregister'?'Inscrição cancelada':m.alreadyRegistered?'Você já está inscrito':'Inscrição realizada')}
@@ -3116,8 +3134,8 @@ function netConnect(){
       if(m.killed&&isMe)toast('Você foi eliminado!');
     }
     else if(m.type==='tvt_heal'){if(m.targetId===(CUR_CHAR&&CUR_CHAR.id)){P.hp=m.hp;floater(P.x,P.y-70,'+'+m.amount,'#7dff9a')}}
-    else if(m.type==='player_join'||m.type==='state'){const p=m.player;if(p&&p.id!==NET_ID){const old=REMOTE.get(p.id);REMOTE.set(p.id,Object.assign(old||{},p));netLabel((REMOTE.size+1)+' online',true)}}
-    else if(m.type==='player_leave'){REMOTE.delete(m.id);netLabel((REMOTE.size+1)+' online',true)}
+    else if(m.type==='player_join'||m.type==='state'){const p=m.player;if(p&&p.id!==NET_ID){const old=REMOTE.get(p.id);REMOTE.set(p.id,Object.assign(old||{},p));netLabel(netCountsLabel(),true)}}
+    else if(m.type==='player_leave'){REMOTE.delete(m.id);netLabel(netCountsLabel(),true)}
     else if(m.type==='map_state'&&m.map===netMapId()){for(const u of m.mobs||[])netApplyMob(u,null)}
     else if(m.type==='mob_state'&&m.map===netMapId())netApplyMob(m.mob,m.killerId);
     else if(m.type==='mob_positions'&&m.map===netMapId())for(const u of m.mobs||[]){const x=netMobById(u.id),sx=Number(u.x),sy=Number(u.y);if(x&&!x.dead&&Number.isFinite(sx)&&Number.isFinite(sy)){x.serverX=sx;x.serverY=sy;x.netState=u.state||x.netState;x.state=x.netState;for(const k of MOB_NET_VISUAL_FIELDS)if(Object.prototype.hasOwnProperty.call(u,k)){const v=u[k];if((typeof v==='number'&&Number.isFinite(v))||typeof v==='string'||typeof v==='boolean')x[k]=v}}}
@@ -3763,6 +3781,11 @@ function drawMini(){
   const c=$('#mini'),g=c.getContext('2d');g.imageSmoothingEnabled=false;
   g.drawImage(W_.mini,0,0);
   for(const s of MOBS)if(!s.dead){g.fillStyle=s.type==='cinza'?'#ff9a6a':s.type==='sala'?'#ff7a3c':s.type==='elem'?'#ffb03c':s.type==='calc'?'#ff9060':s.type==='lorde'?'#ff3a3a':s.type==='sky'?(s.boss?'#ff3a3a':'#ffe27a'):s.type==='caster'?(s.boss?'#ff3a3a':'#ff8ad8'):s.type==='bat'?'#e09bff':s.type==='toxic'?(s.boss?'#ff3a3a':'#7bffb0'):s.type==='wolf'?(s.boss?'#ff3a3a':'#9fd0ff'):s.type==='skeleton'?(s.boss?'#ff3a3a':'#cbb8ff'):s.type==='goblin'?(s.boss?'#ff3a3a':'#ffa03a'):'#8be05a';const z=s.boss?3:2;g.fillRect(Math.round(s.x/24)-1,Math.round(s.y/24)-1,z,z)}
+  // Fase 5.16.2: marcadores de jogadores/Aventureiros IA no minimapa, so
+  // do mapa atual (nunca vaza posicao de Dungeon/TvT/World Boss privados
+  // -- REMOTE ja so tem quem esta no MESMO mapId por construcao). IA em
+  // lilas, humano remoto em ciano -- cor diferente do jogador local (azul).
+  for(const rp of REMOTE.values())if(rp.map===W_.name){g.fillStyle=rp.kind==='ai'?'#c9a6ff':'#5ad1ff';g.fillRect(Math.round(rp.x/24)-1,Math.round(rp.y/24)-1,2,2)}
   const x=P.x/24,y=(P.y-10)/24;
   g.fillStyle='#fff';g.beginPath();g.arc(x,y,3.6,0,6.29);g.fill();g.fillStyle='#2f8cff';g.beginPath();g.arc(x,y,2.3,0,6.29);g.fill();
 }

@@ -70,6 +70,55 @@ test('aiPublicPlayer: formato identico a publicPlayer real + kind:\'ai\' + charI
   S.aiEntities.clear();
 });
 
+test('Fase 5.16.2 -- map-ID consistency: aiSpawnEntity(zone).map e aiPublicPlayer(...).map sao IDENTICOS ao nome da zona nas 7 zonas de campo (nenhuma transformacao/sufixo que quebraria o filtro p.map===W_.name no cliente)', () => {
+  S.aiEntities.clear();
+  for (const zone of S.AI_FIELD_ZONES) {
+    const ai = S.aiSpawnEntity(zone);
+    assert.equal(ai.map, zone, `aiSpawnEntity('${zone}') deveria colocar a IA exatamente na zona pedida`);
+    assert.equal(S.aiPublicPlayer(ai).map, zone, 'aiPublicPlayer nao deveria alterar o map -- o filtro do cliente depende de igualdade exata de string');
+  }
+  S.aiEntities.clear();
+});
+
+test('Fase 5.16.2 -- IA social da vila: aiSpawnEntity(\'vila\') funciona, respeita VILLAGE_SOCIAL_CAP (separado do fieldWorldCap), e aiPopulationTick mantem a vila povoada sem afetar as zonas de campo', () => {
+  S.aiEntities.clear();
+  for (let i = 0; i < S.VILLAGE_SOCIAL_CAP + 2; i++) S.aiSpawnEntity('vila');
+  assert.equal(S.villageAiEntities().length, S.VILLAGE_SOCIAL_CAP, 'nunca deveria passar do teto social da vila, mesmo pedindo mais que isso');
+  S.aiEntities.clear();
+  for (let i = 0; i < S.VILLAGE_SOCIAL_CAP + 3; i++) S.aiPopulationTick(); // um de cada vez por tick, igual a reposicao de campo -- nunca instantaneo
+  assert.equal(S.villageAiEntities().length, S.VILLAGE_SOCIAL_CAP, 'aiPopulationTick deveria povoar a vila ate o teto ao longo de alguns ticks de 1s, sem setInterval novo, e sem nunca passar do teto');
+  for (const ai of S.villageAiEntities()) assert.equal(ai.map, 'vila');
+  S.aiEntities.clear();
+});
+
+test('Fase 5.16.2 -- IA social da vila NUNCA entra em combate: fsm fica restrito a idle/wander/rest mesmo apos muitos ticks (guard de travel bloqueado pra quem mora na vila)', () => {
+  S.aiEntities.clear();
+  const ai = S.aiSpawnEntity('vila');
+  assert.equal(ai.map, 'vila');
+  let now = Date.now();
+  for (let i = 0; i < 500; i++) { now += 1000; S.aiStep(ai, now); assert.ok(['idle','wander','rest'].includes(ai.fsm), `fsm inesperado pra IA social da vila: ${ai.fsm} (nunca deveria sair de idle/wander/rest)`); assert.equal(ai.map, 'vila', 'IA social da vila nunca deveria trocar de mapa (guard de travel)'); }
+  S.aiEntities.clear();
+});
+
+test('Fase 5.16.2 -- aiSpawnAnchor(\'vila\') ancora perto do ponto real de spawn/respawn da vila (720,1258), nunca dentro da area de mobs de campo', () => {
+  for (let i = 0; i < 20; i++) {
+    const a = S.aiSpawnAnchor('vila');
+    assert.ok(Math.hypot(a.x - 720, a.y - 1258) <= 200, 'ancora da vila deveria ficar perto do ponto real de spawn/respawn (720,1258)');
+  }
+});
+
+test('Fase 5.16.2 -- aiSpawnAnchor: ancora perto do centroide dos mobs da zona, nunca num outlier isolado (bias de descobribilidade)', () => {
+  S.maps.set('__ai_test_anchor__', {id:'__ai_test_anchor__', mobs:new Map(), hitGuard:new Map()});
+  const state = S.maps.get('__ai_test_anchor__');
+  for (let i = 0; i < 10; i++) state.mobs.set('c'+i, {id:'c'+i, x:100+i, y:100+i});
+  state.mobs.set('outlier', {id:'outlier', x:5000, y:5000}); // sempre o mob mais distante do centroide -> nunca entra na metade mais proxima
+  for (let i = 0; i < 30; i++) {
+    const anchor = S.aiSpawnAnchor('__ai_test_anchor__');
+    assert.ok(anchor.x < 1000 && anchor.y < 1000, 'nunca deveria ancorar perto do outlier isolado (5000,5000), so perto do centroide dos demais mobs');
+  }
+  S.maps.delete('__ai_test_anchor__');
+});
+
 test('aiPopulationTick: sempre povoa a zona MENOS povoada primeiro, nunca concentra tudo numa zona so', () => {
   S.aiEntities.clear();
   // forja 3 IA ja em 'floresta' -- a proxima automatica deveria ir pra outra zona.
@@ -183,6 +232,21 @@ test('IA aparece pra um jogador humano real via player_join/state (mesmo pipelin
   assert.ok(aiJoin, 'deveria ter recebido pelo menos um player_join de uma IA dentro de 15s (AI_ENABLED=1 neste servidor)');
   assert.equal(aiJoin.player.charId, null, 'IA nunca deveria aparecer com um charId real pro cliente');
   conn.close();
+});
+
+test('Fase 5.16.2 -- welcome: IA ja existente antes do join aparece no snapshot inicial (kind:\'ai\'), sem esperar o proximo broadcast periodico do aiTick', { skip: !hasSupabase() }, async () => {
+  S.aiEntities.clear();
+  const ai = S.aiSpawnEntity('floresta');
+  const username = 'aiwc_' + Math.random().toString(36).slice(2, 10), password = 'SenhaForte123';
+  const reg = await httpJson(srv, 'POST', '/api/auth/register', { username, password });
+  const conn = await wsConnect(srv);
+  conn.ws.send(JSON.stringify({ type: 'join', name: 'Observador2', cls: 'guerreiro', lvl: 1, token: reg.json.token }));
+  const welcome = await waitFor(conn.msgs, m => m.type === 'welcome', 3000);
+  const found = welcome.players.find(p => p.id === ai.id);
+  assert.ok(found, 'IA ja existente antes da conexao deveria vir no snapshot inicial de welcome, nao so no proximo broadcast periodico (ate ~1s de atraso antes desta correcao)');
+  assert.equal(found.kind, 'ai');
+  conn.close();
+  S.aiDespawnEntity(ai.id);
 });
 
 test('/api/admin/ai: lista as entidades ativas, sempre marcadas kind:\'ai\', nunca contadas como humano', { skip: !hasSupabase() }, async () => {

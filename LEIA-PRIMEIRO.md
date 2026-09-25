@@ -1716,3 +1716,42 @@ O close WebSocket `4001` agora é terminal por si só: mesmo se a mensagem `sess
 `netConnect` captura cada WebSocket em `ws` e todos os quatro callbacks (`open`, `message`, `close`, `error`) ignoram eventos quando `NET !== ws`. Assim, um socket antigo nunca limpa IDs/REMOTE, agenda retry ou abre modal depois que uma conexão nova assumiu.
 
 Cada carregamento da página gera um `CLIENT_INSTANCE_ID` criptograficamente aleatório, somente em memória, enviado no `join`. Ele não vai para `localStorage` e não autentica nada. O servidor aceita apenas 16–80 caracteres alfanuméricos/`_`/`-`: mesmo ID significa reconnect da própria aba (socket antigo fecha silenciosamente em `4000`); ID diferente significa outra aba/aparelho (mensagem + `4001`). O log `session_replace` contém somente `charId`, IDs runtime das conexões e `sameClientInstance`, nunca token/sessionKey/senha. As sessões de autenticação existentes não são apagadas por este hotfix.
+
+# FASE 5.16.2 — LIVING WORLD VISÍVEL E ENCONTRÁVEL
+
+Investigação de produção sobre "Aventureiros IA não aparecem visualmente". Verificado ao vivo (WebSocket bruto como observador + cliente real forçado, screenshot real em produção) que o pipeline SERVER → WEBSOCKET → REMOTE → MAP → RENDER já funcionava de ponta a ponta antes desta fase: uma IA renderizava corretamente com o rótulo `[IA]`. A causa raiz real não era invisibilidade, e sim três gaps menores e um problema genuíno de descobribilidade — nenhum deles exigiu reescrever o Living World (Fase 5.16/5.16.1), só endereçar cada um pontualmente.
+
+## O que estava realmente errado (provado, não hipotetizado)
+
+- **Snapshot inicial incompleto:** `welcome` só incluía humanos (`clients`); uma IA já existente antes da conexão só aparecia no cliente novo no próximo broadcast periódico do `aiTick` (até ~1s de atraso). O `aiTick` já se autocorrigia sozinho — nunca havia invisibilidade permanente —, mas o snapshot deveria vir completo desde o início. Corrigido concatenando `aiEntities` (via `aiPublicPlayer`) no mesmo array `players` que o `welcome` handler já sabia consumir; nenhum tipo de mensagem novo.
+- **Troca de mapa nunca precisou de resync dedicado:** `REMOTE` é populado globalmente (não por mapa) e a filtragem acontece só no momento de desenhar (`p.map===W_.name`), então trocar de mapa via `travel()` já mostra/esconde as entidades corretas automaticamente. Investigado e confirmado que **não** era um bug separado — nenhuma mudança de código foi necessária aqui.
+- **Contador misturava humano e IA:** `REMOTE.size+1` nunca distinguia `kind`, produzindo rótulos como "11 online" com 1 humano real e 10 IA. `netCountsLabel()` agora separa as duas contagens explicitamente (ex.: "1 jogador · 10 IA"), nunca chamando IA de "jogador".
+- **Descobribilidade fraca, não ausência:** `aiSpawnAnchor` escolhia um mob totalmente aleatório como âncora, podendo colocar uma IA a mais de 1000px do caminho típico do jogador. Agora ancora na metade dos mobs mais próxima do centroide da zona — nunca inventa um "ponto de entrada" que o servidor não conhece de verdade, só evita outliers isolados.
+
+## Visibilidade adicionada (minimapa, mapa grande, contador)
+
+Minimapa (`drawMini`) e a aba Mapa (`drawBigMap`) ganham marcadores de jogadores remotos (ciano `#5ad1ff`) e Aventureiros IA (lilás `#c9a6ff`), com legenda no mapa grande. O mapa grande só desenha marcadores quando a aba selecionada é o mapa onde o jogador realmente está agora (`W_===w`) — nunca vaza posição de instância privada de Dungeon/TvT/World Boss, já que `REMOTE` é sempre por `mapId` real de instância.
+
+## Aventureiros sociais na Vila
+
+A Vila (hub social, sem mobs) passa a ter até 3 Aventureiros IA (`VILLAGE_SOCIAL_CAP`) usando o mesmo FSM de sempre — nenhum estado novo. Como a Vila nunca tem mobs, `aiDoIdle`/`aiDoWander` nunca encontram alvo e a IA social nunca sai de `idle`/`wander`/`rest`. A única mudança de comportamento necessária foi impedir a transição `travel` para quem mora na vila (o pool de destino de `travel` é sempre `AI_FIELD_ZONES`, zonas de combate — sem esse guard uma IA social ocasionalmente "viajaria" para fora da vila). Âncora de spawn usa o mesmo ponto real de spawn/respawn/retorno da vila (`720,1258`) já usado em outros pontos do código, com jitter pequeno. Reposição roda no mesmo tick de 1s de `aiPopulationTick`, respeitando o mesmo toggle `fieldSpawnEnabled` do painel admin — pausar Living World pausa campo e vila com um único botão. `VILLAGE_SOCIAL_CAP` é deliberadamente um teto fixo simples, não configurável pelo admin (arquitetura simples, nunca entra no `fieldWorldCap`/`perMapCap`/rebalanceamento de campo).
+
+## Diagnóstico admin
+
+`livingWorldStatus()` ganha `village:{count,cap}` (visibilidade própria da população social, antes só diluída em `totalAi`) e `x`/`y` arredondados em cada entidade. O painel Living World ganha um card "IA social (Vila)", uma linha "vila" na distribuição por mapa, `type:'VILLAGE'` na tabela (em vez de cair em `FIELD`), e colunas `X, Y` na tabela de entidades.
+
+## População de campo: decisão deliberada de não aumentar sem prova
+
+`FIELD_AI_HARD_MAX=40`/`PER_MAP_HARD_MAX=10` (Fase 5.16.1) já expõem um controle admin ao vivo, reversível, para aumentar a população de campo até 40 total/10 por mapa sem qualquer mudança de código. Como a causa raiz real era sincronização/descobribilidade e não capacidade, e como gerar carga sintética real contra produção para um benchmark formal de 5 níveis seria arriscado e desnecessário dado que o cap já é ajustável ao vivo e reversível, esta fase **não** altera os defaults (`fieldWorldCap:10`, `perMapCap:4`). Aumentar a população, quando desejado, é uma decisão operacional do admin via painel — não uma mudança de código.
+
+## Testes
+
+`test/ai.test.js`: snapshot de `welcome` inclui IA pré-existente (prova direta do fix, não depende do timing do broadcast periódico); consistência de map-ID nas 7 zonas de campo (`aiSpawnEntity(zone).map`/`aiPublicPlayer(...).map` idênticos ao nome da zona); `aiSpawnAnchor` nunca ancora num outlier isolado; população social da vila respeita o teto e nunca sai de `idle`/`wander`/`rest` mesmo após centenas de ticks; âncora da vila fica perto do ponto real de spawn/respawn. `test/living-world-admin.test.js`: `village` no status, `type:'VILLAGE'`, x/y em cada entidade, e pause bloqueando também a reposição da vila.
+
+## Verificação
+
+`node -c server.js`, checagem de sintaxe isolada dos `<script>` de `index.html`/`admin.html`, `npm test` (556→558 testes conforme os novos foram adicionados, 0 falhas) e `git diff --check` (sem espaço em branco) confirmados a cada rodada de edição. Suite completa permanece verde incluindo `session-replaced-hotfix`, `ws-auth`, `characters`, `server-authority`, `combat`, `dungeon-party`, `ai-fill`, `world-boss`, `market`, `guild` e `admin` — nenhuma regressão introduzida.
+
+## Limitações conhecidas
+
+O teste de snapshot de `welcome` com IA pré-existente e o teste `/api/admin/ai` dependem de Supabase configurado (`hasSupabase()`) e ficam `SKIP` em ambiente local sem essas credenciais — skip não é o mesmo que passar, e isso é reportado explicitamente. Validação visual final em produção (Vila, Floresta, Cripta e pelo menos mais duas zonas) precisa ser feita após o merge e deploy, já documentada separadamente como necessária.
