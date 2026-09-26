@@ -1849,3 +1849,60 @@ Solução (arquitetura pedida explicitamente): em vez de depender do snapshot pe
 ## Limitações conhecidas
 
 A extensão Claude in Chrome não estava conectada nesta sessão (relatado ao usuário, não contornado) — toda verificação visual usou o navegador embutido (pane), que é automação de navegador real (Chromium), só não é o Chrome pessoal do usuário. Testes de performance formais com população simulada de 10/20/30 (pedidos como item opcional da missão) não foram executados nesta rodada — o teste de 4 minutos com 40 IA (o teto duro do sistema) já rodou sem sinal de degradação (sem erro, sem lag perceptível no `setInterval` de 1s, broadcasts consistentes), mas não mediu CPU/memória/event-loop-lag formalmente.
+
+# FASE 5.17 — Progressão Hardcore & Economia x1
+
+Substitui a antiga "5.17 Guild Wars". Documento completo, com tabelas, premissas e riscos: [`docs/FASE-5.17-PROGRESSAO-ECONOMIA.md`](docs/FASE-5.17-PROGRESSAO-ECONOMIA.md).
+
+## Resumo
+
+- **Fonte única:** `game-data/balance-data.js`, no formato UMD.
+  - No navegador é carregado **antes** de `gear-data.js` e fica dentro de um IIFE. Scripts clássicos compartilham o escopo global, e um `const` duplicado derrubava o cliente (achado no Browser QA, coberto por teste).
+  - O servidor é a autoridade. O cliente só exibe.
+- **Level cap 40 real:**
+  - A curva nova (2.360 → 1.090.000 por nível) substitui `30×level`.
+  - No Lv40 a XP é descartada e o HUD mostra `Lv 40 MAX`.
+  - Personagem acima de 40 vira 40 (único rebaixamento).
+  - XP antiga é normalizada sem dar level-up grátis.
+- **Tempo simulado 1→40** (`node tools/balance-sim.js`): eficiente 114,6h · **ativo 148,5h** · casual 194,1h.
+- **XP:**
+  - gap de level no abate (−8 = 0% até +3 = 115% máx);
+  - missões em fração do need (6% / 12% / 22%);
+  - masmorra paga XP de conclusão (limite diário);
+  - World Boss e TvT em fração do need (limite diário).
+- **Drop por tier** (roll único, no máximo 1 item):
+
+  | Fonte | Rare | Epic | Legendary |
+  |---|---:|---:|---:|
+  | Comum | 0,3% | 0,03% | — |
+  | Elite / chefe de campo | 3% | 0,3% | — |
+  | Chefe de masmorra | 12% | 2,5% | 0,3% |
+  | World Boss (individual) | 30% | 7% | 1% |
+
+- **Enchant:**
+  - +1..+3 em ouro (`itemLv × rarityMul × alvo × 10`, 100%).
+  - +4..+10 em gemas (1/2/3/4/6/8/12; 80% → 15%).
+  - **Falha nunca destrói nem reduz.**
+  - Poder acumulado: +10 = +27,5%.
+- **Gemas viraram moeda de progressão:** mob comum dá 0. Chefe de campo, masmorra, World Boss e TvT têm limites diários ou semanais em `save.rwd` (travado no PUT). Estimativa: casual ~18/sem, ativo ~40/sem, endgame ~47/sem.
+- **Party XP:** 100 / 65 / 48 / 40% por membro, só para membros no mesmo mapa, perto, vivos e com sessão autoritativa (sem leech).
+- **Morte PvE:** −0,25% do need, nunca level, item, ouro ou gema. PvP, TvT e World Boss: zero.
+
+## Testes
+
+- `test/fase-5-17-progression.test.js` (puro): cap, migração, gap, quest, gemas, masmorra, World Boss, TvT, party, morte, drop e escopo do cliente.
+- `test/fase-5-17-integration.test.js`: forja por PUT, enchant HTTP, quest e migração. Precisa de Supabase de TESTE; sem credencial fica **SKIPPED**.
+- `enchant.test.js`, `loot-rarity.test.js`, `tvt.test.js`, `world-boss.test.js`, `dungeon.test.js` e `quest-persistence.test.js` foram atualizados para as regras novas.
+
+## Verificação
+
+- **Browser QA** (servidor local, sem Supabase): o login exige Supabase, então **gameplay com conta não foi testado no navegador**. Foram verificados, com estado injetado só na página local (sem conta, sem servidor remoto):
+  - carga limpa, sem erros de console nem do servidor;
+  - HUD `Lv 40 MAX` com barra em 100%;
+  - `gainXp` offline travando em 40;
+  - Ferreiro mostrando custo em gemas, chance de 35% e texto de "falha não quebra";
+  - XP de missão local espelhando a do servidor.
+
+## Próximo grande sistema
+
+**FASE 5.18 — Guild Wars** (planejada, não implementada).

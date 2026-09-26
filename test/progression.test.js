@@ -6,6 +6,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { hasSupabase, startServer, stopServer, httpJson } = require('./helpers');
+const BALANCE = require('../game-data/balance-data.js');
 
 const PORT = 8103;
 let srv;
@@ -29,7 +30,7 @@ test('quest: recompensa exata concedida e quest avanca', { skip: !hasSupabase() 
   assert.equal(r.status, 200);
   assert.equal(r.json.character.save.gold, 30);
   assert.equal(r.json.character.save.pv, 1);
-  assert.equal(r.json.character.save.xp, 20);
+  assert.equal(r.json.character.save.xp, BALANCE.questXpFor(2)); // Fase 5.17: XP de missao = fracao da curva
   assert.equal(r.json.character.save.quest, 3);
 });
 

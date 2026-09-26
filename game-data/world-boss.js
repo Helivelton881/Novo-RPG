@@ -1,11 +1,16 @@
 'use strict';
 
+// Fase 5.17: level cap/recompensas vem da fonte central de balanceamento.
+const BALANCE=require('./balance-data.js');
 const WORLD_BOSS_MAP_RE=/^wb#[0-9a-z]{6,10}#[A-Z2-9]{6}$/;
 const WORLD_BOSS_DURATION_MS=10*60*1000;
 const WORLD_BOSS_RESPAWN_MS=10*1000;
 const WORLD_BOSS_TARGET_TTK_SECONDS=300;
 const WORLD_BOSS_MIN_CONTRIBUTION=.01;
-const WORLD_BOSS_REWARD=Object.freeze({gold:360,gem:18,xp:18000});
+// Fase 5.17: XP virou fracao da XP_TO_NEXT do jogador e a gema tem limite
+// semanal (ver BALANCE.WORLD_BOSS + grantWorldBossRewards em server.js). Este
+// objeto fica so como resumo compativel (xpRatio no lugar do XP fixo antigo).
+const WORLD_BOSS_REWARD=Object.freeze({gold:BALANCE.WORLD_BOSS.GOLD,gem:BALANCE.WORLD_BOSS.GEMS,xpRatio:BALANCE.WORLD_BOSS.XP_RATIO});
 const BOSS_ATTACKS=Object.freeze({normal:Object.freeze({name:'Golpe do Titã',telegraphMs:500,range:95,hpRatio:.18}),heavy:Object.freeze({name:'Impacto Ancestral',telegraphMs:1200,range:150,hpRatio:.32}),aoe:Object.freeze({name:'Onda Sísmica',telegraphMs:1500,range:280,hpRatio:.30})});
 const CLASS_BASE=Object.freeze({
   guerreiro:{dmg0:11,dmgL:3.2,hp0:130,hpL:20,def0:4,block:0},
@@ -21,7 +26,7 @@ function skillMul(id,r){return({spin:1.4+.3*(r-1),dash:1.2+.25*(r-1),roots:.8+.2
 function finite(v,fallback=0){v=Number(v);return Number.isFinite(v)?v:fallback}
 function equipmentTotals(eq={}){let atk=0,def=0,hp=0,block=0,speed=0;for(const it of Object.values(eq||{})){if(!it)continue;atk+=finite(it.atk);def+=finite(it.def);hp+=finite(it.hp);block+=finite(it.blk);speed+=finite(it.spd)}return{atk,def,hp,block,speed}}
 function combatSnapshot({userId,charId,name,cls,lvl,save}){
-  cls=CLASS_BASE[cls]?cls:'guerreiro';lvl=Math.max(1,Math.min(99,Math.round(finite(lvl,1))));const base=CLASS_BASE[cls],gear=equipmentTotals(save&&save.eq);
+  cls=CLASS_BASE[cls]?cls:'guerreiro';lvl=BALANCE.clampLevel(finite(lvl,1));const base=CLASS_BASE[cls],gear=equipmentTotals(save&&save.eq);
   const skills={};for(const id of CLASS_SKILLS[cls])skills[id]=Math.max(1,Math.min(3,Math.round(finite(save&&save.sk&&save.sk[id],1))));
   const weaponMul=cls==='guerreiro'?1.3:cls==='arqueiro'?1.2:1.15;
   return Object.freeze({userId,charId,name:String(name||'Herói').slice(0,14),cls,lvl,skills,atk:Math.round(gear.atk*weaponMul),def:Math.round(base.def0+gear.def),maxHp:Math.max(50,Math.round(base.hp0+base.hpL*(lvl-1)+gear.hp)),block:Math.max(0,Math.min(.5,gear.block)),speed:Math.max(0,Math.min(.8,gear.speed)),basicCdMs:BASIC_CD_MS[cls]});

@@ -32,10 +32,13 @@ test('gearLevelForMob: nunca retorna nivel fora de GEAR_DATA.GEAR_LEVELS', () =>
   }
 });
 
-test('GEAR_DROP_RATES: fonte central com os 3 valores exatos da especificacao', () => {
-  assert.equal(S.GEAR_DROP_RATES.common.rare, 0.025);
-  assert.equal(S.GEAR_DROP_RATES.common.epic, 0.0025);
-  assert.equal(S.GEAR_DROP_RATES.boss.legendary, 0.05);
+test('GEAR_DROP_RATES (Fase 5.17): alias da fonte central BALANCE.DROP_RATES com os valores oficiais', () => {
+  assert.equal(S.GEAR_DROP_RATES, S.BALANCE.DROP_RATES);
+  assert.deepEqual(S.GEAR_DROP_RATES.common, { rare: 0.003, epic: 0.0003, legendary: 0 });
+  assert.deepEqual(S.GEAR_DROP_RATES.elite, { rare: 0.03, epic: 0.003, legendary: 0 });
+  assert.deepEqual(S.GEAR_DROP_RATES.dungeonBoss, { rare: 0.12, epic: 0.025, legendary: 0.003 });
+  assert.deepEqual(S.GEAR_DROP_RATES.worldBoss, { rare: 0.30, epic: 0.07, legendary: 0.01 });
+  assert.equal(S.BALANCE.FIELD_BOSS_DROP_TIER, 'elite', 'chefe de campo usa a tabela de elite (sem Legendary)');
 });
 
 test('DROP_TYPES_BY_CLASS: exatamente arma da classe + armor + cape + boots, nunca escudo/capacete/joia', () => {
@@ -48,59 +51,52 @@ test('DROP_TYPES_BY_CLASS: exatamente arma da classe + armor + cape + boots, nun
   }
 });
 
-test('rollGearDrop (mob comum): rng baixo cai em Epic (primeiro teste, so testa Rare se Epic falhar)', () => {
-  const rng = queueRng([0.001, 0.1]); // primeiro roll (epic 0.25%) sucede
-  const drop = S.rollGearDrop({ mobLevel: 20, boss: false, cls: 'guerreiro', rng });
-  assert.ok(drop);
-  assert.equal(drop.rarity, 'epic');
-});
+// Fase 5.17: UM unico roll decide a raridade (faixas acumuladas
+// legendary -> epic -> rare), o segundo roll decide o tipo.
+function boundaryCases(tier) {
+  const t = S.BALANCE.DROP_RATES[tier], e = 1e-9;
+  const L = t.legendary, LE = t.legendary + t.epic, LER = t.legendary + t.epic + t.rare;
+  const out = [];
+  if (L > 0) out.push([L - e, 'legendary']);
+  out.push([L, t.epic > 0 ? 'epic' : 'rare'], [LE - e, 'epic'], [LE, 'rare'], [LER - e, 'rare'], [LER, null], [0.999999, null]);
+  return out;
+}
+for (const tier of ['common', 'elite', 'dungeonBoss', 'worldBoss']) {
+  test(`rollGearDrop (${tier}): fronteiras exatas do roll unico (boundary RNG)`, () => {
+    for (const [r, expected] of boundaryCases(tier)) {
+      const drop = S.rollGearDrop({ mobLevel: 30, tier, cls: 'guerreiro', rng: queueRng([r, 0.1]) });
+      assert.equal(drop ? drop.rarity : null, expected, `${tier} r=${r}`);
+    }
+  });
+}
 
-test('rollGearDrop (mob comum): Epic falha, Rare sucede (segundo roll independente)', () => {
-  const rng = queueRng([0.5, 0.01, 0.2]); // 1o roll (epic) falha, 2o roll (rare) sucede, 3o roll = tipo
-  const drop = S.rollGearDrop({ mobLevel: 20, boss: false, cls: 'guerreiro', rng });
-  assert.ok(drop);
-  assert.equal(drop.rarity, 'rare');
-});
-
-test('rollGearDrop (mob comum): ambos falham -> null (nenhum equipamento)', () => {
-  const rng = queueRng([0.9, 0.9]);
-  const drop = S.rollGearDrop({ mobLevel: 20, boss: false, cls: 'guerreiro', rng });
-  assert.equal(drop, null);
-});
-
-test('rollGearDrop (mob comum): NUNCA gera Legendary nem Basic pelo roll especial', () => {
-  for (let i = 0; i < 50; i++) {
-    const rng = queueRng([Math.random() * 0.03, Math.random() * 0.03, Math.random()]);
-    const drop = S.rollGearDrop({ mobLevel: 30, boss: false, cls: 'mago', rng });
-    if (drop) { assert.notEqual(drop.rarity, 'legendary'); assert.notEqual(drop.rarity, 'basic'); }
+test('rollGearDrop: mob comum e elite NUNCA geram Legendary nem Basic', () => {
+  for (const tier of ['common', 'elite']) {
+    for (let i = 0; i <= 1000; i++) {
+      const drop = S.rollGearDrop({ mobLevel: 30, tier, cls: 'mago', rng: queueRng([i / 1000 * 0.05, 0.3]) });
+      if (drop) { assert.notEqual(drop.rarity, 'legendary'); assert.notEqual(drop.rarity, 'basic'); }
+    }
   }
 });
 
-test('rollGearDrop (boss): rng baixo -> Legendary', () => {
-  const rng = queueRng([0.01, 0.4]);
-  const drop = S.rollGearDrop({ mobLevel: 40, boss: true, cls: 'arqueiro', rng });
-  assert.ok(drop);
+test('rollGearDrop: boss:true sem tier = chefe de CAMPO = tabela elite (nunca Legendary)', () => {
+  assert.equal(S.rollGearDrop({ mobLevel: 40, boss: true, cls: 'arqueiro', rng: queueRng([0, 0.4]) }).rarity, 'epic');
+  assert.equal(S.rollGearDrop({ mobLevel: 40, boss: true, cls: 'arqueiro', rng: queueRng([0.01, 0.4]) }).rarity, 'rare');
+  assert.equal(S.rollGearDrop({ mobLevel: 40, boss: true, cls: 'arqueiro', rng: queueRng([0.5]) }), null);
+});
+
+test('rollGearDrop: no maximo UM item especial por roll (mutuamente exclusivo, 1 roll de raridade)', () => {
+  let calls = 0;
+  const rng = () => { calls++; return 0; };
+  const drop = S.rollGearDrop({ mobLevel: 40, tier: 'worldBoss', cls: 'druida', rng });
   assert.equal(drop.rarity, 'legendary');
-});
-
-test('rollGearDrop (boss): rng alto -> null, sem substituto', () => {
-  const rng = queueRng([0.9]);
-  const drop = S.rollGearDrop({ mobLevel: 40, boss: true, cls: 'arqueiro', rng });
-  assert.equal(drop, null);
-});
-
-test('rollGearDrop (boss): NUNCA gera Rare/Epic/Basic pelo roll especial de chefe', () => {
-  for (let i = 0; i < 50; i++) {
-    const rng = queueRng([Math.random() * 0.06, Math.random()]);
-    const drop = S.rollGearDrop({ mobLevel: 25, boss: true, cls: 'druida', rng });
-    if (drop) assert.equal(drop.rarity, 'legendary');
-  }
+  assert.equal(calls, 2, '1 roll de raridade + 1 roll de tipo, nunca rolls extras por raridade');
 });
 
 test('rollGearDrop: tipo sempre dentro de DROP_TYPES_BY_CLASS da classe real (nunca fora da classe)', () => {
   for (const cls of ['guerreiro', 'arqueiro', 'mago', 'druida']) {
     for (let i = 0; i < 20; i++) {
-      const rng = queueRng([0.001, i / 20]);
+      const rng = queueRng([0.0001, i / 20]);
       const drop = S.rollGearDrop({ mobLevel: 20, boss: false, cls, rng });
       assert.ok(drop);
       assert.ok(S.DROP_TYPES_BY_CLASS[cls].includes(drop.type), `${cls} nao deveria receber ${drop.type}`);
@@ -109,8 +105,8 @@ test('rollGearDrop: tipo sempre dentro de DROP_TYPES_BY_CLASS da classe real (nu
 });
 
 test('rollGearDrop: modelo canonico completo -- enchant 0, uid valido (UUID), stats/req/nome de GEAR_DATA', () => {
-  const rng = queueRng([0.01, 0.4]);
-  const drop = S.rollGearDrop({ mobLevel: 24, boss: true, cls: 'guerreiro', rng });
+  const rng = queueRng([0.001, 0.4]);
+  const drop = S.rollGearDrop({ mobLevel: 24, tier: 'dungeonBoss', cls: 'guerreiro', rng });
   assert.equal(drop.item.enchant, 0);
   assert.match(drop.item.uid, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   const expectedStats = S.GEAR_DATA.statsFor(drop.item.type, drop.item.lv, 'legendary');
@@ -174,26 +170,27 @@ test('rollDungeonTrashLoot: nao gera mais Basic garantido (compatibilidade da Fa
   }
 });
 
-test('rollDungeonTrashLoot: gold/gem/pv preservados (mesmo formato de sempre)', () => {
+test('rollDungeonTrashLoot: gold/pv preservados; gema = 0 (Fase 5.17)', () => {
   const loot = S.rollDungeonTrashLoot(20, 'guerreiro');
   assert.ok(loot.gold >= 3 && loot.gold <= 3 * 8 + 2 * 8); // 3-5 moedas de 1-6
-  assert.ok(typeof loot.gem === 'number' && (loot.gem === 0 || loot.gem === 1));
+  assert.equal(loot.gem, 0);
   assert.ok(typeof loot.pv === 'number' && (loot.pv === 0 || loot.pv === 1));
 });
 
-test('rollDungeonBossLoot: nao entrega mais 3 Basic garantidos -- no maximo 1 item, e so pode ser legendary', () => {
+test('rollDungeonBossLoot: no maximo 1 item, tabela dungeonBoss (Rare/Epic/Legendary)', () => {
   for (let i = 0; i < 60; i++) {
     const loot = S.rollDungeonBossLoot('arqueiro', 20);
     assert.ok(loot.items.length <= 1, 'no maximo 1 item de chefe de masmorra');
-    for (const it of loot.items) assert.equal(it.rarity, 'legendary');
+    for (const it of loot.items) assert.ok(['rare', 'epic', 'legendary'].includes(it.rarity));
   }
 });
 
-test('rollDungeonBossLoot: gold/gem/pv preservados (22 moedas, 6 gemas, 1 pocao -- comportamento antigo)', () => {
+test('rollDungeonBossLoot: ouro/pocao preservados; gema saiu do loot (vai pela recompensa diaria de conclusao)', () => {
   const loot = S.rollDungeonBossLoot('guerreiro', 40);
-  assert.equal(loot.gem, 6);
+  assert.equal(loot.gem, 0);
   assert.equal(loot.pv, 1);
   assert.ok(loot.gold >= 22);
+  assert.deepEqual(loot.bossClear, { bossLvl: 40 });
 });
 
 test('rollDungeonBossLoot: nivel do item segue gearLevelForMob(bossLvl), nao mais fixo em lv12', () => {

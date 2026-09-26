@@ -26,14 +26,16 @@ const TVT_TEAM_LABELS = Object.freeze({ red: 'Equipe Rubra', blue: 'Equipe Azul'
 // resolveAttackDamage/mob_damage) pra nunca virar spawn kill.
 const TVT_ARENA = Object.freeze({ w: 2200, h: 1400 });
 const TVT_SPAWN = Object.freeze({ red: { x: 350, y: 700 }, blue: { x: 1850, y: 700 } });
-// Proposta inicial documentada em LEIA-PRIMEIRO.md (comparada contra World
-// Boss/dungeon/quests antes de congelar): bem abaixo do World Boss (fonte
-// mais forte, sem Legendary aqui de propósito), repetível a cada 4h.
-const TVT_REWARD = Object.freeze({
-  win: Object.freeze({ gold: 120, gem: 6, xp: 6000 }),
-  loss: Object.freeze({ gold: 60, gem: 3, xp: 3000 }),
-  draw: Object.freeze({ gold: 90, gem: 4, xp: 4500 }),
-});
+// Fase 5.17: recompensa vem de game-data/balance-data.js (BALANCE.TVT). XP
+// deixou de ser fixa (6000/3000/4500 pulava levels inteiros no inicio da
+// curva nova) e virou fracao da XP_TO_NEXT do proprio jogador (`xpRatio`);
+// gema e bem menor e so paga nas primeiras BALANCE.TVT.GEM_EVENTS_PER_WEEK
+// participacoes da semana (estado no save, ver grantTvtRewards em server.js).
+// Morte em TvT nunca custa XP (PvP).
+const BALANCE = require('./balance-data.js');
+const TVT_REWARD = Object.freeze(Object.fromEntries(['win', 'loss', 'draw'].map(o => [o, Object.freeze({
+  gold: BALANCE.TVT.GOLD[o], gem: BALANCE.TVT.GEMS[o], xpRatio: BALANCE.TVT.XP_RATIO[o],
+})])));
 // Contribuição mínima pra elegibilidade de recompensa (não exige kill --
 // dano OU cura contam; heal pesa mais pra não penalizar Druida puro-suporte).
 const TVT_MIN_CONTRIBUTION = 30;
