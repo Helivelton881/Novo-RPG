@@ -523,6 +523,7 @@ button{font:inherit;color:inherit}
 
 <script src="/game-data/balance-data.js"></script>
 <script src="/game-data/gear-data.js"></script>
+<script src="/game-data/monster-animation.js"></script>
 <script src="/game-data/dungeon-generation.js"></script>
 <script src="/game-data/pathfinding.js"></script>
 <script>
@@ -4020,7 +4021,8 @@ function draw(){
   const list=[],x0=camX-120,x1=camX+vw+120,y0=camY-100,y1=camY+vh+260;
   for(const s of statics){if(s.sy<y0||s.sy>y1||s.x>x1||s.x+s.w<x0)continue;list.push(s)}
   for(const n of NPCS)list.push({sy:n.y,fn:()=>drawNpc(n)});
-  for(const s of MOBS)if(!s.dead)list.push({sy:s.y,fn:()=>drawMob(s)});
+  // Fase 5.17.1: mob do Vulcao recem-morto continua na lista (ordenado por Y) so pelo fade de morte.
+  for(const s of MOBS)if(!s.dead||vulcDeathVisible(s))list.push({sy:s.y,fn:()=>drawMob(s)});
   for(const c of CHICKENS)list.push({sy:c.y,fn:()=>drawChicken(c)});
   for(const f of FX)list.push({sy:f.y+1,fn:()=>f.kind==='fdecor'||f.kind==='fcrystal'?drawFDecor(f):f.kind==='ember'?0:f.kind==='brazier'?drawBrazier(f):f.kind==='fire'?drawFire(f):0});
   for(const ch of CHESTS)list.push({sy:ch.y,fn:()=>drawChest(ch)});
@@ -6219,15 +6221,38 @@ function updCinza(s,dt){
   }
 }
 function newCinza(x,y,lvl,pack){const st=vlStats({type:'sala',lvl});return{type:'cinza',pack,x,y,sx:x,sy:y,lvl,hp:Math.round(st.hp*.6),maxhp:Math.round(st.hp*.6),anim:Math.random()*6,flash:0,kx:0,ky:0,dead:false,respawn:0,state:'idle',t:0,t0:1,cd:1+Math.random()*2,ret:0,tx:x,ty:y,wt:Math.random()*3,face:1,lx:0,ly:1,hit:false,bar:0,moving:false,hov:22,ph:Math.random()*6}}
+/* ---- Fase 5.17.1: animacao do Vulcao via MONSTER_ANIM (game-data/monster-animation.js) ----
+   Estado visual com prioridade death > attack > hit > walk > idle, frame
+   pelo timer PROPRIO da entidade (s.anim, acumulado por dt), espelhamento
+   pela orientacao NATIVA do sprite (salamander/elemental/skel_ash/lorde
+   olham pra esquerda no PNG; bat_ash e frontal). Hitbox (mobDims) intocada. */
+function vulcAnim(s){if(!s.dead){s._seenAlive=true;s._deadAt=null}const vs=MONSTER_ANIM.visualState(s);return{vs,col:MONSTER_ANIM.frameFor(s.type,vs,s.anim,s.moving)}}
+function vulcMirror(s){if(MONSTER_ANIM.shouldMirror(s.type,s.face)){ctx.translate(Math.round(s.x)*2,0);ctx.scale(-1,1)}}
+// Fallback de morte (asset sem frames de morte): o ultimo frame some em
+// MONSTER_ANIM.DEATH_FADE_S. So pra quem foi visto vivo (mob que ja estava
+// morto ao entrar no mapa nunca "pisca"); nunca volta a andar.
+function vulcDeathVisible(s){
+  if(!s.dead)return false;
+  if(!s._seenAlive||!MONSTER_ANIM.configFor(s.type))return false;
+  if(s._deadAt==null)s._deadAt=time;
+  const a=MONSTER_ANIM.deathAlpha(s._deadAt,time);if(a<=0){s._seenAlive=false;return false}
+  return true;
+}
+function drawVulcSprite(s,key,col,fw,fh,x,y,w,h,extra){
+  const dying=s.dead,a=dying?MONSTER_ANIM.deathAlpha(s._deadAt,time):1;
+  ctx.save();vulcMirror(s);if(dying)ctx.globalAlpha=a;
+  ctx.drawImage(IMG[key],col*fw,0,fw,fh,x,y,w,h);
+  if(!dying&&s.flash>0){ctx.globalAlpha=.75;ctx.drawImage(WHITE[key],col*fw,0,fw,fh,x,y,w,h);ctx.globalAlpha=1}
+  else if(!dying&&extra)extra();
+  ctx.restore();
+}
 function drawCinza(s){
-  if(s.dead)return;
-  const S=SPR.bat_ash,sc=1.3,fw=S.fw,fh=S.fh,w=fw*sc,h=fh*sc,col=Math.floor(s.anim*(s.state==='swoop'?18:12))%3;
-  const bob=Math.sin(s.ph*1.7)*3,yy=s.y-s.hov-bob,shake=s.state==='wind'?Math.round(Math.sin(time*50)*1.4):0;
+  const S=SPR.bat_ash,sc=1.3,fw=S.fw,fh=S.fh,w=fw*sc,h=fh*sc,{vs,col}=vulcAnim(s);
+  const bob=Math.sin(s.ph*1.7)*3,yy=s.y-s.hov-bob,shake=s.state==='wind'&&vs!=='death'?Math.round(Math.sin(time*50)*1.4):0;
   const x=Math.round(s.x-w/2+shake),y=Math.round(yy-h+6);
-  shadow(s.x,s.y+1,w*.3,4);
-  ctx.drawImage(IMG.bat_ash,col*fw,0,fw,fh,x,y,w,h);
-  if(s.flash>0){ctx.globalAlpha=.75;ctx.drawImage(WHITE.bat_ash,col*fw,0,fw,fh,x,y,w,h);ctx.globalAlpha=1}
-  drawHpBar(s,w,x,y);
+  if(vs!=='death')shadow(s.x,s.y+1,w*.3,4);
+  drawVulcSprite(s,'bat_ash',col,fw,fh,x,y,w,h);
+  if(vs!=='death')drawHpBar(s,w,x,y);
 }
 function killVulcao(s){
   const st=vlStats(s);s.respawn=s.temp?1e9:60;gainXp(s.temp?Math.round(st.xp*.5):st.xp);
@@ -6250,56 +6275,41 @@ function killLorde(s){
   saveGame();
 }
 function drawSala(s){
-  if(s.dead)return;
-  const S=SPR.salamander,st=vlStats(s),sc=st.sc,w=S.fw*sc,h=S.fh*sc;
-  let col=0;if(s.moving)col=[1,0,2,0][Math.floor(s.anim*7)%4];else if(s.state==='wind'||s.state==='breath')col=2;
-  const shake=(s.state==='wind'||s.state==='breath')?Math.round(Math.sin(time*50)*1.2):0;
+  const S=SPR.salamander,st=vlStats(s),sc=st.sc,w=S.fw*sc,h=S.fh*sc,{vs,col}=vulcAnim(s);
+  const shake=vs==='attack'?Math.round(Math.sin(time*50)*1.2):0;
   const x=Math.round(s.x-w/2+shake),y=Math.round(s.y-h+3);
-  shadow(s.x,s.y+1,w*.34,4.5);
-  if(s.enr){ctx.globalAlpha=.22+.2*Math.sin(time*10);ctx.fillStyle='#ff7a3c';ctx.beginPath();ctx.ellipse(s.x,s.y-h*.4,w*.5,h*.5,0,0,6.29);ctx.fill();ctx.globalAlpha=1}
-  ctx.save();if(s.face===-1){ctx.translate(Math.round(s.x)*2,0);ctx.scale(-1,1)}
-  ctx.drawImage(IMG.salamander,col*S.fw,0,S.fw,S.fh,x,y,w,h);
-  if(s.flash>0){ctx.globalAlpha=.75;ctx.drawImage(WHITE.salamander,col*S.fw,0,S.fw,S.fh,x,y,w,h);ctx.globalAlpha=1}
-  ctx.restore();
-  drawHpBar(s,w,x,y,st);
+  if(vs!=='death'){
+    shadow(s.x,s.y+1,w*.34,4.5);
+    if(s.enr){ctx.globalAlpha=.22+.2*Math.sin(time*10);ctx.fillStyle='#ff7a3c';ctx.beginPath();ctx.ellipse(s.x,s.y-h*.4,w*.5,h*.5,0,0,6.29);ctx.fill();ctx.globalAlpha=1}
+  }
+  drawVulcSprite(s,'salamander',col,S.fw,S.fh,x,y,w,h);
+  if(vs!=='death')drawHpBar(s,w,x,y,st);
 }
 function drawElem(s){
-  if(s.dead)return;
-  const S=SPR.elemental,st=vlStats(s),sc=st.sc,w=S.fw*sc,h=S.fh*sc;
-  let col=0;if(s.moving)col=[1,0,2,0][Math.floor(s.anim*5)%4];else if(s.state==='wind')col=2;
-  const shake=s.state==='slam'?Math.round(Math.sin(time*50)*1.6):0;
+  const S=SPR.elemental,st=vlStats(s),sc=st.sc,w=S.fw*sc,h=S.fh*sc,{vs,col}=vulcAnim(s);
+  const shake=vs==='attack'&&s.state==='slam'?Math.round(Math.sin(time*50)*1.6):0;
   const x=Math.round(s.x-w/2+shake),y=Math.round(s.y-h+3);
-  shadow(s.x,s.y+1,w*.36,6);
-  ctx.save();if(s.face===-1){ctx.translate(Math.round(s.x)*2,0);ctx.scale(-1,1)}
-  ctx.drawImage(IMG.elemental,col*S.fw,0,S.fw,S.fh,x,y,w,h);
-  if(s.flash>0){ctx.globalAlpha=.75;ctx.drawImage(WHITE.elemental,col*S.fw,0,S.fw,S.fh,x,y,w,h);ctx.globalAlpha=1}
-  ctx.restore();
-  drawHpBar(s,w,x,y,st);
+  if(vs!=='death')shadow(s.x,s.y+1,w*.36,6);
+  drawVulcSprite(s,'elemental',col,S.fw,S.fh,x,y,w,h);
+  if(vs!=='death')drawHpBar(s,w,x,y,st);
 }
 function drawCalc(s){
-  if(s.dead)return;
-  const S=SPR.skel_ash,st=vlStats(s),sc=st.sc,w=S.fw*sc,h=S.fh*sc;
-  let col=0;if(s.moving)col=[1,0,2,0][Math.floor(s.anim*7)%4];else if(s.state==='wind')col=2;
-  const shake=s.state==='wind'?Math.round(Math.sin(time*50)*1.2):0,gd=s.state==='guard'||s.guard>0;
+  const S=SPR.skel_ash,st=vlStats(s),sc=st.sc,w=S.fw*sc,h=S.fh*sc,{vs,col}=vulcAnim(s);
+  const shake=vs==='attack'?Math.round(Math.sin(time*50)*1.2):0,gd=vs!=='death'&&(s.state==='guard'||s.guard>0);
   const x=Math.round(s.x-w/2+shake),y=Math.round(s.y-h+3);
-  shadow(s.x,s.y+1,w*.34,4.5);
-  ctx.save();ctx.translate(s.x,s.y-3);ctx.scale(1,.6);ctx.lineWidth=gd?4:3;ctx.strokeStyle=gd?'rgba(255,150,90,.9)':'rgba(255,120,60,.28)';ctx.beginPath();ctx.arc(0,0,32,s.fa-1.1,s.fa+1.1);ctx.stroke();ctx.restore();
-  ctx.save();if(s.face===-1){ctx.translate(Math.round(s.x)*2,0);ctx.scale(-1,1)}
-  ctx.drawImage(IMG.skel_ash,col*S.fw,0,S.fw,S.fh,x,y,w,h);
-  if(s.flash>0){ctx.globalAlpha=.75;ctx.drawImage(WHITE.skel_ash,col*S.fw,0,S.fw,S.fh,x,y,w,h);ctx.globalAlpha=1}
-  ctx.restore();
-  drawHpBar(s,w,x,y,st);
+  if(vs!=='death'){
+    shadow(s.x,s.y+1,w*.34,4.5);
+    ctx.save();ctx.translate(s.x,s.y-3);ctx.scale(1,.6);ctx.lineWidth=gd?4:3;ctx.strokeStyle=gd?'rgba(255,150,90,.9)':'rgba(255,120,60,.28)';ctx.beginPath();ctx.arc(0,0,32,s.fa-1.1,s.fa+1.1);ctx.stroke();ctx.restore();
+  }
+  drawVulcSprite(s,'skel_ash',col,S.fw,S.fh,x,y,w,h);
+  if(vs!=='death')drawHpBar(s,w,x,y,st);
 }
 function drawLorde(s){
-  const S=SPR.lorde,st=vlStats(s),sc=st.sc,w=S.fw*sc,h=S.fh*sc;
-  let col=0;if(s.moving)col=[1,0,2,0][Math.floor(s.anim*6)%4];else if(s.state==='wind'||s.state==='wind2')col=2;
+  const S=SPR.lorde,st=vlStats(s),sc=st.sc,w=S.fw*sc,h=S.fh*sc,{vs,col}=vulcAnim(s);
   const x=Math.round(s.x-w/2),y=Math.round(s.y-h+3);
-  shadow(s.x,s.y+1,w*.32,7);
-  ctx.save();if(s.face===-1){ctx.translate(Math.round(s.x)*2,0);ctx.scale(-1,1)}
-  ctx.drawImage(IMG.lorde,col*S.fw,0,S.fw,S.fh,x,y,w,h);
-  if(s.flash>0){ctx.globalAlpha=.75;ctx.drawImage(WHITE.lorde,col*S.fw,0,S.fw,S.fh,x,y,w,h)}
-  else if(s.enr){ctx.globalAlpha=.16+.26*(.5+.5*Math.sin(time*30));ctx.fillStyle='#ff3a1a';ctx.fillRect(x,y,w,h)}
-  ctx.globalAlpha=1;ctx.restore();
+  if(vs!=='death')shadow(s.x,s.y+1,w*.32,7);
+  drawVulcSprite(s,'lorde',col,S.fw,S.fh,x,y,w,h,s.enr?()=>{ctx.globalAlpha=.16+.26*(.5+.5*Math.sin(time*30));ctx.fillStyle='#ff3a1a';ctx.fillRect(x,y,w,h);ctx.globalAlpha=1}:null);
+  if(vs==='death')return;
   const ex=Math.round(s.x),bw=90,bx=Math.round(s.x-bw/2),by=y-10;
   ctx.fillStyle='#1a0808';ctx.fillRect(bx-1,by-1,bw+2,7);ctx.fillStyle='#3d1414';ctx.fillRect(bx,by,bw,5);
   const fwid=Math.max(0,Math.round(bw*s.hp/s.maxhp));ctx.fillStyle='#b83ad6';ctx.fillRect(bx,by,fwid,5);ctx.fillStyle='rgba(255,255,255,.35)';ctx.fillRect(bx,by,fwid,1);

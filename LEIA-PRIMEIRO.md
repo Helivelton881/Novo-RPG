@@ -1906,3 +1906,23 @@ Substitui a antiga "5.17 Guild Wars". Documento completo, com tabelas, premissas
 ## Próximo grande sistema
 
 **FASE 5.18 — Guild Wars** (planejada, não implementada).
+
+# FASE 5.17.1 — Hotfix Vulcão Ardente: Sprites & Animações
+
+Hotfix só visual. Detalhes, tabelas e QA: [`docs/FASE-5.17.1-VULCAO-SPRITES-ANIMACOES.md`](docs/FASE-5.17.1-VULCAO-SPRITES-ANIMACOES.md).
+
+- **Causa raiz:**
+  - Os sprites `salamander`/`elemental`/`skel_ash`/`lorde` são nativos para a **esquerda**, mas eram espelhados andando para a esquerda: andavam de costas.
+  - O walk sobrescrevia o ataque.
+  - O `slam` (Elemental) e o `meteor` (Senhor das Chamas) não tinham pose.
+  - O `face` do servidor congelava durante o ataque e piscava com empurrões de colisão.
+- **Correção:**
+  - Nova fonte única `game-data/monster-animation.js`, com config por tipo, estados death > attack > hit > walk > idle, espelhamento pela orientação nativa, `face` com histerese e mirando o alvo no ataque, e fade de morte como fallback.
+  - `server.js` só muda o campo visual `face` dos mobs do Vulcão.
+- **Não mudou:** gameplay (hitbox, dano, XP, loot, IA, `balance-data.js`).
+- **Assets:** 1 linha × 3 frames, sem frames de ataque/hit/morte/vertical. Os fallbacks estão documentados e nenhum PNG foi alterado.
+- **Testes:** `test/fase-5-17-1-vulcao-animation.test.js`.
+
+## Próximo grande sistema
+
+**FASE 5.18 — Guild Wars.**
