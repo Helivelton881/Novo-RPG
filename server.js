@@ -15,6 +15,10 @@ const GUILD = require('./game-data/guild.js');
 const BESTIARY = require('./game-data/bestiary.js');
 const RANKINGS = require('./game-data/rankings.js');
 const MARKET = require('./game-data/market.js');
+// Fase 5.17: fonte unica de balanceamento (level cap 40, curva de XP, gap,
+// drop, enchant, gemas, party, morte). Nunca espalhar numero economico aqui.
+const BALANCE = require('./game-data/balance-data.js');
+const { LEVEL_CAP, clampLevel } = BALANCE;
 
 const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
@@ -212,9 +216,16 @@ function rollMobLoot(type, boss, lvl) {
   else if (type === 'lorde') p = { coins: 26, maxv: 10, pPot: 1, pGem: 7, pApple: 1, pScroll: 1 };
   else return null;
   let gold = 0; for (let i = 0; i < p.coins; i++) gold += 1 + Math.floor(Math.random() * p.maxv);
+  // Fase 5.17: gema virou moeda de progressao (+4..+10 do Ferreiro). Mob
+  // comum deixa de ser fonte de gema (BALANCE.COMMON_MOB_GEM_CHANCE = 0) e
+  // chefe de campo (respawn de 60s) nunca mais paga gema fixa por abate --
+  // so a recompensa DIARIA de chefe em creditKillReward (1 gema no 1o abate
+  // do dia de cada chefe nao-trivial). Os pGem antigos acima ficam so como
+  // registro historico da tabela do cliente; nao geram mais gema.
+  const gemChance = boss ? 0 : BALANCE.COMMON_MOB_GEM_CHANCE;
   return {
     gold,
-    gem: p.pGem >= 1 ? p.pGem : (Math.random() < p.pGem ? 1 : 0),
+    gem: Math.random() < gemChance ? 1 : 0,
     pv: Math.random() < p.pPot ? 1 : 0,
     ap: Math.random() < p.pApple ? 1 : 0,
     scr: Math.random() < p.pScroll ? 1 : 0,
@@ -252,9 +263,11 @@ function pickTier(l) {
 function rollDungeonTrashLoot(lvl, cls, rng) {
   let gold = 0; const coins = 3 + Math.floor(Math.random() * 3);
   for (let i = 0; i < coins; i++) gold += 1 + Math.floor(Math.random() * 6);
-  const pv = Math.random() < .14 ? 1 : 0, gem = Math.random() < .08 ? 1 : 0;
+  // Fase 5.17: trash de masmorra nao da mais gema (era 8%) -- gema de
+  // masmorra so vem do chefe, com limite diario (BALANCE.DUNGEON).
+  const pv = Math.random() < .14 ? 1 : 0, gem = Math.random() < BALANCE.DUNGEON.TRASH_GEM_CHANCE ? 1 : 0;
   const items = [];
-  const drop = rollGearDrop({ mobLevel: lvl, boss: false, cls, rng });
+  const drop = rollGearDrop({ mobLevel: lvl, tier: 'common', cls, rng });
   if (drop) items.push(drop.item);
   return { gold, gem, pv, items };
 }
@@ -268,9 +281,13 @@ function rollDungeonTrashLoot(lvl, cls, rng) {
 function rollDungeonBossLoot(cls, bossLvl, rng) {
   let gold = 0; for (let i = 0; i < 22; i++) gold += 1 + Math.floor(Math.random() * 9);
   const items = [];
-  const drop = rollGearDrop({ mobLevel: bossLvl, boss: true, cls, rng });
+  const drop = rollGearDrop({ mobLevel: bossLvl, tier: 'dungeonBoss', cls, rng });
   if (drop) items.push(drop.item);
-  return { gold, gem: 6, pv: 1, items };
+  // Fase 5.17: as 6 gemas fixas por chefe (sem cooldown = centenas/dia)
+  // sairam daqui -- a gema do chefe agora e decidida em creditDungeonReward
+  // com o estado diario do save (BALANCE.DUNGEON.BOSS_GEMS no 1o clear
+  // recompensado do dia), junto com a XP de conclusao.
+  return { gold, gem: 0, pv: 1, items, bossClear: { bossLvl } };
 }
 
 // Espelha a maquina de estados de progressao de P.quest: os ~15 checkpoints
@@ -294,7 +311,7 @@ const QUEST_GATE_FIELDS = ['kills', 'gk', 'ks', 'kw', 'kp', 'kt', 'ki', 'kv'];
 // handleChest, handleQuest, creditKillReward, dungeon). gunlock e os
 // chestN entram aqui pela mesma razao (desbloqueio de portal so por
 // buy_portal; abertura de bau de campo so por handleChest).
-const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards'];
+const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards', 'rwd'];
 function advanceQuestOnKill(save, type, boss, lvl) {
   const q = save.quest, changed = {};
   const bump = (field, need, next) => {
@@ -343,14 +360,10 @@ const DROP_TYPES_BY_CLASS = {
   mago:      ['staffm', 'armor', 'cape', 'boots'],
   druida:    ['staffd', 'armor', 'cape', 'boots'],
 };
-// Fonte unica das chances de drop -- nunca espalhar 0.025/0.0025/0.05 em
-// mais de um lugar. Mutuamente exclusivos por design (rollGearDrop testa
-// Epic primeiro, so testa Rare se Epic falhar -- nunca os dois no mesmo
-// abate) e no maximo 1 equipamento especial por morte confirmada.
-const GEAR_DROP_RATES = {
-  common: { epic: 0.0025, rare: 0.025 }, // mob comum: NUNCA legendary, NUNCA basic como drop
-  boss:   { legendary: 0.05 },           // boss (campo ou masmorra): SO legendary ou nada
-};
+// Fase 5.17: fonte unica das chances de drop agora e BALANCE.DROP_RATES
+// (common/elite/dungeonBoss/worldBoss). Alias mantido pra compatibilidade
+// de import (testes/ferramentas).
+const GEAR_DROP_RATES = BALANCE.DROP_RATES;
 // Maior faixa de GEAR_DATA.GEAR_LEVELS que nao ultrapassa o nivel real do
 // mob/boss -- fonte central, nunca duplicar esta matematica em outro lugar
 // (chamada tanto pra drop de mob comum quanto pra Legendary de boss).
@@ -365,22 +378,17 @@ function gearLevelForMob(lvl) {
 // cliente (rarity/type/lv sempre decididos aqui). `rng` e injetavel pra
 // teste deterministico (default Math.random em producao); nunca usar um
 // rng/seed vindo do cliente. Retorna null (nada dropou) ou
-// {rarity,type,lv,item}. Chamada tanto por mob de campo quanto de masmorra
-// (mesma politica nos dois, ver LEIA-PRIMEIRO.md "Fase 5.3").
-function rollGearDrop({ mobLevel, boss, cls, rng }) {
+// {rarity,type,lv,item}.
+// Fase 5.17: `tier` escolhe a tabela de BALANCE.DROP_RATES (common, elite,
+// dungeonBoss, worldBoss). Chamadas antigas com `boss:true` sem tier caem em
+// BALANCE.FIELD_BOSS_DROP_TIER (elite -- chefe de campo nunca da Legendary);
+// `boss:false` cai em 'common'. UM unico roll decide a raridade (mutuamente
+// exclusivo, no maximo 1 item) e um segundo roll decide o tipo.
+function rollGearDrop({ mobLevel, boss, tier, cls, rng }) {
   const roll = typeof rng === 'function' ? rng : Math.random;
-  let rarity;
-  if (boss) {
-    if (roll() < GEAR_DROP_RATES.boss.legendary) rarity = 'legendary';
-    else return null;
-  } else {
-    // ordem: testa Epic primeiro; so testa Rare se Epic falhar -- nunca os
-    // dois no mesmo kill (mutuamente exclusivos por construcao, cada teste
-    // consome seu proprio roll()).
-    if (roll() < GEAR_DROP_RATES.common.epic) rarity = 'epic';
-    else if (roll() < GEAR_DROP_RATES.common.rare) rarity = 'rare';
-    else return null;
-  }
+  const t = tier || (boss ? BALANCE.FIELD_BOSS_DROP_TIER : 'common');
+  const rarity = BALANCE.rollDropRarity(t, roll);
+  if (!rarity) return null;
   const types = DROP_TYPES_BY_CLASS[cls] || DROP_TYPES_BY_CLASS.guerreiro;
   const type = types[Math.min(types.length - 1, Math.floor(roll() * types.length))];
   const lv = gearLevelForMob(mobLevel);
@@ -399,8 +407,8 @@ const SHOP_BAG_MAX = 12;
 function typeSlot(type) { return (type === 'sword' || type === 'bow' || type === 'staffd' || type === 'staffm') ? 'sword' : type; }
 
 // ===== Fase 5.4: enchant (+0..+10) server-authoritative =====
-// RNG de producao: crypto.randomInt (nao Math.random) -- essa operacao pode
-// DESTRUIR equipamento valioso, entao usa a mesma familia de RNG seguro ja
+// RNG de producao: crypto.randomInt (nao Math.random) -- essa operacao
+// consome moeda de progressao (gema), entao usa a mesma familia de RNG seguro ja
 // usada pro seed de masmorra (Fase 5.2). 1e6 buckets da granularidade de
 // sobra pra uma tabela de chance com no maximo 2 casas decimais (0.10..0.70).
 function secureRandom() { return crypto.randomInt(0, 1000000) / 1000000; }
@@ -453,23 +461,27 @@ function attemptEnchant(save, uid, expectedEnchant, rng) {
   // (com o expectedEnchant "antigo") é rejeitada aqui, sem cobrar nada.
   if (!Number.isInteger(expectedEnchant) || expectedEnchant !== item.enchant) return { error: 'STALE_ENCHANT_STATE' };
   const target = item.enchant + 1;
-  const cost = GEAR_DATA.enchantCost(item.type, item.lv, target);
+  // Fase 5.17: custo SEMPRE decidido aqui (BALANCE.enchantCostFor): +1..+3
+  // em ouro (itemLv x rarityMul x alvo x 10), +4..+10 em gemas (tabela
+  // fixa). Nada vindo do cliente (custo, chance, "success") e lido.
+  const cost = BALANCE.enchantCostFor(item.lv, item.rarity, target);
   if (!cost) return { error: 'Item inválido' };
-  if (save.gold < cost) return { error: 'Moedas insuficientes' };
+  if (cost.currency === 'gold' && save.gold < cost.amount) return { error: 'Moedas insuficientes' };
+  if (cost.currency === 'gem' && save.gem < cost.amount) return { error: 'Gemas insuficientes' };
   // custo sempre cobrado (sucesso ou falha) -- so pedido INVALIDO (qualquer
-  // `error` acima) nunca chega a debitar.
-  save.gold -= cost;
+  // `error` acima) nunca chega a debitar nem a tocar no item.
+  if (cost.currency === 'gold') save.gold -= cost.amount; else save.gem -= cost.amount;
+  const base = { cost: cost.amount, currency: cost.currency, goldCost: cost.currency === 'gold' ? cost.amount : 0, gemCost: cost.currency === 'gem' ? cost.amount : 0, previousEnchant: item.enchant, uid };
   const success = rollEnchantSuccess(target, rng);
   if (success) {
     const recalced = applyEnchant(item, target);
     if (where === 'bag') save.bag[bagIdx] = recalced; else save.eq[slot] = recalced;
-    return { result: { success: true, destroyed: false, cost, previousEnchant: item.enchant, newEnchant: target, uid, item: recalced } };
+    return { result: { ...base, success: true, destroyed: false, newEnchant: target, item: recalced } };
   }
-  // falha em +4 ou acima destroi o item -- sem downgrade, sem "proteção",
-  // sem copia substituta. O uid simplesmente deixa de existir no
-  // inventario (nunca acontece pra +1/+2/+3, rollEnchantSuccess garante).
-  if (where === 'bag') save.bag.splice(bagIdx, 1); else save.eq[slot] = null;
-  return { result: { success: false, destroyed: true, cost, previousEnchant: item.enchant, newEnchant: item.enchant, uid, item: null } };
+  // Fase 5.17: falha em +4..+10 NUNCA destroi, NUNCA remove, NUNCA reduz o
+  // enchant -- so consome as gemas. O item continua exatamente como estava
+  // (mesmo uid/enchant/stats, mesmo lugar na mochila/equipado).
+  return { result: { ...base, success: false, destroyed: false, newEnchant: item.enchant, item } };
 }
 
 // Espelha as recompensas de missao dos dialogos (NPC_SCRIPT em index.html,
@@ -507,13 +519,23 @@ const QUEST_REWARDS = {
   22: {next:23, gold:0, gem:0, xp:0},
   26: {next:27, gold:0, gem:0, xp:0},
 };
-// Espelha need() do cliente (index.html): XP necessario pra passar do nivel l.
-// Generico -- usado tanto pra recompensa de missao quanto pra XP de abate.
-const questNeed = l => 30 * l;
+// Fase 5.17: a XP de missao deixa de ser um numero fixo e vira fracao da
+// XP_TO_NEXT do nivel ADEQUADO do estagio (BALANCE.QUEST_STAGE_XP/
+// QUEST_XP_RATIO: simples ~6%, principal ~12%, final de capitulo ~22%).
+// Ouro/gema/pocao/`next` e a maquina de estados continuam exatamente iguais
+// -- so o campo xp e recalculado aqui, uma vez, na carga do modulo. Os
+// estagios "portal liberado" (6/10/.../26, finais de capitulo) passam a
+// pagar XP pelo MESMO caminho idempotente (save.quest===from).
+for (const [stage, r] of Object.entries(QUEST_REWARDS)) r.xp = BALANCE.questXpFor(Number(stage));
+
+// Fase 5.17: curva de XP e level cap vem de BALANCE (XP_TO_NEXT, cap 40).
+// Unica funcao de ganho de XP do servidor -- nunca passa de LEVEL_CAP, no
+// cap a XP e descartada (nunca acumula XP escondida), e XP antiga
+// incompativel e normalizada antes (nunca vira varios level-ups sozinha).
+const questNeed = l => BALANCE.xpToNext(l);
 function applyXpGain(save, lvl, xpGain) {
-  let xp = save.xp + xpGain;
-  while (xp >= questNeed(lvl)) { xp -= questNeed(lvl); lvl = Math.min(99, lvl + 1); }
-  return { xp, lvl };
+  const r = BALANCE.applyXp(lvl, save.xp, xpGain);
+  return { xp: r.xp, lvl: r.lvl };
 }
 
 // Espelha os 7 bauis de mapa (um por area de campo, floresta..vulcao -- o
@@ -594,10 +616,10 @@ async function patchCharacterFields(charId, userId, fields) {
     });
     const row = rows0[0];
     if (!row) return null;
-    let lvl = row.lvl;
+    let lvl = clampLevel(row.lvl);
     const save = sanitizeSave(row.save, lvl);
     for (const [key, value] of Object.entries(fields)) {
-      if (key === 'lvl') { lvl = Math.max(1, Math.min(99, Number(value) || lvl)); save.lvl = lvl; }
+      if (key === 'lvl') { lvl = clampLevel(Number(value) || lvl); save.lvl = lvl; }
       else save[key] = value;
     }
     const clean = sanitizeSave(save, lvl);
@@ -744,7 +766,7 @@ function resolveAttackDamage(p, msg, now, rng=Math.random) {
     if (!pend || now > pend.expiresAt) return null;
     dmg = msg.splash ? Math.round(pend.dmg * .6) : pend.dmg;
   } else return null;
-  const lvl = Math.max(1, Math.min(99, Number(p.lvl) || 1)), maxHit = Math.min(6500, 50 + lvl * 60);
+  const lvl = clampLevel(Number(p.lvl) || 1), maxHit = Math.min(6500, 50 + lvl * 60);
   dmg = Math.max(0, Math.min(maxHit, dmg));
   return dmg || null;
 }
@@ -910,19 +932,66 @@ function dedupeByUid(items, seen) {
   return out;
 }
 
+// ===== Fase 5.17: estado de recompensas com limite diario/semanal =====
+// Fica no proprio save (server-side, travado no PUT via ECONOMY_LOCK_FIELDS)
+// -- e o que impede atividade repetivel (masmorra, chefe de campo, World
+// Boss, TvT) de virar fonte infinita de gema/XP, sem cap global invisivel.
+//   d   = dia (America/Sao_Paulo, 'YYYY-MM-DD') dos contadores diarios
+//   dx  = clears de masmorra que ja pagaram XP hoje
+//   dg  = clears de masmorra que ja pagaram gema hoje
+//   fb  = tipos de chefe de campo que ja pagaram gema hoje
+//   wbx = World Boss que ja pagaram XP hoje;  tvx = TvT que ja pagaram XP hoje
+//   w   = semana ISO ('YYYY-Www') dos contadores semanais
+//   wbg = World Boss que ja pagaram gema na semana; tvg = idem TvT
+const RWD_BOSS_TYPES = new Set(['goblin', 'skeleton', 'wolf', 'toxic', 'caster', 'sky', 'lorde']);
+function sanitizeRewardState(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const n = v => Math.max(0, Math.min(99, Math.round(Number(v) || 0)));
+  const d = typeof r.d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.d) ? r.d : '';
+  const w = typeof r.w === 'string' && /^\d{4}-W\d{2}$/.test(r.w) ? r.w : '';
+  const fb = Array.isArray(r.fb) ? [...new Set(r.fb.filter(t => RWD_BOSS_TYPES.has(t)))] : [];
+  return { d, dx: n(r.dx), dg: n(r.dg), fb, wbx: n(r.wbx), tvx: n(r.tvx), w, wbg: n(r.wbg), tvg: n(r.tvg) };
+}
+function rewardDayKey(now = Date.now()) {
+  const z = EVENT_DATA.zonedParts(now);
+  return `${z.year}-${String(z.month).padStart(2, '0')}-${String(z.day).padStart(2, '0')}`;
+}
+function rewardWeekKey(now = Date.now()) {
+  const z = EVENT_DATA.zonedParts(now);
+  const date = new Date(Date.UTC(z.year, z.month - 1, z.day));
+  const dow = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - dow);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const week = Math.ceil(((date - yearStart) / 86400000 + 1) / 7);
+  return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+}
+// Vira o dia/semana se preciso (zera so os contadores daquele periodo).
+function rolloverRewardState(save, now = Date.now()) {
+  const r = save.rwd = sanitizeRewardState(save.rwd);
+  const d = rewardDayKey(now), w = rewardWeekKey(now);
+  if (r.d !== d) { r.d = d; r.dx = 0; r.dg = 0; r.fb = []; r.wbx = 0; r.tvx = 0; }
+  if (r.w !== w) { r.w = w; r.wbg = 0; r.tvg = 0; }
+  return r;
+}
+
 // Reconstroi o save inteiro a partir de limites plausiveis em vez de
 // confiar no JSON que o cliente manda: mesmo com o jogo ainda calculando
 // dano/inventario no cliente, isso impede que editar localStorage/memoria
 // vire ouro, itens ou XP infinitos persistidos na nuvem.
 function sanitizeSave(raw, lvl) {
   const save = raw && typeof raw === 'object' ? raw : {};
+  // Fase 5.17: level SEMPRE dentro de 1..LEVEL_CAP (40) e XP sempre numa
+  // faixa valida da curva nova (0..need-1; 0 no cap) -- ver
+  // BALANCE.normalizeProgress pras regras de compatibilidade.
+  const progress = BALANCE.normalizeProgress(lvl, save.xp);
+  lvl = progress.lvl;
   const clampInt = (v, max) => Math.max(0, Math.min(max, Math.round(Number(v) || 0)));
   // Arenas de evento nunca sao persistidas no save; acesso e exclusivamente
   // server-driven via WorldBossInstance.
   const map = ALLOWED_MAP.test(cleanText(save.map, 24)) ? cleanText(save.map, 24) : 'vila';
   const out = {
     cls: ALLOWED_CLASS.has(save.cls) ? save.cls : 'guerreiro', lvl,
-    xp: clampInt(save.xp, 30 * (lvl + 1) * 3), gold: clampInt(save.gold, 500000), gem: clampInt(save.gem, 5000),
+    xp: progress.xp, gold: clampInt(save.gold, 500000), gem: clampInt(save.gem, 5000),
     pv: clampInt(save.pv, 999), pa: clampInt(save.pa, 999), quest: clampInt(save.quest, 40), kills: clampInt(save.kills, 999999),
     hp: clampInt(save.hp, 100000), mp: clampInt(save.mp, 100000),
     x: Number.isFinite(Number(save.x)) ? Number(save.x) : 0, y: Number.isFinite(Number(save.y)) ? Number(save.y) : 0,
@@ -938,6 +1007,7 @@ function sanitizeSave(raw, lvl) {
     chat: Array.isArray(save.chat) ? save.chat.slice(-40).map(m => ({n: cleanText(m && m.n, 20), t: cleanText(m && m.t, 240), sys: !!(m && m.sys)})) : [],
     wbRewards: Array.isArray(save.wbRewards) ? save.wbRewards.slice(-12).map(x=>cleanText(x,96)).filter(Boolean) : [],
     tvtRewards: Array.isArray(save.tvtRewards) ? save.tvtRewards.slice(-12).map(x=>cleanText(x,96)).filter(Boolean) : [],
+    rwd: sanitizeRewardState(save.rwd),
   };
   for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
   // Um uid nunca pode aparecer duas vezes (mochila+mochila ou mochila+
@@ -1144,7 +1214,14 @@ async function handleCharacters(req, res, pathname) {
 
     if (pathname === '/api/characters' && req.method === 'GET') {
       const rows = await supabase('characters', {query:`?select=id,slot,name,cls,lvl,map,save,updated_at&user_id=eq.${user.id}&order=slot.asc`});
-      json(res,200,{characters: rows}); return true;
+      // Fase 5.17: leitura ja devolve nivel/XP normalizados (cap 40, XP na
+      // faixa valida da curva) mesmo antes da proxima gravacao -- o resto
+      // do save vai exatamente como esta no banco.
+      const characters = rows.map(r => {
+        const prog = BALANCE.normalizeProgress(r.lvl, r.save && r.save.xp);
+        return {...r, lvl: prog.lvl, save: r.save && typeof r.save === 'object' ? {...r.save, lvl: prog.lvl, xp: prog.xp} : r.save};
+      });
+      json(res,200,{characters}); return true;
     }
 
     if (pathname === '/api/characters' && req.method === 'POST') {
@@ -1171,7 +1248,7 @@ async function handleCharacters(req, res, pathname) {
       const result = await withCharLock(id, async () => {
         const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(id)}&user_id=eq.${user.id}&limit=1`});
         const current = rows0[0];
-        let lvl = Math.max(1, Math.min(99, Number(input.lvl) || 1));
+        let lvl = clampLevel(Number(input.lvl) || 1);
         const save = sanitizeSave(input.save, lvl);
         // Fase 5.2: se o personagem ja existe no banco, o PUT generico deixa
         // de ser fonte de verdade pra QUALQUER campo com valor real --
@@ -1189,8 +1266,8 @@ async function handleCharacters(req, res, pathname) {
         // via. Documentado como decisao consciente (nao um recurso quebrado
         // por acidente), ver LEIA-PRIMEIRO.md "Fase 5.2".
         if (current) {
-          const currentSave = sanitizeSave(current.save, current.lvl);
-          lvl = current.lvl; save.lvl = lvl; save.xp = currentSave.xp; save.quest = currentSave.quest;
+          const currentSave = sanitizeSave(current.save, clampLevel(current.lvl));
+          lvl = clampLevel(current.lvl); save.lvl = lvl; save.xp = currentSave.xp; save.quest = currentSave.quest;
           for (const f of QUEST_GATE_FIELDS) save[f] = currentSave[f];
           for (const f of ECONOMY_LOCK_FIELDS) save[f] = currentSave[f];
           const locked = lockOwnedItems(save, currentSave);
@@ -1246,7 +1323,7 @@ async function handleShop(req, res, pathname) {
       const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
       const row = rows0[0];
       if (!row) return {status:404, body:{error:'Personagem não encontrado'}};
-      const lvl = row.lvl;
+      const lvl = clampLevel(row.lvl);
       const save = sanitizeSave(row.save, lvl);
       const action = String(input.action || '');
       let error = null;
@@ -1427,7 +1504,7 @@ async function handleQuest(req, res, pathname) {
       const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
       const row = rows0[0];
       if (!row) return {status:404, body:{error:'Personagem não encontrado'}};
-      let lvl = row.lvl;
+      let lvl = clampLevel(row.lvl);
       const save = sanitizeSave(row.save, lvl);
       if (save.quest !== from) return {status:400, body:{error:'Missão inválida ou já concluída'}};
 
@@ -1449,7 +1526,7 @@ async function handleQuest(req, res, pathname) {
       // `p.quest` -- sem este resync, a MESMA sessão WS nunca consegue entrar na
       // zona recém-desbloqueada até reconectar (F5), mesmo com o banco já correto.
       const activeWs = activeCharacterSockets.get(charId), activeP = activeWs && clients.get(activeWs);
-      if (activeP) activeP.quest = save.quest;
+      if (activeP) { activeP.quest = save.quest; syncLiveLevel(activeP, lvl); }
       return {status:200, body:{character: rows[0]}};
     });
     json(res, result.status, result.body); return true;
@@ -1473,7 +1550,7 @@ async function handleChest(req, res, pathname) {
       const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
       const row = rows0[0];
       if (!row) return {status:404, body:{error:'Personagem não encontrado'}};
-      const lvl = row.lvl;
+      const lvl = clampLevel(row.lvl);
       const save = sanitizeSave(row.save, lvl);
       const reward = CHEST_REWARDS[String(input.flag || '')];
 
@@ -1523,14 +1600,30 @@ function applyGearDrops(save, lvl, items) {
 // sempre no cliente e o unico que existe, como antes desta fase.
 // `drop` (Fase 5.3, opcional): resultado de rollGearDrop ({rarity,type,lv,item})
 // pra mob de CAMPO -- null se nao dropou nada.
-async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, questInfo, drop) {
+// Fase 5.17: `xpInfo` = {base, mobLvl, share} -- a XP final e calculada AQUI,
+// com o nivel REAL persistido do personagem (nunca p.lvl nem nada do
+// cliente): base x share de party x multiplicador de gap (mobLvl-playerLvl)
+// x boost temporario de evento (x1 sem evento). Chefe de campo nao-trivial
+// paga 1 gema no 1o abate do dia daquele tipo (save.rwd.fb).
+function killXpFor(xpInfo, playerLvl, now = Date.now()) {
+  if (!xpInfo) return 0;
+  const share = Number.isFinite(xpInfo.share) ? xpInfo.share : 1;
+  const mobLvl = Number.isFinite(xpInfo.mobLvl) ? xpInfo.mobLvl : playerLvl;
+  return Math.floor((Number(xpInfo.base) || 0) * share * BALANCE.xpGapMultiplier(mobLvl - playerLvl) * BALANCE.eventMultiplier('xp', now));
+}
+// Mantem a conexao viva em dia com o nivel persistido (antes da 5.17 p.lvl
+// ficava congelado ate reconectar -- afeta dano base e a XP de gap).
+function syncLiveLevel(p, lvl) { if (p && Number.isFinite(lvl)) p.lvl = clampLevel(lvl); }
+async function creditKillReward(ws, p, xpInfo, fields, loot, bossChestField, questInfo, drop) {
   if (!p.charId || !p.userId) return;
   try {
     await withCharLock(p.charId, async () => {
       const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
       const row = rows0[0]; if (!row) return;
-      let lvl = row.lvl;
+      let lvl = clampLevel(row.lvl);
+      const lvlBefore = lvl;
       const save = sanitizeSave(row.save, lvl);
+      const xpGain = killXpFor(xpInfo, lvl);
       const leveled = applyXpGain(save, lvl, xpGain);
       save.xp = leveled.xp; lvl = leveled.lvl; save.lvl = lvl;
       for (const f of fields) save[f] = Math.min(999, (save[f] || 0) + 1);
@@ -1543,6 +1636,8 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
         save.scr = Math.min(999, save.scr + loot.scr);
         Object.assign(pushed, { gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr });
       }
+      const bossGem = fieldBossDailyGem(save, questInfo, lvlBefore);
+      if (bossGem) pushed.gem = save.gem;
       if (bossChestField && !save[bossChestField]) { save.key = Math.min(999, (save.key || 0) + 1); pushed.key = save.key; }
       if (questInfo) Object.assign(pushed, advanceQuestOnKill(save, questInfo.type, questInfo.boss, questInfo.lvl));
       const { granted, lost } = drop ? applyGearDrops(save, lvl, [drop.item]) : { granted: null, lost: null };
@@ -1552,8 +1647,10 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
       // a MESMA lacuna -- `p` aqui já é a conexão viva de quem matou o mob,
       // então é so manter o campo em dia sem nenhuma busca extra.
       p.quest = save.quest;
+      syncLiveLevel(p, lvl);
       syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
-      const msg = {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)};
+      const msg = {type:'kill_reward', xp: save.xp, lvl, xpGain, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)};
+      if (bossGem) msg.bossGem = bossGem;
       // bag/eq so vao junto quando um item de fato mudou o save (a maioria
       // dos abates nao dropa nada -- nao vale mandar o inventario inteiro
       // toda hora por isso).
@@ -1563,6 +1660,92 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
     });
   } catch (err) {
     console.error('kill_reward_error', err.message, err.status || '', err.detail || '');
+  }
+}
+// Pura/testavel: gema diaria de chefe de campo (muta `save`). So paga se o
+// chefe nao for trivial pro jogador (gap >= BALANCE.FIELD_BOSS.MIN_GAP) e
+// se aquele TIPO de chefe ainda nao pagou hoje. Retorna a gema concedida.
+function fieldBossDailyGem(save, questInfo, playerLvl, now = Date.now()) {
+  if (!questInfo || !questInfo.boss || !RWD_BOSS_TYPES.has(questInfo.type)) return 0;
+  if ((questInfo.lvl - playerLvl) < BALANCE.FIELD_BOSS.MIN_GAP) return 0;
+  const rwd = rolloverRewardState(save, now);
+  if (rwd.fb.includes(questInfo.type)) return 0;
+  rwd.fb.push(questInfo.type);
+  save.gem = Math.min(5000, save.gem + BALANCE.FIELD_BOSS.DAILY_GEMS);
+  return BALANCE.FIELD_BOSS.DAILY_GEMS;
+}
+// ===== Fase 5.17: XP de party (campo) =====
+// Membros ELEGIVEIS da party de quem deu o golpe final: mesma party
+// (memberParty por userId), conexao autoritativa viva do personagem, MESMO
+// mapa, vivo e a ate BALANCE.PARTY_XP_RANGE px do mob. Qualquer outro
+// membro (parado na Vila, outro mapa, morto, longe) nao entra na conta nem
+// dilui a XP de ninguem -- nunca ha leech remoto. IA nunca participa (nao
+// tem userId de conta). Tudo server-side a partir de p.map/p.x/p.y ja
+// validados pelo servidor. Pura sobre (parties, memberParty, clients).
+function partyXpRecipients(killerWs, killer, mob) {
+  const list = [[killerWs, killer]];
+  const code = killer && killer.userId ? memberParty.get(killer.userId) : null;
+  const party = code ? parties.get(code) : null;
+  if (!party) return list;
+  for (const memberUserId of party.members.keys()) {
+    if (memberUserId === killer.userId) continue;
+    for (const [ws, p] of clients) {
+      if (p.userId !== memberUserId || !p.authed || !p.charId || p.kind === 'ai') continue;
+      if (!isAuthoritativeSocket(p.charId, ws) || p.gameplayAuthority === false) continue;
+      if (p.map !== mob.map || p.dead) continue;
+      if (!(Math.hypot(p.x - mob.x, p.y - mob.y) <= BALANCE.PARTY_XP_RANGE)) continue;
+      list.push([ws, p]);
+      break;
+    }
+    if (list.length >= 4) break;
+  }
+  return list;
+}
+// So XP (nunca loot/quest/contador/drop -- esses continuam com quem matou).
+async function creditPartyXp(ws, p, xpInfo) {
+  if (!p.charId || !p.userId) return;
+  try {
+    await withCharLock(p.charId, async () => {
+      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
+      const row = rows0[0]; if (!row) return;
+      let lvl = clampLevel(row.lvl);
+      const save = sanitizeSave(row.save, lvl);
+      const xpGain = killXpFor(xpInfo, lvl);
+      if (xpGain <= 0) return;
+      const leveled = applyXpGain(save, lvl, xpGain);
+      save.xp = leveled.xp; lvl = leveled.lvl; save.lvl = lvl;
+      await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
+      syncLiveLevel(p, lvl);
+      syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
+      send(ws, {type:'kill_reward', xp: save.xp, lvl, xpGain, party: true, fields: {}});
+    });
+  } catch (err) {
+    console.error('party_xp_error', err.message, err.status || '', err.detail || '');
+  }
+}
+// ===== Fase 5.17: penalidade de morte PvE =====
+// Chamada SO pelo caminho de dano de mob (hitTarget -- campo e masmorra).
+// PvP (player_damage), TvT e World Boss nunca chamam isto (cause != 'pve'
+// tambem zera por seguranca). Perde BALANCE.DEATH_PENALTY.PVE_XP_RATIO da
+// XP_TO_NEXT do nivel atual, limitado a XP atual: nunca perde nivel, nunca
+// fica negativa, nunca toca item/ouro/gema.
+async function applyDeathPenalty(ws, p, cause) {
+  if (!p || !p.charId || !p.userId || p.kind === 'ai' || cause !== 'pve') return;
+  try {
+    await withCharLock(p.charId, async () => {
+      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
+      const row = rows0[0]; if (!row) return;
+      const lvl = clampLevel(row.lvl);
+      const save = sanitizeSave(row.save, lvl);
+      const loss = BALANCE.deathXpLoss(lvl, save.xp, cause);
+      if (loss <= 0) return;
+      save.xp = Math.max(0, save.xp - loss);
+      await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{save}, prefer:'return=minimal'});
+      syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
+      send(ws, {type:'death_penalty', xp: save.xp, lvl, lost: loss});
+    });
+  } catch (err) {
+    console.error('death_penalty_error', err.message, err.status || '', err.detail || '');
   }
 }
 // Fase 5.2: recompensa de mob/chefe de MASMORRA -- mesmo padrao de leitura-
@@ -1576,22 +1759,47 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
 // vem de rollGearDrop (rare/epic no trash, legendary no chefe) em vez do
 // Basic garantido antigo -- 0 ou 1 item na pratica, ver
 // rollDungeonTrashLoot/rollDungeonBossLoot.
-async function creditDungeonReward(ws, p, { gold = 0, gem = 0, pv = 0, ap = 0, scr = 0, items = [] } = {}) {
+// Fase 5.17: `bossClear` ({bossLvl}, so no chefe) = recompensa de CONCLUSAO
+// com estado diario server-side (save.rwd): XP = BALANCE.DUNGEON.CLEAR_XP_RATIO
+// x XP_TO_NEXT do proprio nivel x gap(bossLvl - nivel) nos primeiros
+// XP_CLEARS_PER_DAY clears do dia; gema = BOSS_GEMS no(s) primeiro(s)
+// GEM_CLEARS_PER_DAY. Trash continua sem XP. Pura/testavel.
+function applyDungeonClearReward(save, lvl, bossClear, now = Date.now()) {
+  if (!bossClear) return { xpGain: 0, gem: 0, lvl };
+  const rwd = rolloverRewardState(save, now);
+  let xpGain = 0, gem = 0;
+  if (rwd.dx < BALANCE.DUNGEON.XP_CLEARS_PER_DAY) {
+    rwd.dx += 1;
+    xpGain = Math.floor(BALANCE.xpToNext(lvl) * BALANCE.DUNGEON.CLEAR_XP_RATIO * BALANCE.xpGapMultiplier((bossClear.bossLvl || lvl) - lvl));
+  }
+  if (rwd.dg < BALANCE.DUNGEON.GEM_CLEARS_PER_DAY) { rwd.dg += 1; gem = BALANCE.DUNGEON.BOSS_GEMS; save.gem = Math.min(5000, save.gem + gem); }
+  const leveled = applyXpGain(save, lvl, xpGain);
+  save.xp = leveled.xp; save.lvl = leveled.lvl;
+  return { xpGain, gem, lvl: leveled.lvl };
+}
+async function creditDungeonReward(ws, p, { gold = 0, gem = 0, pv = 0, ap = 0, scr = 0, items = [], bossClear = null } = {}) {
   if (!p.charId || !p.userId) return;
   try {
     await withCharLock(p.charId, async () => {
       const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
       const row = rows0[0]; if (!row) return;
-      const lvl = row.lvl;
+      let lvl = clampLevel(row.lvl);
       const save = sanitizeSave(row.save, lvl);
+      const clear = applyDungeonClearReward(save, lvl, bossClear);
+      lvl = clear.lvl;
       save.gold = Math.min(500000, save.gold + gold);
       save.gem = Math.min(5000, save.gem + gem);
       save.pv = Math.min(999, save.pv + pv);
       save.ap = Math.min(999, save.ap + ap);
       save.scr = Math.min(999, save.scr + scr);
       const { granted, lost } = applyGearDrops(save, lvl, items);
-      await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{save}, prefer:'return=minimal'});
+      await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
       const msg = {type:'dungeon_reward', gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr, bag: save.bag, eq: save.eq};
+      if (bossClear) {
+        msg.xp = save.xp; msg.lvl = lvl; msg.clearXp = clear.xpGain; msg.clearGem = clear.gem;
+        const live = clients.get(ws); if (live && live.charId === p.charId) syncLiveLevel(live, lvl);
+        syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
+      }
       if (granted) msg.drop = {rarity: granted.rarity, n: granted.n};
       if (lost) msg.dropLost = {rarity: lost.rarity, n: lost.n};
       send(ws, msg);
@@ -2720,7 +2928,7 @@ function activeCharacterForUser(userId){
 function sendToWorldBossMember(member,payload){for(const [ws,p]of clients)if(p.userId===member.userId&&p.charId===member.charId)send(ws,payload)}
 async function loadWorldBossCharacter(userId,charId){
   const rows=await supabase('characters',{query:`?select=id,name,cls,lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});const row=rows[0];
-  if(!row)return null;const save=sanitizeSave(row.save,row.lvl);return{row,save,snapshot:WORLD_BOSS.combatSnapshot({userId,charId,name:row.name||save.name,cls:row.cls,lvl:row.lvl,save})};
+  if(!row)return null;const save=sanitizeSave(row.save,clampLevel(row.lvl));return{row,save,snapshot:WORLD_BOSS.combatSnapshot({userId,charId,name:row.name||save.name,cls:row.cls,lvl:row.lvl,save})};
 }
 async function registerWorldBossParty(p,eventId){
   if(!p.authed||!p.userId||!p.charId)return{ok:false,error:'AUTH_REQUIRED'};const code=memberParty.get(p.userId),party=code&&parties.get(code);
@@ -2745,6 +2953,29 @@ async function startWorldBossEvent(event,registrations){
   }
 }
 function worldBossPublicSync(instance){const mob=maps.get(instance.mapId)?.mobs.get('ancient_titan');if(mob){mob.hp=instance.boss.hp;mob.maxhp=instance.boss.maxHp;mob.x=instance.boss.x;mob.y=instance.boss.y;mob.state=instance.boss.state;mob.dead=instance.defeated}broadcastMap(instance.mapId,WORLD_BOSS.publicWorldBossState(instance))}
+// Fase 5.17: recompensa de World Boss por membro -- pura/testavel (muta
+// `save`). Idempotente por eventId (save.wbRewards, como sempre). XP =
+// BALANCE.WORLD_BOSS.XP_RATIO x XP_TO_NEXT do proprio nivel nas primeiras
+// XP_EVENTS_PER_DAY participacoes do dia; gema so nas primeiras
+// GEM_EVENTS_PER_WEEK da semana; ouro sempre. Equipamento: UM roll
+// individual na tabela worldBoss (Rare 30% / Epic 7% / Legendary 1%,
+// mutuamente exclusivos) -- substitui o Legendary garantido pra 1 membro
+// aleatorio da Fase 5.6. `rng` injetavel (producao: secureRandom).
+function applyWorldBossReward(save, lvl, cls, eventId, rng = secureRandom, now = Date.now()) {
+  if (save.wbRewards.includes(eventId)) return null;
+  const rwd = rolloverRewardState(save, now);
+  let xpGain = 0, gem = 0;
+  if (rwd.wbx < BALANCE.WORLD_BOSS.XP_EVENTS_PER_DAY) { rwd.wbx += 1; xpGain = Math.floor(BALANCE.xpToNext(lvl) * BALANCE.WORLD_BOSS.XP_RATIO); }
+  if (rwd.wbg < BALANCE.WORLD_BOSS.GEM_EVENTS_PER_WEEK) { rwd.wbg += 1; gem = BALANCE.WORLD_BOSS.GEMS; }
+  const leveled = applyXpGain(save, lvl, xpGain);
+  save.xp = leveled.xp; save.lvl = leveled.lvl;
+  save.gold = Math.min(500000, save.gold + BALANCE.WORLD_BOSS.GOLD);
+  save.gem = Math.min(5000, save.gem + gem);
+  const drop = rollGearDrop({ mobLevel: leveled.lvl, tier: 'worldBoss', cls, rng });
+  const item = drop ? grantItem(save, leveled.lvl, drop.item) : null;
+  save.wbRewards.push(eventId); save.wbRewards = save.wbRewards.slice(-12);
+  return { lvl: leveled.lvl, xpGain, gem, gold: BALANCE.WORLD_BOSS.GOLD, item, lostItem: drop && !item ? drop.item : null };
+}
 async function grantWorldBossRewards(instance){
   if(instance.rewardGranted)return;instance.rewardGranted=true;const eligible=WORLD_BOSS.eligibleMembers(instance);if(!eligible.length)return;
   // Fase 5.9: participantes elegiveis da instancia vencedora (mesmo
@@ -2752,10 +2983,17 @@ async function grantWorldBossRewards(instance){
   // registram o abate do Tita Ancestral no bestiario -- guardado pelo
   // mesmo instance.rewardGranted acima, nunca credita duas vezes.
   for(const member of eligible)creditBestiaryKill(member.charId,'ancient_titan').catch(err=>console.error('bestiary_credit_error',err.message));
-  const ordered=[...eligible].sort(()=>secureRandom()-.5);let legendaryWinner=null,legendaryItem=null;
-  for(const candidate of ordered){try{const loaded=await loadWorldBossCharacter(candidate.userId,candidate.charId);if(loaded&&loaded.save.bag.length<24){const types=DROP_TYPES_BY_CLASS[candidate.cls]||DROP_TYPES_BY_CLASS.guerreiro;const type=types[crypto.randomInt(0,types.length)];legendaryItem=createGear(type,gearLevelForMob(candidate.lvl),'legendary');legendaryWinner=candidate;break}}catch{}}
   for(const member of eligible){
-    try{await withCharLock(member.charId,async()=>{const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded)return;const {row,save}=loaded;if(save.wbRewards.includes(instance.eventId))return;const leveled=applyXpGain(save,row.lvl,WORLD_BOSS.WORLD_BOSS_REWARD.xp);save.xp=leveled.xp;save.lvl=leveled.lvl;save.gold=Math.min(500000,save.gold+WORLD_BOSS.WORLD_BOSS_REWARD.gold);save.gem=Math.min(5000,save.gem+WORLD_BOSS.WORLD_BOSS_REWARD.gem);let won=null;if(legendaryWinner&&member.charId===legendaryWinner.charId)won=grantItem(save,leveled.lvl,legendaryItem);save.wbRewards.push(instance.eventId);save.wbRewards=save.wbRewards.slice(-12);await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});member.rewarded=true;syncRankLevelXp(member.charId,leveled.lvl,save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));bumpRankStat(member.charId,'world_boss_kills',1).catch(()=>{});bumpRankStat(member.charId,'world_boss_participations',1).catch(()=>{});sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl,bag:save.bag,eq:save.eq,legendary:won?{n:won.n,rarity:won.rarity,enchant:won.enchant}:null})})}catch(err){console.error('world_boss_reward_error',member.charId,err.message)}
+    try{await withCharLock(member.charId,async()=>{
+      const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded)return;const {row,save}=loaded;
+      const r=applyWorldBossReward(save,clampLevel(row.lvl),member.cls,instance.eventId);if(!r)return;
+      await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:r.lvl,save},prefer:'return=minimal'});
+      member.rewarded=true;
+      for(const [,live] of clients)if(live.charId===member.charId&&live.userId===member.userId)syncLiveLevel(live,r.lvl);
+      syncRankLevelXp(member.charId,r.lvl,save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));bumpRankStat(member.charId,'world_boss_kills',1).catch(()=>{});bumpRankStat(member.charId,'world_boss_participations',1).catch(()=>{});
+      const it=r.item;
+      sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:r.lvl,xpGain:r.xpGain,gemGain:r.gem,bag:save.bag,eq:save.eq,drop:it?{n:it.n,rarity:it.rarity,enchant:it.enchant}:null,legendary:it&&it.rarity==='legendary'?{n:it.n,rarity:it.rarity,enchant:it.enchant}:null,dropLost:r.lostItem?{n:r.lostItem.n,rarity:r.lostItem.rarity}:null});
+    })}catch(err){console.error('world_boss_reward_error',member.charId,err.message)}
   }
 }
 function finishWorldBossInstance(instance,reason){
@@ -2783,7 +3021,7 @@ eventManager.registerEventHandler('world_boss',{durationMs:WORLD_BOSS.WORLD_BOSS
 const tvtInstances=new Map(),tvtByChar=new Map();
 async function loadTvtCharacter(userId,charId){
   const rows=await supabase('characters',{query:`?select=id,name,cls,lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});const row=rows[0];
-  if(!row)return null;const save=sanitizeSave(row.save,row.lvl);
+  if(!row)return null;const save=sanitizeSave(row.save,clampLevel(row.lvl));
   const snapshot=WORLD_BOSS.combatSnapshot({userId,charId,name:row.name||save.name,cls:row.cls,lvl:row.lvl,save});
   return{row,save,snapshot,eq:save.eq};
 }
@@ -2886,6 +3124,23 @@ async function startTvtEvent(event,registrations){
   }catch(err){console.error('tvt_start_error',event.id,err.message)}
 }
 function tvtPublicSync(instance){broadcastMap(instance.mapId,TVT.publicTvtState(instance))}
+// Fase 5.17: recompensa de TvT por membro -- pura/testavel (muta `save`).
+// Idempotente por eventId (save.tvtRewards). XP = xpRatio do resultado x
+// XP_TO_NEXT do proprio nivel nas primeiras BALANCE.TVT.XP_EVENTS_PER_DAY
+// do dia; gema so nas primeiras GEM_EVENTS_PER_WEEK da semana; ouro sempre.
+function applyTvtReward(save, lvl, outcome, eventId, now = Date.now()) {
+  if (save.tvtRewards.includes(eventId)) return null;
+  const reward = TVT.tvtRewardFor(outcome), rwd = rolloverRewardState(save, now);
+  let xpGain = 0, gem = 0;
+  if (rwd.tvx < BALANCE.TVT.XP_EVENTS_PER_DAY) { rwd.tvx += 1; xpGain = Math.floor(BALANCE.xpToNext(lvl) * reward.xpRatio); }
+  if (rwd.tvg < BALANCE.TVT.GEM_EVENTS_PER_WEEK) { rwd.tvg += 1; gem = reward.gem; }
+  const leveled = applyXpGain(save, lvl, xpGain);
+  save.xp = leveled.xp; save.lvl = leveled.lvl;
+  save.gold = Math.min(500000, save.gold + reward.gold);
+  save.gem = Math.min(5000, save.gem + gem);
+  save.tvtRewards.push(eventId); save.tvtRewards = save.tvtRewards.slice(-12);
+  return { lvl: leveled.lvl, xpGain, gem, gold: reward.gold };
+}
 async function grantTvtRewards(instance){
   if(instance.rewardsGranted)return;instance.rewardsGranted=true;
   const now=Date.now();
@@ -2895,18 +3150,17 @@ async function grantTvtRewards(instance){
     try{
       await withCharLock(member.charId,async()=>{
         const loaded=await loadTvtCharacter(member.userId,member.charId);if(!loaded)return;const{row,save}=loaded;
-        if(save.tvtRewards.includes(instance.eventId))return;
-        const outcome=TVT.outcomeForTeam(member.team,instance.winner),reward=TVT.tvtRewardFor(outcome);
-        const leveled=applyXpGain(save,row.lvl,reward.xp);save.xp=leveled.xp;save.lvl=leveled.lvl;
-        save.gold=Math.min(500000,save.gold+reward.gold);save.gem=Math.min(5000,save.gem+reward.gem);
-        save.tvtRewards.push(instance.eventId);save.tvtRewards=save.tvtRewards.slice(-12);
+        const outcome=TVT.outcomeForTeam(member.team,instance.winner);
+        const r=applyTvtReward(save,clampLevel(row.lvl),outcome,instance.eventId);if(!r)return;
+        const leveled={lvl:r.lvl};
         await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:leveled.lvl,save},prefer:'return=minimal'});
         member.rewarded=true;
         syncRankLevelXp(member.charId,leveled.lvl,save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
         bumpRankStat(member.charId,outcome==='win'?'tvt_wins':outcome==='loss'?'tvt_losses':'tvt_draws',1).catch(()=>{});
         if(member.kills)bumpRankStat(member.charId,'tvt_kills',member.kills).catch(()=>{});
         if(member.deaths)bumpRankStat(member.charId,'tvt_deaths',member.deaths).catch(()=>{});
-        sendToWorldBossMember(member,{type:'tvt_reward',outcome,gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl});
+        for(const [,live] of clients)if(live.charId===member.charId&&live.userId===member.userId)syncLiveLevel(live,r.lvl);
+        sendToWorldBossMember(member,{type:'tvt_reward',outcome,gold:save.gold,gem:save.gem,xp:save.xp,lvl:leveled.lvl,xpGain:r.xpGain,gemGain:r.gem});
       });
     }catch(err){console.error('tvt_reward_error',member.charId,err.message)}
   }
@@ -3211,9 +3465,9 @@ async function handleWsJoin(ws, msg) {
       } catch (err) { console.error('ws_join_ban_check_error', err.message); }
     }
     if (clients.get(ws)) return; // ja tratado por outra mensagem enquanto este join aguardava o Supabase
-    const claimedCls=ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',claimedLvl=Math.max(1,Math.min(99,Number(msg.lvl)||1));
+    const claimedCls=ALLOWED_CLASS.has(msg.cls)?msg.cls:'guerreiro',claimedLvl=clampLevel(Number(msg.lvl)||1);
     const clientInstanceId=validClientInstanceId(msg.clientInstanceId)?msg.clientInstanceId:null;
-    const realSave = charRow ? sanitizeSave(charRow.save,charRow.lvl) : startingSave(claimedCls,cleanText(msg.name,14)||'Herói');
+    const realSave = charRow ? sanitizeSave(charRow.save,clampLevel(charRow.lvl)) : startingSave(claimedCls,cleanText(msg.name,14)||'Herói');
     const combat = WORLD_BOSS.combatSnapshot({userId,charId:charRow?.id||null,name:charRow?.name||msg.name,cls:charRow?.cls||claimedCls,lvl:charRow?.lvl||claimedLvl,save:realSave});
     const remembered = charRow && characterRuntime.get(charRow.id);
     const initMap = remembered?.map || realSave?.map || 'vila';
@@ -3234,7 +3488,7 @@ async function handleWsJoin(ws, msg) {
       id: crypto.randomUUID(), userId, charId: charRow ? charRow.id : null, clientInstanceId,
       name: charRow ? (cleanText(charRow.name,14)||'Herói') : (cleanText(msg.name, 14) || 'Herói'),
       cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : claimedCls,
-      lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : claimedLvl,
+      lvl: charRow ? clampLevel(Number(charRow.lvl) || 1) : claimedLvl,
       authed: !!charRow, map: initMap, x: initX, y: initY, dir: 0, moving: false, atkT: 0, atkAng: 0,
       safeMap: initSafe ? initMap : 'vila', safeX: initSafe ? initX : 720, safeY: initSafe ? initY : 1258,
       guildId: null, guildRole: null, guildTag: null, guildName: null,
@@ -3435,7 +3689,7 @@ async function handleDungeonEnter(ws, p, msg) {
       try {
         const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(c.charId)}&user_id=eq.${encodeURIComponent(c.userId)}&limit=1`});
         const row = rows[0]; if (!row) continue;
-        const save = sanitizeSave(row.save, row.lvl);
+        const save = sanitizeSave(row.save, clampLevel(row.lvl));
         const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
         if (unlocked) validMembers.push(c);
       } catch (err) { console.error('dungeon_member_check_error', c.charId, err.message); }
@@ -3509,7 +3763,7 @@ async function handleDungeonQueueJoin(ws, p, msg) {
     const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}&limit=1`});
     const row = rows[0];
     if (!row) { send(ws, {type:'dungeon_queue_error', error:'Personagem não encontrado'}); return; }
-    const save = sanitizeSave(row.save, row.lvl);
+    const save = sanitizeSave(row.save, clampLevel(row.lvl));
     const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
     if (!unlocked) { send(ws, {type:'dungeon_queue_error', error:'Região ainda não liberada'}); return; }
   } catch (err) {
@@ -3554,7 +3808,7 @@ async function formDungeonGroup(zone, group) {
     try {
       const rows = await supabase('characters', {query:`?select=save,lvl&id=eq.${encodeURIComponent(e.charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`});
       const row = rows[0]; if (!row) continue;
-      const save = sanitizeSave(row.save, row.lvl);
+      const save = sanitizeSave(row.save, clampLevel(row.lvl));
       const unlocked = save.quest >= (DUNGEON_UNLOCK_QUEST[zone] || 999) || !!save.gunlock[zone];
       // Mesmo achado de handleDungeonEnter: nunca pareia alguem que ja
       // esta ocupado numa partida de TvT/World Boss/outra masmorra --
@@ -3593,7 +3847,7 @@ async function formDungeonGroup(zone, group) {
     for (let i = 0; i < slots; i++) {
       const haveClasses = new Set([...validMembers.map(m => m.cls), ...aiFillMembers.map(m => m.cls)]);
       const cls = AI_CLASS_POOL.find(c => !haveClasses.has(c)) || AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
-      const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
+      const lvl = clampLevel(lo + Math.floor(Math.random() * (hi - lo + 1)));
       aiFillMembers.push({charId:'ai_' + crypto.randomBytes(4).toString('hex'), userId:null, cls, lvl, kind:'ai'});
     }
   }
@@ -3867,7 +4121,7 @@ function aiSpawnEntity(zone) {
   }
   const cls = AI_CLASS_POOL[Math.floor(Math.random() * AI_CLASS_POOL.length)];
   const [lo, hi] = aiZoneLevelRange(zone);
-  const lvl = Math.max(1, Math.min(99, lo + Math.floor(Math.random() * (hi - lo + 1))));
+  const lvl = clampLevel(lo + Math.floor(Math.random() * (hi - lo + 1)));
   const name = aiPickName();
   const combat = buildAiCombat(cls, lvl, name);
   const anchor = aiSpawnAnchor(zone);
@@ -4299,7 +4553,7 @@ wss.on('connection', ws => {
       // nunca pelo que essa mensagem periodica reivindica -- sem isso um
       // cliente adulterado podia inflar p.lvl e, por tabela, o dano
       // calculado em resolveAttackDamage (baseDmgOf usa p.lvl).
-      const lvl = p.authed ? p.lvl : Math.max(1,Math.min(99,Number(msg.lvl)||1));
+      const lvl = p.authed ? p.lvl : clampLevel(Number(msg.lvl)||1);
       const _pm=p.map,_px=p.x,_py=p.y,_phhp=p.hp;
       Object.assign(p,{map,x,y,dir:Math.max(0,Math.min(3,Number(msg.dir)|0)),moving:!!msg.moving,lvl,atkT,atkAng:Math.max(-Math.PI*2,Math.min(Math.PI*2,atkAng))});
       // Fase 5.16.7: so marca sujo (pro autosave de runtime pegar) se
@@ -4440,7 +4694,11 @@ wss.on('connection', ws => {
         }else if(mob.type){
           const stats=mobStats(mob.type,mob.lvl,mob.boss,mob.k);
           if(stats){
-            const xpGain=mob.temp?Math.round(stats.xp*.5):stats.xp;
+            // Fase 5.17: XP-BASE do mob (sequito temporario continua pagando
+            // metade). O valor final (gap de nivel/party/evento) e decidido
+            // em creditKillReward/creditPartyXp com o nivel PERSISTIDO de
+            // cada personagem -- nunca aqui, nunca pelo cliente.
+            const baseXp=mob.temp?Math.round(stats.xp*.5):stats.xp;
             const loot=mob.temp?null:rollMobLoot(mob.type,mob.boss,mob.lvl);
             const bossChestField=mob.boss?BOSS_CHEST_FIELD[mob.type]:null;
             const questInfo=mob.temp?null:{type:mob.type,boss:mob.boss,lvl:mob.lvl};
@@ -4449,7 +4707,13 @@ wss.on('connection', ws => {
             // pra sequitos temporarios (mob.temp), igual o loot economico ja
             // fazia (loot fica null acima pelo mesmo motivo).
             const drop=mob.temp?null:rollGearDrop({mobLevel:mob.lvl,boss:!!mob.boss,cls:p.cls});
-            creditKillReward(ws,p,xpGain,killCounterFields(mob.type,mob.lvl,mob.boss),loot,bossChestField,questInfo,drop);
+            // Fase 5.17: party divide a XP entre membros ELEGIVEIS (mesmo
+            // mapa, perto, vivos, sessao autoritativa) -- loot/quest/drop
+            // continuam so com quem deu o golpe final.
+            const recipients=partyXpRecipients(ws,p,{map,x:mob.x,y:mob.y});
+            const share=BALANCE.partyXpShare(recipients.length);
+            creditKillReward(ws,p,{base:baseXp,mobLvl:mob.lvl,share},killCounterFields(mob.type,mob.lvl,mob.boss),loot,bossChestField,questInfo,drop);
+            for(const [mws,mp] of recipients.slice(1))creditPartyXp(mws,mp,{base:baseXp,mobLvl:mob.lvl,share});
             if(p.charId)creditBestiaryKill(p.charId,mob.type).catch(err=>console.error('bestiary_credit_error',err.message));
           }
         }
@@ -4748,7 +5012,12 @@ function stepGoblin(mob, dt, present) {
 // verdade nos dois sentidos (aiEntities.get(p.id)===p confirma que e a
 // MESMA instancia de IA viva, mesmo espirito do clients.get(ws)!==p
 // pra jogador real). Nunca manda `send()` -- IA nao tem socket.
-function hitTarget(target, mob, dmg) { if (!target) return null;const [ws,p]=target;if(p.kind==='ai'){if(aiEntities.get(p.id)!==p||p.map!==mob.map||p.dead)return null;return applyGlobalPlayerDamage(p,dmg)}if(clients.get(ws)!==p||p.map!==mob.map||p.dead)return null;const result=applyGlobalPlayerDamage(p,dmg);if(result)send(ws,{type:'mob_hit',map:mob.map,mobId:mob.id,dmg:result.damage,hp:result.hp,maxHp:result.maxHp,dead:result.dead,respawnAt:result.respawnAt});return result; }
+function hitTarget(target, mob, dmg) { if (!target) return null;const [ws,p]=target;if(p.kind==='ai'){if(aiEntities.get(p.id)!==p||p.map!==mob.map||p.dead)return null;return applyGlobalPlayerDamage(p,dmg)}if(clients.get(ws)!==p||p.map!==mob.map||p.dead)return null;const result=applyGlobalPlayerDamage(p,dmg);if(result)send(ws,{type:'mob_hit',map:mob.map,mobId:mob.id,dmg:result.damage,hp:result.hp,maxHp:result.maxHp,dead:result.dead,respawnAt:result.respawnAt});
+  // Fase 5.17: este e o UNICO caminho de dano de mob -> jogador humano
+  // (campo e masmorra), entao morte aqui = causa PvE. PvP/TvT/World Boss
+  // matam por outros caminhos e nunca chamam applyDeathPenalty.
+  if(result&&result.killed)applyDeathPenalty(ws,p,'pve');
+  return result; }
 function delayedHit(target, mob, dmg, delayMs) { if (target) setTimeout(() => hitTarget(target,mob,dmg),delayMs).unref(); }
 
 // ===== Fase 2, unidades 3-12: os 10 tipos restantes =====
@@ -5393,7 +5662,7 @@ module.exports = {
   normalizeLivingWorldSettings, applyLivingWorldConfig, loadLivingWorldConfig, persistLivingWorldConfig,
   fieldAiEntities, fieldAiCounts, instanceAiCounts, isSafeFieldAi, despawnFieldAi, rebalanceFieldAi, livingWorldStatus,
   villageAiEntities, VILLAGE_SOCIAL_CAP, VILLAGE_ANCHOR,
-  moveMob, rectsBlock, maps, mapState, mobStats, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST, placePlayerAtDungeonStart,
+  moveMob, rectsBlock, maps, mapState, mobStats, MOB_MANIFEST, rollMobLoot, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST, placePlayerAtDungeonStart,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):
   DUNGEON_ROOM_MOB_COUNTS,
@@ -5401,6 +5670,10 @@ module.exports = {
   grantItem, gearLevelForMob, rollGearDrop, applyGearDrops, GEAR_DROP_RATES, DROP_TYPES_BY_CLASS,
   // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   rollEnchantSuccess, applyEnchant, attemptEnchant,
+  // Fase 5.17 -- progressao/economia (nucleo puro, sem HTTP/WS/Supabase):
+  BALANCE, applyXpGain, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
+  sanitizeRewardState, rolloverRewardState, rewardDayKey, rewardWeekKey, partyXpRecipients, parties, memberParty,
+  hitTarget, applyDeathPenalty,
   // Fase 5.12 -- primitivas puras do runtime autoritativo:
   resolveAttackDamage, applyGlobalPlayerDamage, mitigatePlayerDamage, consumeRuntimePotion,
   validateMovement, allowedFieldTransition, allowPacket, attackRangeFor,
