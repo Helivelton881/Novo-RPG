@@ -126,19 +126,20 @@ test('pickTier: sempre retorna um tier legado valido (1-5) mapeavel via GEAR_DAT
   }
 });
 
-test('rollDungeonTrashLoot/rollDungeonBossLoot: nunca incluem XP (masmorra nao concede XP, comportamento preservado)', () => {
+test('rollDungeonTrashLoot/rollDungeonBossLoot: loot nunca inclui XP; chefe marca bossClear (Fase 5.17)', () => {
   const trash = S.rollDungeonTrashLoot(20, 'guerreiro');
   const boss = S.rollDungeonBossLoot('guerreiro', 40);
   assert.equal('xp' in trash, false);
   assert.equal('xp' in boss, false);
+  assert.equal('bossClear' in trash, false, 'trash nunca gera recompensa de conclusao');
+  assert.deepEqual(boss.bossClear, { bossLvl: 40 });
   assert.ok(boss.gold > 0);
-  assert.equal(boss.gem, 6);
-  // Fase 5.3: chefe de masmorra nao garante mais 3 itens Basic (era
-  // compatibilidade temporaria da Fase 5.2) -- agora no maximo 1 item, e so
-  // pode ser Legendary (rollGearDrop com boss:true). Cobertura
-  // probabilistica completa com rng controlado fica em loot-rarity.test.js.
+  // Fase 5.17: gema do chefe saiu do loot (era 6 fixas, sem cooldown) --
+  // agora e decidida por applyDungeonClearReward com limite diario.
+  assert.equal(boss.gem, 0);
+  assert.equal(trash.gem, 0, 'trash de masmorra nao da mais gema');
   assert.ok(boss.items.length <= 1, 'no maximo 1 item de chefe de masmorra');
-  for (const it of boss.items) assert.equal(it.rarity, 'legendary');
+  for (const it of boss.items) assert.ok(['rare', 'epic', 'legendary'].includes(it.rarity));
 });
 
 test('DUNGEON_GEN.dungeonLayout: determinístico (mesmo seed = mesmo layout; Fase 5.13: qualquer seed = mesmo layout, mapa agora e fixo)', () => {

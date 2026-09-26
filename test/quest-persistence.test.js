@@ -24,13 +24,16 @@ const S = require('../server.js');
 
 // ===== Parte 1: nucleo puro =====
 
-test('QUEST_REWARDS: os 7 estagios sem premio (aceitar + 6 desbloqueios de regiao) existem e tem premio zerado', () => {
+test('QUEST_REWARDS: os 7 estagios so-de-dialogo existem; ouro/gema zerados; XP = final de capitulo (Fase 5.17)', () => {
   for (const from of [0, 6, 10, 14, 18, 22, 26]) {
     const r = S.QUEST_REWARDS[from];
     assert.ok(r, `QUEST_REWARDS[${from}] deveria existir`);
-    assert.equal(r.gold, 0); assert.equal(r.gem, 0); assert.equal(r.xp, 0);
+    assert.equal(r.gold, 0); assert.equal(r.gem, 0);
+    assert.equal(r.xp, S.BALANCE.questXpFor(from));
     assert.equal(r.next, from + 1);
   }
+  assert.equal(S.QUEST_REWARDS[0].xp, 0, 'aceitar a missao inicial nao paga XP');
+  for (const from of [6, 10, 14, 18, 22, 26]) assert.ok(S.QUEST_REWARDS[from].xp > 0, `final de capitulo ${from} paga XP`);
 });
 
 test('QUEST_REWARDS: os 8 estagios pagos continuam com premio real e next correto (regressao)', () => {

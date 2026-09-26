@@ -377,14 +377,15 @@ test('outcomeForTeam / tvtRewardFor: vencedor/perdedor/empate com valores distin
   assert.equal(TVT.outcomeForTeam('red', 'red'), 'win');
   assert.equal(TVT.outcomeForTeam('red', 'blue'), 'loss');
   assert.equal(TVT.outcomeForTeam('red', null), 'draw');
-  assert.deepEqual(TVT.tvtRewardFor('win'), { gold: 120, gem: 6, xp: 6000 });
-  assert.deepEqual(TVT.tvtRewardFor('loss'), { gold: 60, gem: 3, xp: 3000 });
-  assert.deepEqual(TVT.tvtRewardFor('draw'), { gold: 90, gem: 4, xp: 4500 });
+  // Fase 5.17: XP virou fracao da XP_TO_NEXT (xpRatio) e gema foi recalibrada.
+  assert.deepEqual(TVT.tvtRewardFor('win'), { gold: 120, gem: 1, xpRatio: 0.02 });
+  assert.deepEqual(TVT.tvtRewardFor('loss'), { gold: 60, gem: 1, xpRatio: 0.01 });
+  assert.deepEqual(TVT.tvtRewardFor('draw'), { gold: 90, gem: 1, xpRatio: 0.015 });
 });
-test('recompensa NUNCA inclui item Legendary (so gold/gem/xp)', () => {
+test('recompensa NUNCA inclui item Legendary (so gold/gem/xpRatio)', () => {
   for (const outcome of ['win', 'loss', 'draw']) {
     const r = TVT.tvtRewardFor(outcome);
-    assert.deepEqual(Object.keys(r).sort(), ['gem', 'gold', 'xp']);
+    assert.deepEqual(Object.keys(r).sort(), ['gem', 'gold', 'xpRatio']);
   }
 });
 

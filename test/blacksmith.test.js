@@ -49,7 +49,7 @@ test('enchant +1 via endpoint real: sempre sucesso (safe enchant), custo debitad
   const ch = await newChar(100000);
   const sword = S.createGear('sword', 40, 'legendary');
   await seedBag(ch, [sword]);
-  const expectedCost = S.GEAR_DATA.enchantCost('sword', 40, 1);
+  const expectedCost = S.BALANCE.enchantCostFor(40, 'legendary', 1).amount; // Fase 5.17: ouro = itemLv x rarityMul x alvo x 10
   const r = await enchant(ch, sword.uid, 0);
   assert.equal(r.status, 200);
   assert.equal(r.json.enchant.success, true);
