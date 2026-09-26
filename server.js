@@ -1234,7 +1234,10 @@ async function handleShop(req, res, pathname) {
         if (!price) error = 'Destino inválido';
         else if (save.gunlock[dest]) error = 'Já liberado';
         else if (save.gold < price) error = 'Moedas insuficientes';
-        else { save.gold -= price; save.gunlock[dest] = true; }
+        // Mesmo resync de allowedFieldTransition que handleQuest precisou
+        // (ver comentário lá): sem isso, quem compra o desbloqueio pela loja
+        // fica preso do lado de fora do portal na MESMA sessão WS até reconectar.
+        else { save.gold -= price; save.gunlock[dest] = true; if (activeP) activeP.gunlock[dest] = true; }
       } else if (action === 'use_item') {
         // Fase 5.2, Parte 4: consumir pv/pa/ap/scr vira intencao server-side
         // pra personagem online -- o PUT generico nao aceita mais decremento
@@ -1314,6 +1317,15 @@ async function handleQuest(req, res, pathname) {
 
     const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{lvl, save}, prefer:'return=representation'});
     if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
+    // Bug real de producao (Goblins congelados na Floresta): esta rota grava
+    // save.quest direto no banco, mas a conexao WS já aberta desse personagem
+    // (se houver) mantém seu PRÓPRIO `p.quest` em memória, lido só uma vez no
+    // join (handleWsJoin) e nunca resincronizado depois. allowedFieldTransition
+    // decide a transição de mapa de campo (ex.: liberar a Floresta) por esse
+    // `p.quest` -- sem este resync, a MESMA sessão WS nunca consegue entrar na
+    // zona recém-desbloqueada até reconectar (F5), mesmo com o banco já correto.
+    const activeWs = activeCharacterSockets.get(charId), activeP = activeWs && clients.get(activeWs);
+    if (activeP) activeP.quest = save.quest;
     json(res,200,{character: rows[0]}); return true;
   } catch (err) {
     console.error('quest_error', err.message, err.status || '', err.detail || '');
@@ -1409,6 +1421,11 @@ async function creditKillReward(ws, p, xpGain, fields, loot, bossChestField, que
       if (questInfo) Object.assign(pushed, advanceQuestOnKill(save, questInfo.type, questInfo.boss, questInfo.lvl));
       const { granted, lost } = drop ? applyGearDrops(save, lvl, [drop.item]) : { granted: null, lost: null };
       await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
+      // Mesmo resync de p.quest que handleQuest precisou (ver comentário lá):
+      // um abate que vira chefe/avança missão direto (advanceQuestOnKill) tem
+      // a MESMA lacuna -- `p` aqui já é a conexão viva de quem matou o mob,
+      // então é so manter o campo em dia sem nenhuma busca extra.
+      p.quest = save.quest;
       syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
       const msg = {type:'kill_reward', xp: save.xp, lvl, fields: Object.assign(Object.fromEntries(fields.map(f => [f, save[f]])), pushed)};
       // bag/eq so vao junto quando um item de fato mudou o save (a maioria
