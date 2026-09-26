@@ -289,7 +289,7 @@ button{font:inherit;color:inherit}
 @media (max-width:720px){.rw .rs{width:min(100%,54px)}.rw .ped{width:92px;height:102px}.rw .eqS{grid-template-columns:repeat(3,50px);gap:5px}.rw .eqS .rs,.rw .eqS .blank{width:50px;height:50px}.rw .ped{width:100%;max-width:120px;height:96px}.rw .mini{gap:4px 10px;font-size:15px}}
 
 /* ---- loja do mercador ---- */
-#shop{max-height:min(72%,600px)}
+#shop,#relic{max-height:min(72%,600px)}
 .rw .rh .mface{flex:none;width:46px;height:46px;border:2px solid #120c07;border-radius:8px;background:radial-gradient(circle at 50% 30%,#5a4630,#2a1d12);box-shadow:0 0 0 2px #e9b57a;overflow:hidden}
 .rw .rh .mface img{width:100%;height:100%;object-fit:cover;object-position:50% 8%;image-rendering:pixelated;display:block}
 .rw .rh .ttl .say{font-size:14px;line-height:1.15;color:#fff2d0;white-space:normal;text-shadow:0 1px 0 #3a1a08;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -511,6 +511,7 @@ button{font:inherit;color:inherit}
     <div id="scr" class="rw" role="dialog" aria-label="Janela do menu"></div>
     <div id="shop" class="rw" role="dialog" aria-label="Loja do mercador"></div>
     <div id="blacksmith" class="rw" role="dialog" aria-label="Ferreiro"></div>
+    <div id="relic" class="rw" role="dialog" aria-label="Mercador de Relíquias"></div>
     <div id="menu" role="menu" aria-label="Menu principal"><button class="mbtn" type="button" role="menuitem" data-m="char"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8"/></svg><span>Personagem</span></button><button class="mbtn" type="button" role="menuitem" data-m="inv"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6a3 3 0 0 1 6 0"/><rect x="5" y="6" width="14" height="15" rx="4"/><rect x="9" y="13" width="6" height="5" rx="1.5"/><path d="M9 10h6"/></svg><span>Inventário</span></button><button class="mbtn" type="button" role="menuitem" data-m="equip"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6z"/></svg><span>Equipamentos</span></button><button class="mbtn" type="button" role="menuitem" data-m="skills"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 4l1.8 5.2L18 11l-5.2 1.8L11 18l-1.8-5.2L4 11l5.2-1.8z"/><path d="M19 3v4M17 5h4"/><circle cx="5" cy="19" r="1.2"/></svg><span>Habilidades</span></button><button class="mbtn" type="button" role="menuitem" data-m="quests"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4h9a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H9"/><path d="M8 4a2 2 0 0 0-2 2v10a3 3 0 0 0 3 3"/><path d="M10 9h6M10 13h6"/><path d="M9 19a2 2 0 0 1-3-1"/></svg><span>Missões</span></button><button class="mbtn" type="button" role="menuitem" data-m="map"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z"/><path d="M9 4v14M15 6v14"/></svg><span>Mapa</span></button><button class="mbtn" type="button" role="menuitem" data-m="social"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M16 5.2a3.2 3.2 0 0 1 0 5.6M18 14.5c2 .8 3.5 2.8 3.5 5.5"/></svg><span>Social</span></button><button class="mbtn" type="button" role="menuitem" data-m="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="6.5"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg><span>Configurações</span></button><button class="mbtn events" type="button" role="menuitem" data-m="events"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18"/><path d="M8 14h3M8 17h6"/></svg><span>Eventos</span></button><button class="mbtn" type="button" role="menuitem" data-m="guild"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg><span>Guilda</span></button><button class="mbtn" type="button" role="menuitem" data-m="bestiary"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V6a2 2 0 0 1 2-2h12a1 1 0 0 1 1 1v14"/><path d="M6 19h13"/><path d="M6 15h13"/></svg><span>Bestiário</span></button><button class="mbtn" type="button" role="menuitem" data-m="ranking"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V10M12 21V4M20 21v-7"/></svg><span>Ranking</span></button></div>
     <button id="menuBtn" type="button" aria-label="Abrir menu" aria-expanded="false"><span></span><span></span><span></span></button>
   </div>
@@ -987,7 +988,12 @@ function buildVila(){
     // diferente. Posicionado perto do mercador (mesma area de comercio da
     // vila), afastado o suficiente pra nao sobrepor o bloqueio da casa
     // vizinha nem o proprio mercador.
-    {id:'ferreiro',nome:'Ferreiro',x:25*T,y:12.9*T,spriteKey:'guarda'}
+    {id:'ferreiro',nome:'Ferreiro',x:25*T,y:12.9*T,spriteKey:'guarda'},
+    // Fase 5.17.2: ASSET ESPECIFICO DO MERCADOR DE RELIQUIAS PENDENTE --
+    // reaproveita o visual do 'mercador' (spriteKey). Posicao vem de
+    // BALANCE_DATA.RELIC_SHOP.NPC (mesma fonte que o servidor usa pra
+    // validar a proximidade da compra).
+    {id:'relicario',nome:'Mercador de Relíquias',x:BALANCE_DATA.RELIC_SHOP.NPC.x,y:BALANCE_DATA.RELIC_SHOP.NPC.y,spriteKey:'mercador'}
   ];
   npcDefs.forEach(n=>{const sk=n.spriteKey||n.id;n.img=IMG[sk];n.w=SPR[sk].w;n.h=SPR[sk].h;NPCS.push(n);addBlock(n.x-11,n.y-9,22,9);clearZones.push([n.x,n.y,70])});
   clearZones.push([PORTAL.x,PORTAL.y,110],[START.x,START.y,80],[28.5*T,23*T,120]);
@@ -1298,7 +1304,7 @@ function hud(){
   const k=questHtml();if(k!==questKey){questKey=k;$('#quest').innerHTML=k}
 }
 let toastTimer=0;
-function toast(msg){const t=$('#toast');t.classList.toggle('low',invOpen||menuOpen||!!scrOpen||shopOpen||bsOpen);t.textContent=msg;t.classList.add('on');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('on'),2200)}
+function toast(msg){const t=$('#toast');t.classList.toggle('low',invOpen||menuOpen||!!scrOpen||shopOpen||bsOpen||rlOpen);t.textContent=msg;t.classList.add('on');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('on'),2200)}
 
 /* ================= som ================= */
 let AC=null;
@@ -1360,6 +1366,7 @@ function openDialog(npc){
   stopAuto();
   if(npc.id==='mercador'){openShop();return}
   if(npc.id==='ferreiro'){openBlacksmith();return}
+  if(npc.id==='relicario'){openRelic();return}
   const s=NPC_SCRIPT[npc.id]();dlg={npc,lines:s.lines,i:0,choices:s.choices||null,end:s.end||null};
   sfx.talk();renderDlg();
 }
@@ -1602,9 +1609,9 @@ const ICO={
 };
 function nearMerchant(){const n=NPCS.find(n=>n.id==='mercador');return !!n&&Math.hypot(n.x-P.x,n.y-P.y)<110}
 function toggleInv(){if(!started||P.dead||traveling)return;invOpen?closeInv():openInv()}
-function openInv(){closeScr();closeShop();closeBlacksmith();invOpen=true;invSel=null;discArm=0;$('#inv').innerHTML='';$('#inv').classList.add('on');$('#talk').classList.remove('on');renderInv()}
+function openInv(){closeScr();closeShop();closeBlacksmith();closeRelic();invOpen=true;invSel=null;discArm=0;$('#inv').innerHTML='';$('#inv').classList.add('on');$('#talk').classList.remove('on');renderInv()}
 function closeInv(){invOpen=false;const el=$('#inv');el.classList.remove('on');resetWinPos(el)}
-function refreshWins(){if(invOpen)renderInv();if(scrOpen)renderScr();if(shopOpen)renderShop();if(bsOpen)renderBlacksmith()}
+function refreshWins(){if(invOpen)renderInv();if(scrOpen)renderScr();if(shopOpen)renderShop();if(bsOpen)renderBlacksmith();if(rlOpen)renderRelic()}
 function afterEquip(){
   const prev=P.maxhp;recalc();if(P.maxhp>prev)P.hp+=P.maxhp-prev;P.hp=Math.min(P.hp,P.maxhp);
   refreshEquipIcons();saveGame();hud();refreshWins();
@@ -2017,7 +2024,7 @@ function openMenu(){if(!started||P.dead||traveling)return;menuOpen=true;$('#menu
 function closeMenu(){menuOpen=false;$('#menu').classList.remove('on');$('#menuBtn').setAttribute('aria-expanded','false')}
 function openScr(name,tab){
   if(!started||P.dead||traveling)return;
-  closeMenu();closeInv();closeShop();closeBlacksmith();if(name==='char'&&tab)charTab=tab;if(name==='map'&&W_&&worlds[W_.name])mapView=W_.name;
+  closeMenu();closeInv();closeShop();closeBlacksmith();closeRelic();if(name==='char'&&tab)charTab=tab;if(name==='map'&&W_&&worlds[W_.name])mapView=W_.name;
   scrOpen=name;chSel=null;$('#talk').classList.remove('on');const se=$('#scr');se.innerHTML='';se.classList.add('on');renderScr();
   if(name==='social'){refreshSocial();clearInterval(socialPollTimer);socialPollTimer=setInterval(refreshSocial,5000)}
   if(name==='events'){requestEventState();clearInterval(eventUiTimer);eventUiTimer=setInterval(()=>{if(scrOpen==='events')renderScr()},1000)}
@@ -2027,7 +2034,7 @@ function openScr(name,tab){
   if(name==='market'){MARKET_PAGE=1;requestMarketState()}
 }
 function closeScr(){scrOpen=null;const el=$('#scr');el.classList.remove('on');resetWinPos(el);clearInterval(socialPollTimer);socialPollTimer=0;clearInterval(eventUiTimer);eventUiTimer=0;clearInterval(guildUiTimer);guildUiTimer=0}
-function escKey(){if(shopOpen)closeShop();else if(bsOpen)closeBlacksmith();else if(invOpen)closeInv();else if(scrOpen)closeScr();else if(menuOpen)closeMenu();else openMenu()}
+function escKey(){if(shopOpen)closeShop();else if(bsOpen)closeBlacksmith();else if(rlOpen)closeRelic();else if(invOpen)closeInv();else if(scrOpen)closeScr();else if(menuOpen)closeMenu();else openMenu()}
 $('#menuBtn').addEventListener('click',()=>{menuOpen?closeMenu():openMenu()});
 const marketMenuBtn=document.createElement('button');marketMenuBtn.className='mbtn';marketMenuBtn.type='button';marketMenuBtn.setAttribute('role','menuitem');marketMenuBtn.dataset.m='market';marketMenuBtn.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h16l-1 13H5z"/><path d="M7 8a5 5 0 0 1 10 0M9 13h6M9 17h6"/></svg><span>Mercado</span>';$('#menu').appendChild(marketMenuBtn);
 document.addEventListener('pointerdown',e=>{if(menuOpen&&!e.target.closest('#menu,#menuBtn'))closeMenu()},true);
@@ -2049,12 +2056,12 @@ function enableDrag(el){
     h.addEventListener('pointermove',mv);h.addEventListener('pointerup',up);h.addEventListener('pointercancel',up);
   });
 }
-enableDrag($('#inv'));enableDrag($('#scr'));enableDrag($('#shop'));enableDrag($('#blacksmith'));
+enableDrag($('#inv'));enableDrag($('#scr'));enableDrag($('#shop'));enableDrag($('#blacksmith'));enableDrag($('#relic'));
 /* a câmera se desloca para o jogador aparecer na área livre ao lado da janela */
 let focX=.5,focY=.5;
 function updFocus(dt){
   let tx=.5,ty=.5;
-  const el=shopOpen?$('#shop'):bsOpen?$('#blacksmith'):invOpen?$('#inv'):scrOpen?$('#scr'):null;
+  const el=shopOpen?$('#shop'):bsOpen?$('#blacksmith'):rlOpen?$('#relic'):invOpen?$('#inv'):scrOpen?$('#scr'):null;
   if(el){
     const r=el.getBoundingClientRect(),a=stage.getBoundingClientRect(),W=a.width,H=a.height,bm=innerWidth<=720?100:64;
     const cand=[[0,0,W,r.top-a.top],[0,r.bottom-a.top,W,H-bm],[0,0,r.left-a.left,H],[r.right-a.left,0,W,H]];
@@ -2076,8 +2083,9 @@ function winSig(){
 function tickWin(){
   if(shopOpen){const mn=NPCS.find(n=>n.id==='mercador');if(!mn||Math.hypot(mn.x-P.x,mn.y-P.y)>200){closeShop();toast('Você se afastou do mercador')}}
   if(bsOpen){const fn=NPCS.find(n=>n.id==='ferreiro');if(!fn||Math.hypot(fn.x-P.x,fn.y-P.y)>200){closeBlacksmith();toast('Você se afastou do ferreiro')}}
+  if(rlOpen){const rn=NPCS.find(n=>n.id==='relicario');if(!rn||Math.hypot(rn.x-P.x,rn.y-P.y)>BALANCE_DATA.RELIC_SHOP.INTERACT_RADIUS){closeRelic();toast('Você se afastou do Mercador de Relíquias')}}
   if(scrOpen==='portal'&&PORTAL&&Math.hypot(P.x-PORTAL.x,P.y-PORTAL.y)>170)closeScr();
-  if(!invOpen&&!scrOpen&&!shopOpen&&!bsOpen)return;
+  if(!invOpen&&!scrOpen&&!shopOpen&&!bsOpen&&!rlOpen)return;
   const s=winSig();if(s!==winSigStr){winSigStr=s;refreshWins()}
   for(const e of document.querySelectorAll('.rw.on [data-bind]')){
     const k=e.dataset.bind;
@@ -2566,7 +2574,7 @@ function gearSummary(it){const p=[];if(it.atk)p.push('+'+it.atk+' ataque');if(it
 function openShop(){
   if(!started||P.dead||traveling)return;
   if(dlg)closeDlg();
-  closeInv();closeScr();closeMenu();closeBlacksmith();
+  closeInv();closeScr();closeMenu();closeBlacksmith();closeRelic();
   shopOpen=true;shopTab='buy';shopCat=0;shopSel=null;shopQty=1;shopArm=0;
   shopMsg=['Boas-vindas! Dê uma olhada.','Tenho do bom e do melhor!','Tudo testado e aprovado!'][Math.floor(Math.random()*3)];
   $('#talk').classList.remove('on');const el=$('#shop');el.innerHTML='';el.classList.add('on');renderShop();sfx.talk();
@@ -2593,7 +2601,7 @@ function bsFind(uid){return bsItems().find(x=>x.it.uid===uid)||null}
 function openBlacksmith(){
   if(!started||P.dead||traveling)return;
   if(dlg)closeDlg();
-  closeInv();closeScr();closeMenu();closeShop();
+  closeInv();closeScr();closeMenu();closeShop();closeRelic();
   bsOpen=true;bsSel=null;bsArm=0;
   bsMsg=['Traga seu equipamento, vamos deixá-lo mais forte.','Do +4 em diante eu trabalho com gemas. Falhou? O aço aguenta.','Aço forjado no fogo... e um pouco de sorte.'][Math.floor(Math.random()*3)];
   $('#talk').classList.remove('on');const el=$('#blacksmith');el.innerHTML='';el.classList.add('on');renderBlacksmith();sfx.talk();
@@ -2666,6 +2674,93 @@ $('#blacksmith').addEventListener('click',async e=>{
   if(e.target.closest('[data-x]')){closeBlacksmith();return}
   const bp=e.target.closest('[data-bp]');if(bp){bsSel=bp.dataset.bp;bsArm=0;renderBlacksmith();return}
   const a=e.target.closest('[data-ba]');if(a&&!a.disabled&&a.dataset.ba==='do')bsDo();
+});
+/* ================= mercador de relíquias (Fase 5.17.2) ================= */
+// Server-authoritative de ponta a ponta: a janela so MOSTRA o estoque que o
+// servidor montou (relic_state -- estoque semanal deterministico, preco
+// oficial, preview de stats de GEAR_DATA) e so manda offerId (+ `expected`,
+// que o servidor usa apenas pra RECUSAR se a oferta tiver mudado). Nunca
+// preco, raridade, nivel ou stats.
+let rlOpen=false,rlView=null,rlSel=null,rlArm=0,rlBusy=false,rlMsg='',rlErr='';
+async function relicRequest(action,params){
+  if(!CUR_CHAR||!authToken())return{ok:false,error:'Entre com uma conta online para negociar relíquias'};
+  try{const r=await authRequest('/api/characters/'+CUR_CHAR.id+'/shop',{method:'POST',token:authToken(),body:Object.assign({action},params)});if(r.character)applyShopResult(r.character);return{ok:true,relic:r.relic||null}}
+  catch(e){return{ok:false,error:e.message||'Não foi possível concluir'}}
+}
+async function relicLoad(){
+  const r=await relicRequest('relic_state');
+  if(r.ok){rlView=r.relic;rlErr=''}else rlErr=r.error;
+  if(rlOpen)renderRelic();
+}
+function openRelic(){
+  if(!started||P.dead||traveling)return;
+  if(dlg)closeDlg();
+  closeInv();closeScr();closeMenu();closeShop();closeBlacksmith();
+  rlOpen=true;rlSel=null;rlArm=0;rlView=null;rlErr='';
+  rlMsg=['Relíquias raras, forjadas longe daqui. Só aceito gemas.','Seis peças por semana. Quando acabam, acabaram.','Gema bem gasta vale mais que ouro guardado.'][Math.floor(Math.random()*3)];
+  $('#talk').classList.remove('on');const el=$('#relic');el.innerHTML='';el.classList.add('on');renderRelic();sfx.talk();relicLoad();
+}
+function closeRelic(){rlOpen=false;const el=$('#relic');el.classList.remove('on');resetWinPos(el)}
+function rlCountdown(){
+  if(!rlView)return '';
+  const ms=Math.max(0,rlView.nextResetAt-(Date.now()+(typeof EVENT_CLOCK_OFFSET==='number'?EVENT_CLOCK_OFFSET:0))),h=Math.floor(ms/3600000),d=Math.floor(h/24);
+  return d>0?d+'d '+(h%24)+'h':h>0?h+'h '+Math.floor(ms%3600000/60000)+'min':Math.max(1,Math.floor(ms/60000))+'min';
+}
+const gemImg=()=>`<img alt="" src="${iconURL('gema')}">`;
+const gemInline=()=>`<img alt="" src="${iconURL('gema')}" style="width:14px;height:14px;vertical-align:-2px;image-rendering:pixelated">`;
+function rlRowHtml(o){
+  const it=o.itemPreview,sel=rlSel===o.offerId,rar=rarityOf(it);
+  return `<button class="srow${sel?' sel':''}" type="button" data-rp="${o.offerId}"${o.purchased?' style="opacity:.55"':''}><span class="rs" style="--rc:${rar.c}"><img alt="" src="${iconURL(it)}"></span><span class="sbody"><span class="stag" style="background:${TYPE_TAG[it.type][1]}">${TYPE_TAG[it.type][0]}</span><b class="nm" style="color:${rar.c}">${esc(it.n)}</b><small>${rar.n} · Nv ${it.lv} · ${o.purchased?'COMPRADO':gemInline()+' '+o.priceGem}</small></span></button>`;
+}
+function rlStatLines(it){
+  const rows=[],add=(lab,v,pct)=>{if(v)rows.push(`<div class="st">${lab}: ${pct?Math.round(v*100)+'%':v}</div>`)};
+  add('ATK',it.atk);add('DEF',it.def);add('HP',it.hp);add('Bloqueio',it.blk,true);add('Velocidade',it.spd,true);
+  return rows.join('');
+}
+function rlDetail(){
+  if(rlErr)return `<div class="sub">${esc(rlErr)}</div>`;
+  if(!rlView)return `<div class="sub">Abrindo o baú de relíquias...</div>`;
+  const o=rlSel?rlView.offers.find(x=>x.offerId===rlSel):null;
+  if(!o)return `<div class="sub">Toque numa relíquia para ver os atributos e o preço.</div><div class="sub" style="margin-top:6px">Próxima renovação: ${rlCountdown()}</div>`;
+  const it=o.itemPreview,rar=rarityOf(it),canPay=P.gem>=o.priceGem,bagFull=P.bag.length>=BAG_MAX,armed=rlArm>Date.now();
+  let body=`<div class="dtop"><span class="rs" style="--rc:${rar.c}"><img alt="" src="${iconURL(it)}"></span><div class="dinfo"><small style="color:${rar.c}">${rar.n.toUpperCase()}</small><div class="nm" style="color:${rar.c}">${esc(it.n)}</div><div class="sub">Nv ${it.lv}${it.req?' · requer Nv '+it.req:''} · +0</div></div></div>`+rlStatLines(it);
+  body+=`<div class="st">Preço: ${o.priceGem} ${o.priceGem===1?'gema':'gemas'}</div>`;
+  if(o.purchased)return body+`<div class="dctl"><button class="rbtn" type="button" disabled><span>COMPRADO</span></button></div><div class="sub">Volta na próxima renovação: ${rlCountdown()}</div>`;
+  const why=!canPay?'Gemas insuficientes':bagFull?'Mochila cheia':'';
+  if(armed&&!why)return body+`<div class="sub">Comprar ${esc(it.n)} por ${o.priceGem} gemas?</div><div class="dctl"><button class="rbtn" type="button" data-ra="cancel"><span>Cancelar</span></button><button class="rbtn buybtn warn" type="button" data-ra="buy">${gemImg()}<span>Comprar</span></button></div>`;
+  return body+`<div class="dctl"><button class="rbtn buybtn" type="button" data-ra="arm"${why?' disabled':''}>${why?'':gemImg()}<span>${why||'Comprar ('+o.priceGem+')'}</span></button></div>`;
+}
+function renderRelic(){
+  const el=$('#relic'),sl0=el.querySelector('.slist'),sc=sl0?sl0.scrollTop:0;
+  if(rlView&&rlSel&&!rlView.offers.some(x=>x.offerId===rlSel))rlSel=null;
+  const rows=rlView?rlView.offers.map(rlRowHtml).join(''):'';
+  el.innerHTML=`<i class="orn"></i><div class="rh"><div class="mface"><img alt="" src="${SPR.mercador.img}"></div><div class="ttl"><h3>💎 Mercador de Relíquias</h3><small class="say">Equipamentos Raros e Épicos · ${esc(rlMsg)}</small></div><div class="coin">${gemImg()}<span>${P.gem}</span></div><button class="rx" type="button" data-x aria-label="Fechar">✕</button></div>
+  <div class="rbody fit shopb"><div class="slist">${rows}</div><div class="sdet">${rlDetail()}</div></div>`;
+  const sl1=el.querySelector('.slist');if(sl1)sl1.scrollTop=sc;
+  winSigStr=winSig();
+}
+async function rlBuy(){
+  if(rlBusy||!rlView||!rlSel)return;
+  const o=rlView.offers.find(x=>x.offerId===rlSel);if(!o||o.purchased)return;
+  rlBusy=true;rlArm=0;
+  try{
+    const r=await relicRequest('relic_buy',{offerId:o.offerId,expected:{type:o.type,lv:o.lv,rarity:o.rarity}});
+    if(!r.ok){
+      const e=r.error;
+      rlMsg=e==='ALREADY_PURCHASED'?'Essa relíquia você já levou nesta semana.':e==='OFFER_EXPIRED'||e==='OFFER_CHANGED'?'Meu estoque mudou -- dê outra olhada.':e==='OFFER_NOT_FOUND'?'Não tenho essa peça.':(e||'Não foi possível concluir.');
+      toast(rlMsg);await relicLoad();return;
+    }
+    if(r.relic){rlView=r.relic.view||rlView;sfx.coin();toast('Item adquirido! '+r.relic.item.n);rlMsg='Excelente escolha. Cuide bem dela.'}
+    renderRelic();
+  }finally{rlBusy=false}
+}
+$('#relic').addEventListener('click',e=>{
+  if(e.target.closest('[data-x]')){closeRelic();return}
+  const rp=e.target.closest('[data-rp]');if(rp){rlSel=rp.dataset.rp;rlArm=0;renderRelic();return}
+  const a=e.target.closest('[data-ra]');if(!a||a.disabled)return;
+  if(a.dataset.ra==='arm'){rlArm=Date.now()+6000;renderRelic();setTimeout(()=>{if(rlOpen)renderRelic()},6100)}
+  else if(a.dataset.ra==='cancel'){rlArm=0;renderRelic()}
+  else if(a.dataset.ra==='buy')rlBuy();
 });
 function shopSay(m){shopMsg=m;renderShop()}
 function shopList(){
@@ -7125,9 +7220,9 @@ function frame(t){
   if(!running)return;
   update(dt);updFocus(dt);draw();
   hudT+=dt;if(hudT>.1){hudT=0;hud();
-    const nn=nearestNpc(),tb=$('#talk');tb.classList.toggle('on',!!nn&&!dlg&&!P.dead&&!uiBusy()&&!shopOpen&&!bsOpen);
-    if(nn)tb.textContent=nn.chest?'Abrir baú':nn.id==='mercador'?'Abrir loja':nn.id==='ferreiro'?'Abrir ferraria':'Falar com '+nn.nome.split(' ')[0];
-    const np=nearestPortal(),pb=$('#portalBtn');pb.classList.toggle('on',!!np&&!dlg&&!P.dead&&!uiBusy()&&!shopOpen&&!bsOpen&&!traveling);
+    const nn=nearestNpc(),tb=$('#talk');tb.classList.toggle('on',!!nn&&!dlg&&!P.dead&&!uiBusy()&&!shopOpen&&!bsOpen&&!rlOpen);
+    if(nn)tb.textContent=nn.chest?'Abrir baú':nn.id==='mercador'?'Abrir loja':nn.id==='ferreiro'?'Abrir ferraria':nn.id==='relicario'?'Ver relíquias':'Falar com '+nn.nome.split(' ')[0];
+    const np=nearestPortal(),pb=$('#portalBtn');pb.classList.toggle('on',!!np&&!dlg&&!P.dead&&!uiBusy()&&!shopOpen&&!bsOpen&&!rlOpen&&!traveling);
     if(np)pb.textContent=np.label;
     drawMini()}
 }

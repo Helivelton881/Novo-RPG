@@ -20,6 +20,8 @@ const MARKET = require('./game-data/market.js');
 const BALANCE = require('./game-data/balance-data.js');
 // Fase 5.17.1: animacao do Vulcao (so o campo VISUAL `face` e decidido com isto).
 const MONSTER_ANIM = require('./game-data/monster-animation.js');
+// Fase 5.17.2: Mercador de Reliquias (estoque semanal deterministico, puro).
+const RELIC = require('./game-data/relic-shop.js');
 const { LEVEL_CAP, clampLevel } = BALANCE;
 
 const PORT = Number(process.env.PORT || 8080);
@@ -313,7 +315,7 @@ const QUEST_GATE_FIELDS = ['kills', 'gk', 'ks', 'kw', 'kp', 'kt', 'ki', 'kv'];
 // handleChest, handleQuest, creditKillReward, dungeon). gunlock e os
 // chestN entram aqui pela mesma razao (desbloqueio de portal so por
 // buy_portal; abertura de bau de campo so por handleChest).
-const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards', 'rwd'];
+const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards', 'rwd', 'relicShop'];
 function advanceQuestOnKill(save, type, boss, lvl) {
   const q = save.quest, changed = {};
   const bump = (field, need, next) => {
@@ -954,6 +956,64 @@ function sanitizeRewardState(raw) {
   const fb = Array.isArray(r.fb) ? [...new Set(r.fb.filter(t => RWD_BOSS_TYPES.has(t)))] : [];
   return { d, dx: n(r.dx), dg: n(r.dg), fb, wbx: n(r.wbx), tvx: n(r.tvx), w, wbg: n(r.wbg), tvg: n(r.tvg) };
 }
+// Fase 5.17.2: compras do Mercador de Reliquias. Compacto e limitado:
+// { w: weekId da ultima compra, b: slots (0..5) comprados nessa semana }.
+// Semana diferente da atual = reset LOGICO (nunca acumula historico).
+function sanitizeRelicShopState(raw) {
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const w = typeof r.w === 'string' && /^\d{4}-W\d{2}$/.test(r.w) ? r.w : '';
+  const max = RELIC.slotCount();
+  const b = Array.isArray(r.b) ? [...new Set(r.b.map(Number).filter(n => Number.isInteger(n) && n >= 0 && n < max))].sort((x, y) => x - y) : [];
+  return { w, b };
+}
+function relicBoughtThisWeek(save, weekId) {
+  const st = sanitizeRelicShopState(save.relicShop);
+  return st.w === weekId ? st.b : [];
+}
+// Estoque + estado de compra que o cliente enxerga (itemPreview sempre
+// criado pela MESMA fonte de stats -- GEAR_DATA.statsFor -- nunca pelo
+// cliente). Pura sobre (save, lvl, now).
+function relicShopView(save, lvl, now = Date.now()) {
+  const week = RELIC.relicWeekInfo(now);
+  const bought = relicBoughtThisWeek(save, week.weekId);
+  const offers = RELIC.relicStock({ weekId: week.weekId, cls: save.cls, lvl, types: DROP_TYPES_BY_CLASS[save.cls] || [] }).map(o => {
+    const st = GEAR_DATA.statsFor(o.type, o.lv, o.rarity, 0) || {};
+    return { ...o, purchased: bought.includes(o.slot), itemPreview: { type: o.type, lv: o.lv, rarity: o.rarity, enchant: 0, n: GEAR_DATA.nameFor(o.type, o.lv), atk: st.atk || 0, def: st.def || 0, hp: st.hp || 0, blk: st.blk || 0, spd: st.spd || 0, req: st.req || 0 } };
+  });
+  return { weekId: week.weekId, startAt: week.startAt, nextResetAt: week.nextResetAt, gem: save.gem, offers };
+}
+// Nucleo puro/testavel de UMA compra (muta `save` so em caso de sucesso).
+// `ctx` = {map, x, y} da sessao viva (proximidade server-side). Nada do
+// cliente alem de offerId (+ `expected` opcional, so comparado por
+// igualdade pra nunca comprar algo diferente do que a janela mostrava).
+function attemptRelicPurchase(save, lvl, offerId, ctx, expected, now = Date.now()) {
+  if (!ctx || ctx.map !== 'vila') return { error: 'Fale com o Mercador de Relíquias na Vila' };
+  const npc = BALANCE.RELIC_SHOP.NPC;
+  if (!(Math.hypot((Number(ctx.x) || 0) - npc.x, (Number(ctx.y) || 0) - npc.y) <= BALANCE.RELIC_SHOP.INTERACT_RADIUS)) return { error: 'Aproxime-se do Mercador de Relíquias' };
+  const parsed = RELIC.parseOfferId(offerId);
+  if (!parsed) return { error: 'OFFER_NOT_FOUND' };
+  const week = RELIC.relicWeekInfo(now);
+  if (parsed.weekId !== week.weekId) return { error: 'OFFER_EXPIRED' };
+  if (parsed.cls !== save.cls) return { error: 'OFFER_NOT_FOUND' };
+  const offer = relicShopView(save, lvl, now).offers.find(o => o.offerId === offerId);
+  if (!offer) return { error: 'OFFER_NOT_FOUND' };
+  if (expected && typeof expected === 'object' && (expected.type !== offer.type || Number(expected.lv) !== offer.lv || expected.rarity !== offer.rarity)) return { error: 'OFFER_CHANGED' };
+  // defesa em profundidade: so Rare/Epic, nunca acima do nivel real
+  if (!BALANCE.RELIC_SHOP.RARITIES.includes(offer.rarity)) return { error: 'OFFER_NOT_FOUND' };
+  if (offer.lv > lvl || !(DROP_TYPES_BY_CLASS[save.cls] || []).includes(offer.type)) return { error: 'OFFER_NOT_FOUND' };
+  if (offer.purchased) return { error: 'ALREADY_PURCHASED' };
+  const price = BALANCE.relicPrice(offer.lv, offer.rarity);
+  if (!Number.isInteger(price) || price <= 0) return { error: 'OFFER_NOT_FOUND' };
+  if (save.gem < price) return { error: 'Gemas insuficientes' };
+  if (save.bag.length >= SHOP_BAG_MAX) return { error: 'Mochila cheia' };
+  const item = createGear(offer.type, offer.lv, offer.rarity);
+  if (!item || item.enchant !== 0 || !BALANCE.RELIC_SHOP.RARITIES.includes(item.rarity)) return { error: 'OFFER_NOT_FOUND' };
+  save.gem -= price;
+  save.bag.push(item);
+  const bought = relicBoughtThisWeek(save, week.weekId);
+  save.relicShop = { w: week.weekId, b: [...bought, offer.slot].sort((a, b) => a - b) };
+  return { result: { offerId, slot: offer.slot, weekId: week.weekId, gemCost: price, item } };
+}
 function rewardDayKey(now = Date.now()) {
   const z = EVENT_DATA.zonedParts(now);
   return `${z.year}-${String(z.month).padStart(2, '0')}-${String(z.day).padStart(2, '0')}`;
@@ -1010,6 +1070,7 @@ function sanitizeSave(raw, lvl) {
     wbRewards: Array.isArray(save.wbRewards) ? save.wbRewards.slice(-12).map(x=>cleanText(x,96)).filter(Boolean) : [],
     tvtRewards: Array.isArray(save.tvtRewards) ? save.tvtRewards.slice(-12).map(x=>cleanText(x,96)).filter(Boolean) : [],
     rwd: sanitizeRewardState(save.rwd),
+    relicShop: sanitizeRelicShopState(save.relicShop),
   };
   for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
   // Um uid nunca pode aparecer duas vezes (mochila+mochila ou mochila+
@@ -1328,6 +1389,9 @@ async function handleShop(req, res, pathname) {
       const lvl = clampLevel(row.lvl);
       const save = sanitizeSave(row.save, lvl);
       const action = String(input.action || '');
+      // Fase 5.17.2: consultar o estoque nunca grava nada.
+      if (action === 'relic_state') return {status:200, body:{character: {...row, lvl, save}, relic: relicShopView(save, lvl)}};
+      let relicResult = null;
       let error = null;
       let enchantResult = null; // Fase 5.4: preenchido so pela acao enchant_item, ver abaixo
       let runtimeEffectKey = null;
@@ -1450,6 +1514,16 @@ async function handleShop(req, res, pathname) {
         else if((key==='pv'||key==='ap')&&activeP.hp>=activeP.maxHp)error='Sua vida já está cheia';
         else if(key==='scr'&&activeP.map==='vila')error='Você já está na vila';
         else {save[key]-=1;runtimeEffectKey=key}
+      } else if (action === 'relic_buy') {
+        // Fase 5.17.2: compra no Mercador de Reliquias -- tudo decidido por
+        // attemptRelicPurchase dentro deste withCharLock (duplo clique/duas
+        // abas/retry: a 2a requisicao ja le o slot comprado -> ALREADY_PURCHASED).
+        if (!activeP) error = 'Personagem precisa estar online';
+        else {
+          const expected = input.expected && typeof input.expected === 'object' ? { type: cleanText(input.expected.type, 16), lv: Math.round(Number(input.expected.lv)), rarity: cleanText(input.expected.rarity, 12) } : null;
+          const outcome = attemptRelicPurchase(save, lvl, cleanText(input.offerId, 64), { map: activeP.map, x: activeP.x, y: activeP.y }, expected);
+          if (outcome.error) error = outcome.error; else relicResult = outcome.result;
+        }
       } else if (action === 'enchant_item') {
         // Fase 5.4: tentativa de enchant server-authoritative. Cliente so
         // pede "quero tentar encantar este uid, no estado que EU vejo como
@@ -1474,7 +1548,10 @@ async function handleShop(req, res, pathname) {
       if(runtimeEffectKey==='pv'||runtimeEffectKey==='ap')itemEffect={type:'hp',...consumeRuntimePotion(activeP,runtimeEffectKey)};
       else if(runtimeEffectKey==='pa')itemEffect={type:'mp',amount:30};
       else if(runtimeEffectKey==='scr'){activeP.map='vila';activeP.x=720;activeP.y=1258;activeP.lastMoveAt=Date.now();itemEffect={type:'teleport',map:'vila',x:activeP.x,y:activeP.y};send(activeWs,{type:'server_teleport',...itemEffect})}
-      return {status:200, body:{character: rows[0], shopSold: shopSoldByChar.get(charId) || [], enchant: enchantResult, itemEffect}};
+      if (relicResult) {
+        console.log(JSON.stringify({event:'relic_purchase', userId:user.id, charId, offerId:relicResult.offerId, itemType:relicResult.item.type, lv:relicResult.item.lv, rarity:relicResult.item.rarity, gemCost:relicResult.gemCost, weekId:relicResult.weekId}));
+      }
+      return {status:200, body:{character: rows[0], shopSold: shopSoldByChar.get(charId) || [], enchant: enchantResult, itemEffect, relic: relicResult ? {...relicResult, view: relicShopView(rows[0].save ? sanitizeSave(rows[0].save, lvl) : save, lvl)} : null}};
     });
     json(res, result.status, result.body); return true;
   } catch (err) {
@@ -5689,7 +5766,7 @@ module.exports = {
   // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   rollEnchantSuccess, applyEnchant, attemptEnchant,
   // Fase 5.17 -- progressao/economia (nucleo puro, sem HTTP/WS/Supabase):
-  BALANCE, applyXpGain, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
+  BALANCE, applyXpGain, RELIC, relicShopView, attemptRelicPurchase, sanitizeRelicShopState, SHOP_BAG_MAX, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
   sanitizeRewardState, rolloverRewardState, rewardDayKey, rewardWeekKey, partyXpRecipients, parties, memberParty,
   hitTarget, applyDeathPenalty,
   // Fase 5.12 -- primitivas puras do runtime autoritativo:

@@ -1926,3 +1926,25 @@ Hotfix só visual. Detalhes, tabelas e QA: [`docs/FASE-5.17.1-VULCAO-SPRITES-ANI
 ## Próximo grande sistema
 
 **FASE 5.18 — Guild Wars.**
+
+# FASE 5.17.2 — Mercador de Relíquias
+
+Novo gem sink na Vila Inicial. Detalhes: [`docs/FASE-5.17.2-MERCADOR-RELIQUIAS.md`](docs/FASE-5.17.2-MERCADOR-RELIQUIAS.md).
+
+- **O que vende:** NPC `relicario` com 6 ofertas por semana e por personagem: 4 Raros e 2 Épicos, sempre +0, nunca Básico nem Lendário. Paga-se em gemas pela tabela oficial `BALANCE.RELIC_MERCHANT_PRICES` (Raro 2…30, Épico 8…65).
+- **Estoque:**
+  - determinístico, gerado a partir de `weekId`, classe e slot (`game-data/relic-shop.js`);
+  - renova toda segunda 00:00 BRT;
+  - respeita a classe (via `DROP_TYPES_BY_CLASS`) e usa os dois maiores tiers ≤ level do personagem (70/30).
+- **Compra no servidor:** `relic_state` (só leitura) e `relic_buy` (dentro de `withCharLock`).
+  - Só na Vila, perto do NPC.
+  - Uma compra por oferta por semana (`save.relicShop`, travado em `ECONOMY_LOCK_FIELDS`).
+  - Nada é cobrado antes de todas as validações.
+- **Nada muda na economia 5.17:** gem income, drops e enchant ficam iguais.
+- **Pendências:**
+  - asset do NPC (usa o sprite do Mercador);
+  - arbitragem gema → item → ouro (2,3× a 3,6×, limitada a 6 ofertas por semana), documentada para revisão.
+
+## Próximo grande sistema
+
+**FASE 5.18 — Guild Wars.**
