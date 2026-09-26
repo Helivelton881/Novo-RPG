@@ -21,6 +21,11 @@ const ROOT = __dirname;
 const SUPABASE_URL = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Fase 5.16.7: sem limite, uma conta acumulava sessao valida nova a cada
+// login sem nunca podar as antigas (achado real em producao: 75 sessoes
+// validas pra 10 usuarios, maximo de 51 numa unica conta). Configuravel
+// por env var pra nunca precisar mexer em codigo se o numero certo mudar.
+const MAX_SESSIONS_PER_USER = Number(process.env.MAX_SESSIONS_PER_USER) || 5;
 const authAttempts = new Map();
 const clients = new Map();
 const maps = new Map();
@@ -942,9 +947,29 @@ async function supabase(table, {method='GET', query='', body, prefer}={}) {
   return data;
 }
 
+// Fase 5.16.7: apos criar a sessao nova, remove expiradas do usuario e
+// poda o excedente acima de MAX_SESSIONS_PER_USER, preservando sempre as
+// mais recentes (a que acabou de ser criada inclusa, ja que created_at
+// dela e o mais novo). Nunca mexe em sessao de outro usuario -- filtro
+// sempre por user_id. Erros aqui nunca derrubam o login/registro em si
+// (poda e limpeza, nao autenticacao): so loga e segue.
+async function pruneUserSessions(userId) {
+  const nowIso = new Date().toISOString();
+  try {
+    await supabase('sessions', {method:'DELETE', query:`?user_id=eq.${encodeURIComponent(userId)}&expires_at=lt.${encodeURIComponent(nowIso)}`, prefer:'return=minimal'});
+  } catch (err) { console.error('session_prune_expired_error', err.message); }
+  try {
+    const rows = await supabase('sessions', {query:`?select=token,created_at&user_id=eq.${encodeURIComponent(userId)}&expires_at=gt.${encodeURIComponent(nowIso)}&order=created_at.desc`});
+    if (rows.length > MAX_SESSIONS_PER_USER) {
+      const excess = rows.slice(MAX_SESSIONS_PER_USER).map(r => r.token);
+      await supabase('sessions', {method:'DELETE', query:`?token=in.(${excess.join(',')})`, prefer:'return=minimal'});
+    }
+  } catch (err) { console.error('session_prune_excess_error', err.message); }
+}
 async function createSession(userId) {
   const token = b64url(crypto.randomBytes(32)), expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
   await supabase('sessions', {method:'POST', body:{token:tokenHash(token),user_id:userId,expires_at:expiresAt}, prefer:'return=minimal'});
+  await pruneUserSessions(userId);
   return {token, expiresAt};
 }
 
@@ -5175,6 +5200,8 @@ module.exports = {
   ADMIN_PERMS, adminHasPerm, sanitizeAuditMetadata, activeAmong, resolveAdmin, kickUserSockets,
   // Fase 5.15 -- Portal Publico:
   publicCache,
+  // Fase 5.16.7 -- poda de sessoes (exportado so pra teste, sem HTTP):
+  pruneUserSessions, MAX_SESSIONS_PER_USER, createSession, SESSION_TTL_MS,
   // Fase 5.16 -- Aventureiros IA (nucleo puro + runtime em memoria, nunca Supabase):
   aiEntities, aiSpawnEntity, aiDespawnEntity, aiPopulationTick, aiStep, aiTick,
   aiPublicPlayer, aiPresentOnMap, buildAiSave, buildAiCombat, aiZoneLevelRange,

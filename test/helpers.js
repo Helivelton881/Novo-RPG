@@ -125,6 +125,39 @@ async function adminPatchCharacter(id, patch) {
   return rows[0];
 }
 
+// Fase 5.16.7: le a tabela `sessions` DIRETO (service-role), so pra
+// verificar quantas sessoes validas um usuario tem e a ordem por
+// created_at -- nunca devolve o token em si (so created_at/expires_at),
+// pra nenhum teste nem log imprimir um token real por engano.
+async function adminCountValidSessions(userId) {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const nowIso = new Date().toISOString();
+  const r = await fetch(`${url}/rest/v1/sessions?select=created_at,expires_at&user_id=eq.${encodeURIComponent(userId)}&expires_at=gt.${encodeURIComponent(nowIso)}&order=created_at.desc`, {
+    headers: { apikey: key, Authorization: `Bearer ${key}` },
+  });
+  const rows = await r.json();
+  if (!r.ok) throw new Error('adminCountValidSessions falhou: ' + JSON.stringify(rows));
+  return rows;
+}
+
+// Fase 5.16.7: insere uma linha de sessao JA EXPIRADA direto na tabela
+// (service-role) -- nao ha como produzir isso pela API publica (createSession
+// sempre usa SESSION_TTL_MS a partir de agora). token e so um id descartavel
+// exclusivo do teste, nunca um token real emitido/usado por ninguem.
+async function adminInsertExpiredSession(userId) {
+  const url = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const token = 'test_expired_' + Math.random().toString(36).slice(2) + Date.now();
+  const expiresAt = new Date(Date.now() - 60000).toISOString();
+  const r = await fetch(`${url}/rest/v1/sessions`, {
+    method: 'POST',
+    headers: { apikey: key, Authorization: `Bearer ${key}`, 'content-type': 'application/json', prefer: 'return=minimal' },
+    body: JSON.stringify({ token, user_id: userId, expires_at: expiresAt }),
+  });
+  if (!r.ok) throw new Error('adminInsertExpiredSession falhou: ' + (await r.text()));
+}
+
 // Chama uma funcao RPC do Postgres direto (mesmo mecanismo que server.js
 // usa pra guild_*/bestiary_record_kill/etc, so que com a service-role key
 // direto do teste). Usado pra simular um efeito server-side que ja tem
@@ -144,4 +177,4 @@ async function adminRpc(name, body) {
   return Array.isArray(data) ? data[0] : data;
 }
 
-module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter, adminRpc, moveToDungeonCave };
+module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter, adminRpc, moveToDungeonCave, adminCountValidSessions, adminInsertExpiredSession };
