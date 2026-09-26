@@ -2968,6 +2968,11 @@ function publicPlayer(player) {
 
 const server = http.createServer(async (req, res) => {
   const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  // Fase 5.16.7: liveness puro (sem tocar Supabase) -- Render usa isso pra
+  // saber se o processo esta de pe, nao se o banco esta saudavel. Fica
+  // logo no topo do dispatcher, antes de qualquer handler que possa
+  // chamar supabase(), pra nunca ficar lento/indisponivel junto com o DB.
+  if (pathname === '/health' && req.method === 'GET') { json(res, 200, {ok:true, service:'novo-rpg'}); return; }
   if (await handleAuth(req, res, pathname)) return;
   if (await handleShop(req, res, pathname)) return;
   if (await handleQuest(req, res, pathname)) return;
