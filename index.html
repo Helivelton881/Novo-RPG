@@ -3188,7 +3188,30 @@ function netConnect(){
     }
     else if(m.type==='global_respawn'){if(W_!==worlds.vila)setWorld(worlds.vila);P.dead=false;P.deadT=0;P.x=m.x;P.y=m.y;P.hp=m.hp;P.maxhp=m.maxHp||P.maxhp;P.inv=1.5;toast('A Sacerdotisa trouxe você de volta')}
     else if(m.type==='player_vitals'){P.hp=m.hp;P.maxhp=m.maxHp||P.maxhp;P.dead=!!m.dead}
-    else if(m.type==='position_resync'&&m.map===netMapId()){P.x=m.x;P.y=m.y}
+    else if(m.type==='position_resync'){
+      if(m.map===netMapId()){P.x=m.x;P.y=m.y}
+      // Bug real de producao: quando o mapa que o servidor acha que o
+      // jogador esta diverge do mapa local (rede instavel durante uma
+      // transicao, ou qualquer outra causa de dessincronia), o resync
+      // SEMPRE vinha sendo ignorado por nao bater o mapa -- o cliente
+      // continuava mandando 'state'/'mob_damage' pro mapa errado pra
+      // sempre, preso: todo dano parava de valer (mob_damage exige
+      // map===p.map no servidor) e a posicao real nunca mais persistia
+      // (o proximo reconnect herdava o MESMO mapa desatualizado, ver
+      // characterRuntime em server.js). Servidor e sempre autoritativo
+      // sobre o mapa (mesmo principio ja usado em global_respawn acima) --
+      // entao agora, em vez de ignorar pra sempre, o cliente troca pro
+      // mundo que o servidor mandou e sincroniza. Corner case aceitavel:
+      // uma corrida rara de 1 frame durante uma transicao legitima pode
+      // mostrar o mapa antigo por um instante -- sempre corrigido no
+      // proximo 'state' aceito, contra travar pra sempre.
+      else if(worlds[m.map]||m.map==='vila'){
+        const w=worlds[m.map]||worlds.vila;
+        if(W_!==w)setWorld(w);
+        P.x=m.x;P.y=m.y;clickPath=null;stopAuto();
+        toast('Posição sincronizada com o servidor');
+      }
+    }
     else if(m.type==='server_teleport'&&m.map==='vila'&&W_!==worlds.vila)travel('vila')
     else if(m.type==='kill_reward'){
       // reconciliacao silenciosa: o cliente ja mostrou o feedback local
