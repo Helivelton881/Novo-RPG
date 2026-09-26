@@ -257,3 +257,13 @@ test('LEVEL-UP no meio da semana: slot comprado continua COMPRADO (nunca abre 6 
   const view = S.relicShopView(save, 20, NOW);
   assert.equal(view.offers[0].purchased, true);
 });
+
+// ===================== CLIENTE (estatico) =====================
+test('CLIENTE: NPC na Vila na posicao central, interacao pelo padrao existente, compra so manda offerId', () => {
+  const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.html'), 'utf8');
+  assert.match(html, /id:'relicario',nome:'Mercador de Relíquias',x:BALANCE_DATA\.RELIC_SHOP\.NPC\.x,y:BALANCE_DATA\.RELIC_SHOP\.NPC\.y/);
+  assert.match(html, /if\(npc\.id==='relicario'\)\{openRelic\(\);return\}/);
+  assert.match(html, /relicRequest\('relic_buy',\{offerId:o\.offerId,expected:\{type:o\.type,lv:o\.lv,rarity:o\.rarity\}\}\)/);
+  assert.ok(!/relic_buy'[^)]*price/.test(html), 'cliente nunca manda preco');
+  assert.match(html, /<div id="relic" class="rw"/);
+});
