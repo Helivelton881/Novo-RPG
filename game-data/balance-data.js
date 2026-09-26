@@ -263,6 +263,33 @@ function deathXpLoss(lvl, xp, cause) {
   return Math.min(x, Math.floor(XP_TO_NEXT[l] * DEATH_PENALTY.PVE_XP_RATIO));
 }
 
+// ===== Fase 5.17.2: Mercador de Reliquias (novo GEM SINK) =====
+// Precos OFICIAIS em gemas por faixa de equipamento (GEAR_LEVELS). Vende so
+// Rare/Epic, sempre +0. Nao altera nenhuma fonte de gema (DUNGEON/
+// WORLD_BOSS/TVT/FIELD_BOSS intocados) -- so cria um destino novo.
+const RELIC_MERCHANT_PRICES = {
+  1: { rare: 2, epic: 8 }, 4: { rare: 3, epic: 10 }, 8: { rare: 4, epic: 12 }, 12: { rare: 5, epic: 15 },
+  16: { rare: 7, epic: 18 }, 20: { rare: 9, epic: 22 }, 24: { rare: 12, epic: 28 }, 28: { rare: 15, epic: 34 },
+  32: { rare: 19, epic: 42 }, 36: { rare: 24, epic: 52 }, 40: { rare: 30, epic: 65 },
+};
+function relicPrice(lv, rarity) {
+  const row = RELIC_MERCHANT_PRICES[lv];
+  if (!row || (rarity !== 'rare' && rarity !== 'epic')) return null;
+  return row[rarity];
+}
+const RELIC_SHOP = {
+  RARE_SLOTS: 4,
+  EPIC_SLOTS: 2,
+  TOP_TIER_WEIGHT: 0.7,       // 70% maior faixa elegivel, 30% a anterior
+  RARITIES: ['rare', 'epic'], // defesa em profundidade: nunca basic/legendary
+  // Posicao do NPC na Vila (px) -- fonte unica pro cliente (desenho) e pro
+  // servidor (validacao de proximidade da compra).
+  NPC: { x: 950, y: 619 },
+  INTERACT_RADIUS: 200,       // mesmo raio que fecha a janela do Mercador/Ferreiro
+  // Reset: segunda 00:00 BRT = segunda 03:00 UTC (Brasil sem horario de verao desde 2019).
+  RESET_UTC_OFFSET_HOURS: -3,
+};
+
 // ===== Eventos temporarios (hook) =====
 // A economia BASE e x1. Boosts sao sempre multiplicadores temporarios com
 // janela explicita, nunca alteracao permanente dos valores acima. Lista
@@ -296,6 +323,7 @@ const DATA = {
   friendlyGold, enchantGoldCostRaw, enchantCostFor, enchantChance, enchantPower,
   PARTY_XP_SHARE, PARTY_XP_RANGE, partyXpShare,
   DEATH_PENALTY, deathXpLoss,
+  RELIC_MERCHANT_PRICES, relicPrice, RELIC_SHOP,
   EVENT_BOOST_KINDS, EVENT_BOOSTS, EVENT_BOOST_MAX, eventMultiplier,
 };
 
