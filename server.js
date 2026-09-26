@@ -38,6 +38,13 @@ const DUNGEON_MAP_RE = /^([a-z]+)_d(?:#([0-9a-f]{8}))?$/;
 const WORLD_BOSS_MAP_RE = WORLD_BOSS.WORLD_BOSS_MAP_RE;
 const TVT_MAP_RE = TVT.TVT_MAP_RE;
 function isAllowedMap(map){return ALLOWED_MAP.test(map)||WORLD_BOSS_MAP_RE.test(map)||TVT_MAP_RE.test(map)}
+// Fase 5.16.7: um mapa de campo "de verdade" -- vila ou uma das 7 zonas,
+// SEM sufixo de instancia (_d/_d#hash). Nunca inclui masmorra/TvT/World
+// Boss -- usado pra decidir o que e seguro persistir como localizacao
+// permanente do personagem (ver p.safeMap/safeX/safeY em handleWsJoin e
+// o autosave de runtime).
+const FIELD_ZONE_RE = /^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)$/;
+function isPersistentFieldMap(map){return FIELD_ZONE_RE.test(map)}
 const ALLOWED_CLASS = new Set(['guerreiro', 'druida', 'mago', 'arqueiro']);
 
 // ===== Roster de monstro autoritativo (Fase 1) =====
@@ -480,6 +487,25 @@ const QUEST_REWARDS = {
   20: {next:21, gold:600,  gem:5, xp:1200},
   24: {next:25, gold:800,  gem:6, xp:1800},
   28: {next:29, gold:1000, gem:7, xp:2500},
+  // Fase 5.16.7: os 7 estagios que so avancam por dialogo (aceitar a
+  // missao inicial, ou "portal liberado" logo apos derrotar o chefe
+  // regional) nunca pagavam premio e por isso nunca tinham entrada aqui
+  // -- o cliente fazia so `P.quest=N+1;saveGame()`, que o PUT generico
+  // SEMPRE ignora pra personagem ja rastreado (save.quest e QUEST_GATE_FIELDS
+  // sao travados do banco, nunca aceitos do cliente). Efeito real: o avanco
+  // de regiao nunca persistia -- reload/logout devolvia o jogador pro
+  // estagio anterior (chefe derrotado de novo, "de mentirinha", e os
+  // contadores de caca da PROXIMA regiao nunca avancavam de verdade, ja
+  // que advanceQuestOnKill exige save.quest===o estagio exato). Mesma
+  // validacao/persistencia de QUEST_REWARDS de sempre, so com premio
+  // zerado -- nunca um endpoint ou mecanismo novo.
+  0:  {next:1,  gold:0, gem:0, xp:0},
+  6:  {next:7,  gold:0, gem:0, xp:0},
+  10: {next:11, gold:0, gem:0, xp:0},
+  14: {next:15, gold:0, gem:0, xp:0},
+  18: {next:19, gold:0, gem:0, xp:0},
+  22: {next:23, gold:0, gem:0, xp:0},
+  26: {next:27, gold:0, gem:0, xp:0},
 };
 // Espelha need() do cliente (index.html): XP necessario pra passar do nivel l.
 // Generico -- usado tanto pra recompensa de missao quanto pra XP de abate.
@@ -545,6 +571,97 @@ function withCharLock(charId, fn) {
   const result = prior.then(run, run);
   charLocks.set(charId, result.catch(() => {}));
   return result;
+}
+
+// Fase 5.16.7: PATCH "logicamente parcial" em characters.save -- rele o
+// save mais recente do banco DENTRO de withCharLock e mescla so os campos
+// passados em cima dessa leitura fresca, nunca em cima de uma copia que o
+// chamador ja tinha em memoria (que pode estar defasada). A coluna `save`
+// e um jsonb unico via PostgREST (um PATCH so aceita substituir o valor
+// inteiro, sem merge parcial nativo sem uma RPC dedicada que este projeto
+// nao tem) -- a "parcialidade" vem do merge feito aqui, nunca do PATCH em
+// si. Como TODO outro caminho que grava save (handleShop/handleChest/PUT
+// generico/handleQuest/creditKillReward) ja usa o MESMO withCharLock,
+// nunca ha dois escritores concorrentes lendo o mesmo save velho -- esta
+// funcao fecha a ultima lacuna (autosave de runtime) usando o mesmo padrao.
+// sanitizeSave() roda de novo em cima do resultado por seguranca (mesmas
+// garantias de qualquer outro caminho que grava save), mesmo pra um patch
+// pequeno como {map,x,y,dir,hp}.
+async function patchCharacterFields(charId, userId, fields) {
+  return withCharLock(charId, async () => {
+    const rows0 = await supabase('characters', {
+      query: `?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}&limit=1`
+    });
+    const row = rows0[0];
+    if (!row) return null;
+    let lvl = row.lvl;
+    const save = sanitizeSave(row.save, lvl);
+    for (const [key, value] of Object.entries(fields)) {
+      if (key === 'lvl') { lvl = Math.max(1, Math.min(99, Number(value) || lvl)); save.lvl = lvl; }
+      else save[key] = value;
+    }
+    const clean = sanitizeSave(save, lvl);
+    const rows = await supabase('characters', {
+      method: 'PATCH',
+      query: `?id=eq.${encodeURIComponent(charId)}&user_id=eq.${encodeURIComponent(userId)}`,
+      body: {lvl, map: clean.map, save: clean},
+      prefer: 'return=minimal'
+    });
+    return rows;
+  });
+}
+
+// ===== Fase 5.16.7: autosave de runtime =====
+// So marca uma flag em memoria (O(1), sem I/O) -- quem decide QUANDO
+// gravar de verdade e runtimeAutosaveSweep, abaixo. So map/x/y/hp passam
+// por aqui (mais a localizacao segura de retorno); quest/xp/lvl/contadores
+// de missao tem seus proprios caminhos atomicos (handleQuest/
+// advanceQuestOnKill) e NUNCA devem ser reescritos por este loop --
+// patchCharacterFields sempre rele o save fresco do banco dentro de
+// withCharLock antes de mesclar, entao uma escrita mais recente de quest
+// nunca e apagada por um autosave de posicao em voo, mas o autosave em si
+// jamais inclui esses campos, por seguranca dupla.
+function markCharDirty(p) { if (p && p.charId) p._dirty = true; }
+
+// Persiste UM personagem sujo -- usa a localizacao segura de retorno
+// (safeMap/safeX/safeY) em vez de map/x/y crus sempre que o personagem
+// estiver DENTRO de uma instancia temporaria (masmorra/TvT/World Boss),
+// pra nunca persistir um mapId de instancia como localizacao permanente
+// (reconexao rapida pra dentro da MESMA instancia continua funcionando
+// por outro caminho inteiramente -- ownedDungeonInstance/dungeon_enter --
+// nunca depende do que fica salvo aqui).
+async function persistDirtyChar(p) {
+  const charId = p.charId; if (!charId || !p.userId) return;
+  const usingSafe = !isPersistentFieldMap(p.map);
+  const fields = {
+    map: usingSafe ? p.safeMap : p.map,
+    x: usingSafe ? p.safeX : p.x,
+    y: usingSafe ? p.safeY : p.y,
+    hp: Math.max(0, Math.round(Number(p.hp) || 0)),
+  };
+  p._dirty = false; // limpa ANTES do I/O: uma mutacao concorrente durante o
+                     // await re-marca pro proximo tick, sem perder a atualizacao
+  try {
+    await patchCharacterFields(charId, p.userId, fields);
+    p._lastSavedAt = Date.now();
+  } catch (err) {
+    p._dirty = true; // falhou -- tenta de novo no proximo tick
+    console.error('runtime_autosave_error', charId, err.message);
+  }
+}
+
+// UM unico setInterval global (nunca um por personagem) varrendo `clients`
+// -- so persiste quem esta com a flag suja, e so quem e a sessao autoritativa
+// do personagem (socket velho de session-replacement nunca grava por cima
+// do novo). minGapMs>0 e o checkpoint de seguranca mais espacado: pula quem
+// o tick principal ja salvou ha pouco, pra nunca duplicar escrita na mesma janela.
+function runtimeAutosaveSweep(minGapMs) {
+  const now = Date.now();
+  for (const p of clients.values()) {
+    if (!p._dirty || !p.charId || p.gameplayAuthority === false) continue;
+    if (minGapMs && now - (p._lastSavedAt || 0) < minGapMs) continue;
+    persistDirtyChar(p); // fire-and-forget -- erro ja tratado dentro, nunca vira unhandled rejection
+  }
 }
 
 // Espelha a formula de dano e o cooldown de cada skill (CLASSES/SKILL_FX em
@@ -1296,37 +1413,46 @@ async function handleQuest(req, res, pathname) {
   try {
     const user = await resolveUser(req);
     if (!user) { json(res,401,{error:'Sessão ausente ou expirada'}); return true; }
-    const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
-    const row = rows0[0];
-    if (!row) { json(res,404,{error:'Personagem não encontrado'}); return true; }
-    let lvl = row.lvl;
-    const save = sanitizeSave(row.save, lvl);
     const input = await readJson(req);
     const from = Math.round(Number(input.from));
     const reward = QUEST_REWARDS[from];
+    if (!reward) { json(res,400,{error:'Missão inválida ou já concluída'}); return true; }
+    // Fase 5.16.7: read-modify-write de characters.save precisa serializar
+    // com QUALQUER outro caminho que grava o mesmo personagem (shop, bau,
+    // autosave de posicao, o proprio PUT generico) -- sem isso, uma escrita
+    // concorrente lida ANTES desta terminar pode ser sobrescrita pelo PATCH
+    // final aqui (stale overwrite). withCharLock ja e o padrao usado por
+    // handleShop/handleChest/handleCharacters; faltava so aqui.
+    const result = await withCharLock(charId, async () => {
+      const rows0 = await supabase('characters', {query:`?select=lvl,save&id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}&limit=1`});
+      const row = rows0[0];
+      if (!row) return {status:404, body:{error:'Personagem não encontrado'}};
+      let lvl = row.lvl;
+      const save = sanitizeSave(row.save, lvl);
+      if (save.quest !== from) return {status:400, body:{error:'Missão inválida ou já concluída'}};
 
-    if (!reward || save.quest !== from) { json(res,400,{error:'Missão inválida ou já concluída'}); return true; }
+      save.gold = Math.min(500000, save.gold + reward.gold);
+      save.gem = Math.min(5000, save.gem + reward.gem);
+      if (reward.pv) save.pv = Math.min(999, save.pv + reward.pv);
+      const leveled = applyXpGain(save, lvl, reward.xp);
+      save.xp = leveled.xp; lvl = leveled.lvl;
+      save.quest = reward.next;
+      save.lvl = lvl;
 
-    save.gold = Math.min(500000, save.gold + reward.gold);
-    save.gem = Math.min(5000, save.gem + reward.gem);
-    if (reward.pv) save.pv = Math.min(999, save.pv + reward.pv);
-    const leveled = applyXpGain(save, lvl, reward.xp);
-    save.xp = leveled.xp; lvl = leveled.lvl;
-    save.quest = reward.next;
-    save.lvl = lvl;
-
-    const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{lvl, save}, prefer:'return=representation'});
-    if (!rows.length) { json(res,404,{error:'Personagem não encontrado'}); return true; }
-    // Bug real de producao (Goblins congelados na Floresta): esta rota grava
-    // save.quest direto no banco, mas a conexao WS já aberta desse personagem
-    // (se houver) mantém seu PRÓPRIO `p.quest` em memória, lido só uma vez no
-    // join (handleWsJoin) e nunca resincronizado depois. allowedFieldTransition
-    // decide a transição de mapa de campo (ex.: liberar a Floresta) por esse
-    // `p.quest` -- sem este resync, a MESMA sessão WS nunca consegue entrar na
-    // zona recém-desbloqueada até reconectar (F5), mesmo com o banco já correto.
-    const activeWs = activeCharacterSockets.get(charId), activeP = activeWs && clients.get(activeWs);
-    if (activeP) activeP.quest = save.quest;
-    json(res,200,{character: rows[0]}); return true;
+      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{lvl, save}, prefer:'return=representation'});
+      if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
+      // Bug real de producao (Goblins congelados na Floresta): esta rota grava
+      // save.quest direto no banco, mas a conexao WS já aberta desse personagem
+      // (se houver) mantém seu PRÓPRIO `p.quest` em memória, lido só uma vez no
+      // join (handleWsJoin) e nunca resincronizado depois. allowedFieldTransition
+      // decide a transição de mapa de campo (ex.: liberar a Floresta) por esse
+      // `p.quest` -- sem este resync, a MESMA sessão WS nunca consegue entrar na
+      // zona recém-desbloqueada até reconectar (F5), mesmo com o banco já correto.
+      const activeWs = activeCharacterSockets.get(charId), activeP = activeWs && clients.get(activeWs);
+      if (activeP) activeP.quest = save.quest;
+      return {status:200, body:{character: rows[0]}};
+    });
+    json(res, result.status, result.body); return true;
   } catch (err) {
     console.error('quest_error', err.message, err.status || '', err.detail || '');
     if (!res.headersSent) json(res, err.message==='SUPABASE_NOT_CONFIGURED'?503:500, {error: err.message==='SUPABASE_NOT_CONFIGURED'?'Missões online ainda não configuradas no servidor.':'Não foi possível concluir. Tente novamente.'});
@@ -3090,17 +3216,32 @@ async function handleWsJoin(ws, msg) {
     const realSave = charRow ? sanitizeSave(charRow.save,charRow.lvl) : startingSave(claimedCls,cleanText(msg.name,14)||'Herói');
     const combat = WORLD_BOSS.combatSnapshot({userId,charId:charRow?.id||null,name:charRow?.name||msg.name,cls:charRow?.cls||claimedCls,lvl:charRow?.lvl||claimedLvl,save:realSave});
     const remembered = charRow && characterRuntime.get(charRow.id);
+    const initMap = remembered?.map || realSave?.map || 'vila';
+    const initX = remembered?.x ?? (realSave?.x || 720);
+    const initY = remembered?.y ?? (realSave?.y || 1258);
+    // Fase 5.16.7: "localizacao segura de retorno" -- so persiste/restaura
+    // um mapa de campo de verdade (vila ou uma das 7 zonas), NUNCA um id de
+    // instancia temporaria (masmorra/TvT/World Boss). Se o snapshot restaurado
+    // (characterRuntime ou o save do banco) por acaso for uma instancia --
+    // nunca deveria acontecer depois desta fase, ja que autosave/runtime
+    // sempre gravam a localizacao segura em vez do mapa de instancia, mas
+    // pode sobrar de antes do deploy -- cai pra vila em vez de tentar
+    // reconstruir um mapId que pode nem existir mais. Reconexao pra DENTRO
+    // da mesma instancia continua funcionando por outro caminho inteiramente
+    // (ownedDungeonInstance/dungeon_enter), nunca por este p.map inicial.
+    const initSafe = isPersistentFieldMap(initMap);
     const p = {
       id: crypto.randomUUID(), userId, charId: charRow ? charRow.id : null, clientInstanceId,
       name: charRow ? (cleanText(charRow.name,14)||'Herói') : (cleanText(msg.name, 14) || 'Herói'),
       cls: charRow ? (ALLOWED_CLASS.has(charRow.cls) ? charRow.cls : 'guerreiro') : claimedCls,
       lvl: charRow ? Math.max(1, Math.min(99, Number(charRow.lvl) || 1)) : claimedLvl,
-      authed: !!charRow, map: remembered?.map || realSave?.map || 'vila', x: remembered?.x ?? (realSave?.x || 720), y: remembered?.y ?? (realSave?.y || 1258), dir: 0, moving: false, atkT: 0, atkAng: 0,
+      authed: !!charRow, map: initMap, x: initX, y: initY, dir: 0, moving: false, atkT: 0, atkAng: 0,
+      safeMap: initSafe ? initMap : 'vila', safeX: initSafe ? initX : 720, safeY: initSafe ? initY : 1258,
       guildId: null, guildRole: null, guildTag: null, guildName: null,
       combat, hp:remembered?Math.min(combat.maxHp,remembered.hp):Math.min(combat.maxHp,realSave.hp||combat.maxHp), maxHp:combat.maxHp,
       dead:!!remembered?.dead, respawnAt:remembered?.respawnAt||0, skillCd:remembered?.skillCd||{}, basicCdUntil:remembered?.basicCdUntil||0,
       lastMoveAt:Date.now(), gameplayAuthority:true, packetWindows:new Map(), sessionKey:crypto.randomUUID(),
-      quest:realSave?.quest||0, gunlock:realSave?.gunlock||{},
+      quest:realSave?.quest||0, gunlock:realSave?.gunlock||{}, _dirty:false, _lastSavedAt:0,
     };
     if(p.charId){
       const old=activeCharacterSockets.get(p.charId),oldP=old&&old!==ws?clients.get(old):null;
@@ -4145,7 +4286,10 @@ wss.on('connection', ws => {
           return;
         }
         if(!allowedFieldTransition(p,map)){securityReject(p,'INVALID_MAP');send(ws,{type:'position_resync',x:p.x,y:p.y,map:p.map});return}
-        p.map=map;p.x=x;p.y=y;p.lastMoveAt=Date.now();broadcast({type:'state',player:publicPlayer(p)},ws);return
+        p.map=map;p.x=x;p.y=y;p.lastMoveAt=Date.now();
+        if(isPersistentFieldMap(map)){p.safeMap=map;p.safeX=x;p.safeY=y}
+        markCharDirty(p);
+        broadcast({type:'state',player:publicPlayer(p)},ws);return
       }
       const moveNow=Date.now(),movement=p.authed?validateMovement(p,x,y,moveNow):{ok:true,x,y};x=movement.x;y=movement.y;
       if(!movement.ok){securityReject(p,movement.code);send(ws,{type:'position_resync',x,y,map:p.map})}p.lastMoveAt=moveNow;
@@ -4156,7 +4300,13 @@ wss.on('connection', ws => {
       // cliente adulterado podia inflar p.lvl e, por tabela, o dano
       // calculado em resolveAttackDamage (baseDmgOf usa p.lvl).
       const lvl = p.authed ? p.lvl : Math.max(1,Math.min(99,Number(msg.lvl)||1));
+      const _pm=p.map,_px=p.x,_py=p.y,_phhp=p.hp;
       Object.assign(p,{map,x,y,dir:Math.max(0,Math.min(3,Number(msg.dir)|0)),moving:!!msg.moving,lvl,atkT,atkAng:Math.max(-Math.PI*2,Math.min(Math.PI*2,atkAng))});
+      // Fase 5.16.7: so marca sujo (pro autosave de runtime pegar) se
+      // map/x/y/hp realmente mudaram -- 'state' chega a cada tick mesmo
+      // parado, nao ha motivo pra reescrever o banco sem nenhuma mudanca real.
+      if(p.map!==_pm||p.x!==_px||p.y!==_py||p.hp!==_phhp)markCharDirty(p);
+      if(isPersistentFieldMap(map)){p.safeMap=map;p.safeX=x;p.safeY=y}
       if(WORLD_BOSS_MAP_RE.test(map)){const instance=worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member){member.x=x;member.y=y;member.online=true}}
       if(TVT_MAP_RE.test(map)){const instance=tvtInstances.get(map),member=instance&&instance.players.get(p.charId);if(member&&!member.dead){member.x=x;member.y=y;member.online=true}}
       broadcast({type:'state',player:publicPlayer(p)},ws);
@@ -4371,7 +4521,17 @@ wss.on('connection', ws => {
       for (const [ws2,p2] of clients) if (p2.guildId===p.guildId && ws2.readyState===WebSocket.OPEN) ws2.send(payload);
     }
   });
-  ws.on('close', () => { const p=clients.get(ws);if(p){const wasAuthoritative=!p.charId||activeCharacterSockets.get(p.charId)===ws;if(p.charId&&wasAuthoritative){activeCharacterSockets.delete(p.charId);characterRuntime.set(p.charId,{map:p.map,x:p.x,y:p.y,hp:p.hp,dead:p.dead,respawnAt:p.respawnAt,skillCd:p.skillCd||{},basicCdUntil:p.basicCdUntil||0,lastDamageAt:p.lastDamageAt||0,savedAt:Date.now()})}const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member&&wasAuthoritative)member.online=false;
+  ws.on('close', () => { const p=clients.get(ws);if(p){const wasAuthoritative=!p.charId||activeCharacterSockets.get(p.charId)===ws;if(p.charId&&wasAuthoritative){activeCharacterSockets.delete(p.charId);
+      // Fase 5.16.7: mesma regra de localizacao segura do autosave de
+      // runtime -- nunca guarda um mapId de instancia temporaria neste
+      // snapshot de reconexao rapida. Reconectar pra DENTRO da MESMA
+      // instancia continua funcionando (ver dungeonByOwner/tvtByChar/
+      // worldBossByChar em handleWsJoin, ~L3263-3282 -- checam charId
+      // direto, nunca dependem do que fica salvo aqui).
+      const _cSafe=isPersistentFieldMap(p.map);
+      characterRuntime.set(p.charId,{map:_cSafe?p.map:p.safeMap,x:_cSafe?p.x:p.safeX,y:_cSafe?p.y:p.safeY,hp:p.hp,dead:p.dead,respawnAt:p.respawnAt,skillCd:p.skillCd||{},basicCdUntil:p.basicCdUntil||0,lastDamageAt:p.lastDamageAt||0,savedAt:Date.now()});
+      if(p._dirty)persistDirtyChar(p);
+    }const map=p.charId&&worldBossByChar.get(p.charId),instance=map&&worldBossInstances.get(map),member=instance&&instance.members.get(p.charId);if(member&&wasAuthoritative)member.online=false;
     // Fase 5.7: desconectar NAO termina a partida nem pontua morte -- so
     // marca offline (mesma regra do World Boss). O personagem continua
     // pertencendo a instancia; reconectar com o mesmo userId/charId acha
@@ -5167,8 +5327,43 @@ setInterval(() => {
   }
 }, 30000).unref();
 
+// Fase 5.16.7: autosave de runtime -- UM tick global de 5s (varre `clients`
+// e persiste so quem estiver marcado sujo) mais uma rede de seguranca de
+// 30s (mesma varredura, mas pula quem o tick de 5s ja salvou ha <20s, pra
+// nunca duplicar escrita na mesma janela). Nunca um setInterval por
+// personagem. .unref() pelo mesmo motivo do ping/pong acima -- nunca
+// impede o processo de sair sozinho num teste que so faz require().
+// AUTOSAVE_SWEEP_MS/AUTOSAVE_SAFETY_MS: override so pra teste (ver
+// test/quest-persistence.test.js) exercitar o loop real sem esperar 5s/30s
+// de verdade -- sem env definido, cadencia de producao e EXATAMENTE a
+// mesma de antes (5000/30000).
+const AUTOSAVE_SWEEP_MS = Number(process.env.AUTOSAVE_SWEEP_MS) || 5000;
+const AUTOSAVE_SAFETY_MS = Number(process.env.AUTOSAVE_SAFETY_MS) || 30000;
+setInterval(() => runtimeAutosaveSweep(0), AUTOSAVE_SWEEP_MS).unref();
+setInterval(() => runtimeAutosaveSweep(20000), AUTOSAVE_SAFETY_MS).unref();
+
 if (require.main === module) {
   loadLivingWorldConfig().finally(()=>server.listen(PORT,'0.0.0.0',()=>console.log(`MMORPG Online em http://localhost:${PORT}`)));
+
+  // Fase 5.16.7: antes do Render matar o processo (deploy novo, restart,
+  // scale down), tenta persistir todo personagem sujo dentro de um prazo
+  // curto -- nunca trava o shutdown indefinidamente. Sem isso, um deploy
+  // no meio de uma sessao ativa perderia ate 5s de posicao/hp em memoria
+  // (o pior caso, ja bem menor que os minutos que o autosave client-side
+  // antigo podia perder).
+  let shuttingDown = false;
+  async function gracefulShutdown(signal) {
+    if (shuttingDown) return; shuttingDown = true;
+    const dirty = [...clients.values()].filter(p => p._dirty && p.charId && p.gameplayAuthority !== false);
+    console.log('shutdown_signal', signal, 'flushing', dirty.length, 'dirty_chars');
+    await Promise.race([
+      Promise.allSettled(dirty.map(p => persistDirtyChar(p))),
+      new Promise(resolve => setTimeout(resolve, 6000)),
+    ]);
+    process.exit(0);
+  }
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 // Exportado so pra teste unitario puro (sem HTTP/Supabase) das funcoes de
 // item/posse da Fase 5.1 -- nao muda nada em como `node server.js` roda
@@ -5209,6 +5404,13 @@ module.exports = {
   // Fase 5.12 -- primitivas puras do runtime autoritativo:
   resolveAttackDamage, applyGlobalPlayerDamage, mitigatePlayerDamage, consumeRuntimePotion,
   validateMovement, allowedFieldTransition, allowPacket, attackRangeFor,
+  // Fase 5.16.7 -- persistencia confiavel (exportado so pra teste unitario
+  // puro, sem HTTP/WS/Supabase real onde marcado):
+  QUEST_REWARDS, advanceQuestOnKill, QUEST_GATE_FIELDS, withCharLock,
+  isPersistentFieldMap, markCharDirty, clients,
+  // patchCharacterFields/persistDirtyChar/runtimeAutosaveSweep chamam
+  // supabase() de verdade -- so uteis em teste gated por hasSupabase().
+  patchCharacterFields, persistDirtyChar, runtimeAutosaveSweep,
   // Fase 5.16.6 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   DUNGEON_CAVE_POS, DUNGEON_CAVE_RADIUS,
   isAuthoritativeSocket, activeCharacterSockets,
