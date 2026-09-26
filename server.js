@@ -3151,6 +3151,15 @@ async function handleWsJoin(ws, msg) {
 // (P.quest>=N || P.gunlock[zona]) -- espelhado aqui pra validar a entrada
 // na masmorra no servidor, nunca so pelo botao do cliente estar habilitado.
 const DUNGEON_UNLOCK_QUEST = { floresta: 3, cripta: 7, serra: 11, pantano: 15, torre: 19, ilhas: 23, vulcao: 27 };
+// Fase 5.16.6: posicao fixa da entrada da caverna de masmorra em CADA
+// mapa de campo (identica nas 7 zonas -- confirmado em index.html:
+// w.cave={x:46*T,y:16*T,zone:'<zona>'} repetido igual pra floresta,
+// cripta, serra, pantano, torre, ilhas, vulcao). T=48 no cliente
+// (mesma constante de SLIME_TILE acima). Raio 190 espelha o mesmo
+// limiar ja usado em allowedFieldTransition()/applyDungeonExit() pra
+// portais/saida de masmorra -- nunca um numero magico novo e solto.
+const DUNGEON_CAVE_POS = { x: 46 * 48, y: 16 * 48 };
+const DUNGEON_CAVE_RADIUS = 190;
 // Fase 5.2, Parte "MAPA/ENTRADA/SAIDA": entrada em masmorra agora e um
 // pedido explicito ao servidor, nunca so o cliente chamando travel('X_d')
 // local. Valida sessao (p.authed), confere o requisito real (quest OU
@@ -3277,6 +3286,21 @@ async function handleDungeonEnter(ws, p, msg) {
     if (inRealParty && !validMembers.some(m => m.charId === p.charId)) {
       // o proprio lider (quem pediu) nao esta liberado -- o grupo todo fica de fora dessa tentativa.
       send(ws, {type:'dungeon_error', error:'Você ainda não liberou essa região.'}); return;
+    }
+
+    // Fase 5.16.6: cliente nao envia mais dungeon_enter so por chegar perto
+    // (abertura automatica de portal foi removida) -- mas o servidor NUNCA
+    // confiava so nisso mesmo antes, e continua sem confiar: ultimo portao
+    // antes de criar a instancia de fato, quem pediu (p) precisa estar de
+    // verdade no mapa de campo da zona e dentro do raio da entrada da
+    // caverna, igual toda outra transicao de mapa autoritativa
+    // (allowedFieldTransition/applyDungeonExit). Roda DEPOIS da checagem de
+    // desbloqueio/lideranca de proposito, pra essas mensagens de erro
+    // continuarem especificas (nao mascaradas por "aproxime-se"). So o
+    // requisitante e checado -- os demais membros da Party continuam sendo
+    // puxados pelo lider independente da posicao deles, como ja funcionava.
+    if (p.map !== zone || Math.hypot(p.x - DUNGEON_CAVE_POS.x, p.y - DUNGEON_CAVE_POS.y) > DUNGEON_CAVE_RADIUS) {
+      send(ws, {type:'dungeon_error', error:'Aproxime-se da entrada da masmorra'}); return;
     }
 
     const state = buildDungeonInstance(zone, validMembers.map(m => ({charId:m.charId, userId:m.userId, cls:m.cls})));
@@ -5168,6 +5192,8 @@ module.exports = {
   // Fase 5.12 -- primitivas puras do runtime autoritativo:
   resolveAttackDamage, applyGlobalPlayerDamage, mitigatePlayerDamage, consumeRuntimePotion,
   validateMovement, allowedFieldTransition, allowPacket, attackRangeFor,
+  // Fase 5.16.6 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
+  DUNGEON_CAVE_POS, DUNGEON_CAVE_RADIUS,
   isAuthoritativeSocket, activeCharacterSockets,
   validClientInstanceId,
   sessionReplacementMode,

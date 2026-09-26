@@ -51,6 +51,23 @@ function stopServer(srv) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Fase 5.16.6: dungeon_enter agora exige, como ultimo portao antes de
+// criar a instancia, que o REQUISITANTE esteja de fato no mapa de campo
+// da zona e dentro do raio da entrada da caverna (DUNGEON_CAVE_POS =
+// {x:46*T,y:16*T} = {x:2208,y:768}, T=48; DUNGEON_CAVE_RADIUS=190, ver
+// server.js) -- nunca mais um dungeon_enter "solto" sem posicao alguma.
+// Simula a caminhada real de uma conexao AUTENTICADA (que passa pelo
+// portal-radius de allowedFieldTransition, ao contrario do atalho que
+// visitantes anonimos tem): primeiro um passo dentro da vila pra chegar
+// perto do portal de campo (720,1042), depois a transicao de mapa pra
+// zona de destino pousando exatamente na entrada da caverna.
+async function moveToDungeonCave(conn, zone) {
+  conn.ws.send(JSON.stringify({ type: 'state', map: 'vila', x: 720, y: 1042, dir: 0, moving: false }));
+  await sleep(60);
+  conn.ws.send(JSON.stringify({ type: 'state', map: zone, x: 2208, y: 768, dir: 0, moving: false }));
+  await sleep(60);
+}
+
 async function httpJson(srv, method, path, body, token) {
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = 'Bearer ' + token;
@@ -127,4 +144,4 @@ async function adminRpc(name, body) {
   return Array.isArray(data) ? data[0] : data;
 }
 
-module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter, adminRpc };
+module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter, adminRpc, moveToDungeonCave };

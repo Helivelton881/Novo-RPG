@@ -9,7 +9,7 @@
 // test/dungeon.test.js, nao duplicado aqui.
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, sleep, adminPatchCharacter } = require('./helpers');
+const { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, sleep, adminPatchCharacter, moveToDungeonCave } = require('./helpers');
 const S = require('../server.js');
 const DUNGEON_GEN = require('../game-data/dungeon-generation.js');
 
@@ -93,6 +93,12 @@ async function newDungeonChar(zone) {
   const conn = await wsConnect(srv);
   conn.ws.send(JSON.stringify({ type: 'join', name: 'D', cls: 'guerreiro', lvl: 40, token, charId: id }));
   await waitFor(conn.msgs, m => m.type === 'welcome', 3000);
+  // Fase 5.16.6: dungeon_enter agora valida a posicao do requisitante (ver
+  // moveToDungeonCave em helpers.js) -- todo personagem criado por este
+  // helper ja nasce fisicamente na entrada da caverna da propria zona que
+  // acabou de desbloquear, exatamente como a UI real exige (masmorraSel so
+  // e setado ao chegar perto do CAVE daquela zona).
+  await moveToDungeonCave(conn, zoneName);
   return { token, charId: id, conn };
 }
 async function makeParty(members) {
