@@ -8,7 +8,7 @@
 // bypass. Precisa de Supabase (projeto de TESTE, nunca o oficial).
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, sleep, adminPatchCharacter } = require('./helpers');
+const { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, sleep, adminPatchCharacter, moveToDungeonCave } = require('./helpers');
 
 const PORT = 8111;
 let srv;
@@ -83,6 +83,7 @@ test('dungeon_enter: com quest liberada, servidor devolve seed/roster/boss -- nu
   const ch = await newChar();
   await unlockAndLevel(ch, 'floresta', 40);
   const conn = await authedWs(ch);
+  await moveToDungeonCave(conn, 'floresta');
   const res = await enterDungeon(conn, 'floresta');
   assert.equal(res.type, 'dungeon_state');
   assert.equal(res.zone, 'floresta');
@@ -106,6 +107,7 @@ test('mesmo personagem reentrando na mesma masmorra reusa a MESMA instancia (mes
   const ch = await newChar();
   await unlockAndLevel(ch, 'floresta', 40);
   const conn = await authedWs(ch);
+  await moveToDungeonCave(conn, 'floresta');
   const first = await enterDungeon(conn, 'floresta');
   const second = await enterDungeon(conn, 'floresta');
   assert.equal(second.seed, first.seed);
@@ -117,6 +119,7 @@ test('abate de mob comum de masmorra: recompensa vem do servidor (dungeon_reward
   const ch = await newChar();
   await unlockAndLevel(ch, 'floresta', 40);
   const conn = await authedWs(ch);
+  await moveToDungeonCave(conn, 'floresta');
   const state = await enterDungeon(conn, 'floresta');
   const trash = state.roster.find(m => !m.boss);
   const before = conn.msgs.length;
@@ -131,6 +134,7 @@ test('chefe de masmorra: recompensa exatamente UMA vez mesmo com golpes extras l
   const ch = await newChar();
   await unlockAndLevel(ch, 'floresta', 40);
   const conn = await authedWs(ch);
+  await moveToDungeonCave(conn, 'floresta');
   const state = await enterDungeon(conn, 'floresta');
   const boss = state.roster.find(m => m.boss);
   assert.ok(boss, 'roster deveria ter um chefe');
@@ -171,6 +175,7 @@ test('reconectar apos derrotar o chefe: dungeon_state seguinte mostra bossDefeat
   const ch = await newChar();
   await unlockAndLevel(ch, 'floresta', 40);
   const conn = await authedWs(ch);
+  await moveToDungeonCave(conn, 'floresta');
   const state = await enterDungeon(conn, 'floresta');
   const boss = state.roster.find(m => m.boss);
   let hp = boss.maxhp;
