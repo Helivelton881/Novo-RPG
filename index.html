@@ -521,6 +521,7 @@ button{font:inherit;color:inherit}
   <div id="gsCreate" class="gs"></div>
 </div>
 
+<script src="/game-data/balance-data.js"></script>
 <script src="/game-data/gear-data.js"></script>
 <script src="/game-data/dungeon-generation.js"></script>
 <script src="/game-data/pathfinding.js"></script>
@@ -1227,7 +1228,11 @@ function recalc(){
   P.atk=a;P.def=d;P.hpBonus=h;P.blk=b;P.spd=sp;P.maxhp=Math.round(CLS.hp0+CLS.hpL*(P.lvl-1))+h;P.maxmp=Math.round(CLS.mp0+CLS.mpL*(P.lvl-1));
   P.hp=Math.min(P.hp,P.maxhp);P.mp=Math.min(P.mp,P.maxmp);
 }
-const need = l => 30*l;
+// Fase 5.17: curva de XP/level cap vem de game-data/balance-data.js (so
+// DISPLAY aqui -- XP/level reais sao sempre decididos pelo servidor).
+const need = l => BALANCE_DATA.xpToNext(l);
+const atCap = () => P.lvl>=BALANCE_DATA.LEVEL_CAP;
+const xpPct = () => atCap()?100:Math.min(100,P.xp/Math.max(1,need(P.lvl))*100);
 const SLIME_STATS={1:{hp:28,dmg:6,xp:12,sc:1.2},2:{hp:44,dmg:9,xp:20,sc:1.34},3:{hp:62,dmg:12,xp:30,sc:1.5}};
 function newSlime(x,y,lvl){const st=SLIME_STATS[lvl];return{type:'slime',x,y,sx:x,sy:y,lvl,hp:st.hp,maxhp:st.hp,anim:Math.random()*6,flash:0,kx:0,ky:0,dead:false,respawn:0,tx:x,ty:y,wt:Math.random()*3,cd:0,bar:0}}
 const floaters=[], drops=[];
@@ -1284,10 +1289,10 @@ function questHtml(){
 }
 function hud(){
   barHud();tickWin();
-  $('#lvl').textContent='Lv '+P.lvl;
+  $('#lvl').textContent='Lv '+P.lvl+(atCap()?' MAX':'');
   $('#hpF').style.width=(P.hp/P.maxhp*100)+'%';$('#mpF').style.width=(P.mp/P.maxmp*100)+'%';
   $('#hpT').textContent=Math.ceil(P.hp)+'/'+P.maxhp;$('#mpT').textContent=Math.floor(P.mp)+'/'+P.maxmp;
-  $('#xpF').style.width=(P.xp/need(P.lvl)*100)+'%';
+  $('#xpF').style.width=xpPct()+'%';
   const c2=$('#cnt2'),c3=$('#cnt3'),c4=$('#cnt4');if(c2)c2.textContent=P.pv;if(c3)c3.textContent=P.pa;if(c4)c4.textContent=P.gold;const c5=$('#cnt5');if(c5)c5.textContent=P.gem;const c6=$('#cnt6');if(c6)c6.textContent=P.ap;
   const k=questHtml();if(k!==questKey){questKey=k;$('#quest').innerHTML=k}
 }
@@ -1386,9 +1391,14 @@ function nearestNpc(r){let best=null,bd=r||62;for(const n of NPCS){const d=Math.
 function interact(){if(uiBusy())return;if(dlg){advanceDlg();return}const n=nearestNpc();if(n){if(n.chest)openChest(n);else openDialog(n)}}
 
 /* ================= combate ================= */
+// Fase 5.17: online, XP/level sao 100% do servidor (gap de nivel, party,
+// cap 40) -- o cliente nao soma nada local, so aplica kill_reward/etc.
+// Offline (sem conta) continua local, com a MESMA curva/cap de BALANCE_DATA.
+function celebrateLevel(){sfx.level();toast('Nível '+P.lvl+'! HP e MP restaurados');floater(P.x,P.y-80,'NÍVEL '+P.lvl,'#ffe27a')}
 function gainXp(v){
-  P.xp+=v;
-  while(P.xp>=need(P.lvl)){P.xp-=need(P.lvl);P.lvl++;recalc();P.hp=P.maxhp;P.mp=P.maxmp;sfx.level();toast('Nível '+P.lvl+'! HP e MP restaurados');floater(P.x,P.y-80,'NÍVEL '+P.lvl,'#ffe27a')}
+  if(lootOnline())return;
+  const r=BALANCE_DATA.applyXp(P.lvl,P.xp,v);P.xp=r.xp;
+  if(r.lvl!==P.lvl){P.lvl=r.lvl;recalc();P.hp=P.maxhp;P.mp=P.maxmp;celebrateLevel()}
 }
 const dirVec=[[0,1],[-1,0],[1,0],[0,-1]];
 function attack(){
@@ -2077,8 +2087,8 @@ function tickWin(){
     else if(k==='mpt')e.textContent=Math.floor(P.mp)+'/'+P.maxmp;
     else if(k==='hpx')e.textContent=Math.ceil(P.hp)+' / '+P.maxhp;
     else if(k==='mpx')e.textContent=Math.floor(P.mp)+' / '+P.maxmp;
-    else if(k==='xpw')e.style.width=Math.min(100,P.xp/need(P.lvl)*100)+'%';
-    else if(k==='xpt')e.textContent='XP '+P.xp+' / '+need(P.lvl);
+    else if(k==='xpw')e.style.width=xpPct()+'%';
+    else if(k==='xpt')e.textContent=atCap()?'XP MAX (Nv '+BALANCE_DATA.LEVEL_CAP+')':'XP '+P.xp+' / '+need(P.lvl);
     else if(k==='sp')e.textContent=skillPoints();
   }
   if(scrOpen==='map'&&performance.now()-mapTick>450){mapTick=performance.now();drawBigMap()}
@@ -2271,7 +2281,7 @@ function charEquip(){
   <div class="rlabel">Equipamentos na bolsa (${P.bag.length}/${BAG_MAX})</div><div class="rgrid sm">${gear}</div><div class="rd">${det}</div><div class="racts">${acts}</div>`;
 }
 function charStatus(){
-  const base=Math.round(baseDmg()),pct=Math.min(100,Math.round(P.xp/need(P.lvl)*100));
+  const base=Math.round(baseDmg()),pct=Math.round(xpPct());
   const sr=(ic,label,val,bind)=>`<div class="sr"><img alt="" src="${iconURL(ic)}"><span>${label}</span><b${bind?` data-bind="${bind}"`:''}>${val}</b></div>`;
   return `<div class="card hrow"><div class="ped"><canvas id="cHero" width="56" height="74"></canvas></div><div class="hi"><div class="nrow"><input id="nameIn" type="text" maxlength="14" value="${esc(P.name)}" aria-label="Nome do personagem"><button type="button" data-a="rename">Salvar</button></div><div><b class="gold">Nível ${P.lvl}</b> · ${CLS.name} · ${rankOf()}</div><div class="xpb"><i data-bind="xpw" style="width:${pct}%"></i></div><small data-bind="xpt">XP ${P.xp} / ${need(P.lvl)}</small></div></div>
   <div class="rlabel">Atributos</div>
@@ -2584,7 +2594,7 @@ function openBlacksmith(){
   if(dlg)closeDlg();
   closeInv();closeScr();closeMenu();closeShop();
   bsOpen=true;bsSel=null;bsArm=0;
-  bsMsg=['Traga seu equipamento, vamos deixá-lo mais forte.','Enchant é risco, mas a recompensa vale a pena.','Aço forjado no fogo... e um pouco de sorte.'][Math.floor(Math.random()*3)];
+  bsMsg=['Traga seu equipamento, vamos deixá-lo mais forte.','Do +4 em diante eu trabalho com gemas. Falhou? O aço aguenta.','Aço forjado no fogo... e um pouco de sorte.'][Math.floor(Math.random()*3)];
   $('#talk').classList.remove('on');const el=$('#blacksmith');el.innerHTML='';el.classList.add('on');renderBlacksmith();sfx.talk();
 }
 function closeBlacksmith(){bsOpen=false;const el=$('#blacksmith');el.classList.remove('on');resetWinPos(el)}
@@ -2605,14 +2615,17 @@ function bsDetail(){
   const it=entry.it,rar=rarityOf(it),atMax=it.enchant>=GEAR_DATA.ENCHANT_MAX;
   let body=`<div class="dtop"><span class="rs ${enchClass(it)}" style="--rc:${rar.c}"><img alt="" src="${iconURL(it)}">${enchBadge(it)}</span><div class="dinfo"><small style="color:${rar.c}">${rar.n}</small><div class="nm" style="color:${rar.c}">${it.enchant?'+'+it.enchant+' ':''}${esc(it.n)}</div><div class="sub">Nv ${it.lv} · atual +${it.enchant}</div></div></div>`;
   if(atMax)return body+`<div class="sub">Este equipamento já está no nível máximo de encantamento (+10).</div>`;
-  const target=it.enchant+1,chance=GEAR_DATA.enchantChance(target),cost=GEAR_DATA.enchantCost(it.type,it.lv,target);
+  // Fase 5.17: +1..+3 custa OURO (100%); +4..+10 custa GEMAS e a falha so
+  // consome as gemas -- o item nunca quebra nem perde enchant. Numeros so
+  // exibidos aqui (mesma fonte do servidor); quem decide e o servidor.
+  const target=it.enchant+1,chance=GEAR_DATA.enchantChance(target),cost=GEAR_DATA.enchantCostForItem(it,target);
   const after=GEAR_DATA.statsFor(it.type,it.lv,it.rarity,target);
-  const risky=target>=4,armed=bsArm>Date.now(),canPay=P.gold>=cost;
-  body+=`<div class="sub">Próximo: +${target}</div><div class="st">Chance: ${Math.round(chance*100)}%</div><div class="st">Custo: ${cost} moedas</div>`+bsStatLines(it,after);
-  // Fase 5.4: aviso obrigatorio a partir de +4 -- nunca escondido.
-  if(risky)body+=`<div class="dn" style="margin-top:4px">⚠ FALHA DESTRÓI O EQUIPAMENTO.</div>`;
-  if(risky&&armed)body+=`<div class="sub">Tem certeza? ${Math.round(chance*100)}% de chance -- se falhar, ${esc(it.n)} +${it.enchant} será destruída.</div>`;
-  body+=`<div class="dctl"><button class="rbtn buybtn${risky&&armed?' warn':''}" type="button" data-ba="do"${canPay?'':' disabled'}>${!canPay?'':coinImg()}<span>${!canPay?'Moedas insuficientes':risky&&armed?'Confirmar':'Encantar'}${canPay?' ('+cost+')':''}</span></button></div>`;
+  const gemCost=cost.currency==='gem',risky=target>=4,armed=bsArm>Date.now(),canPay=gemCost?P.gem>=cost.amount:P.gold>=cost.amount;
+  const curImg=gemCost?`<img alt="" src="${iconURL('gema')}">`:coinImg(),curName=gemCost?(cost.amount===1?'gema':'gemas'):'moedas';
+  body+=`<div class="sub">Próximo: +${target}</div><div class="st">Chance: ${Math.round(chance*100)}%</div><div class="st">Custo: ${cost.amount} ${curName}</div>`+bsStatLines(it,after);
+  if(risky)body+=`<div class="sub" style="margin-top:4px">Se falhar, as gemas são consumidas — o equipamento continua +${it.enchant}, sem quebrar.</div>`;
+  if(risky&&armed)body+=`<div class="sub">Confirmar? ${Math.round(chance*100)}% de chance por ${cost.amount} ${curName}.</div>`;
+  body+=`<div class="dctl"><button class="rbtn buybtn${risky&&armed?' warn':''}" type="button" data-ba="do"${canPay?'':' disabled'}>${!canPay?'':curImg}<span>${!canPay?(gemCost?'Gemas insuficientes':'Moedas insuficientes'):risky&&armed?'Confirmar':'Encantar'}${canPay?' ('+cost.amount+')':''}</span></button></div>`;
   return body;
 }
 function renderBlacksmith(){
@@ -2620,7 +2633,7 @@ function renderBlacksmith(){
   const items=bsItems();
   if(bsSel&&!items.some(x=>x.it.uid===bsSel))bsSel=null;
   const rows=items.map(bsRowHtml).join('')||`<div class="sub" style="padding:14px;text-align:center">Nenhum equipamento encantável (arma, armadura, capa ou bota) na mochila ou equipado.</div>`;
-  el.innerHTML=`<i class="orn"></i><div class="rh"><div class="mface"><img alt="" src="${SPR.guarda.img}"></div><div class="ttl"><h3>Ferreiro</h3><small class="say">${esc(bsMsg)}</small></div><div class="coin"><img alt="" src="${iconURL('moeda')}"><span data-bind="gold">${P.gold}</span></div><button class="rx" type="button" data-x aria-label="Fechar">✕</button></div>
+  el.innerHTML=`<i class="orn"></i><div class="rh"><div class="mface"><img alt="" src="${SPR.guarda.img}"></div><div class="ttl"><h3>Ferreiro</h3><small class="say">${esc(bsMsg)}</small></div><div class="coin"><img alt="" src="${iconURL('moeda')}"><span data-bind="gold">${P.gold}</span></div><div class="coin"><img alt="" src="${iconURL('gema')}"><span>${P.gem}</span></div><button class="rx" type="button" data-x aria-label="Fechar">✕</button></div>
   <div class="rbody fit shopb"><div class="slist">${rows}</div><div class="sdet">${bsDetail()}</div></div>`;
   const sl1=el.querySelector('.slist');if(sl1)sl1.scrollTop=sc;
   winSigStr=winSig();
@@ -2644,7 +2657,7 @@ async function bsDo(){
     }
     const r=res.enchant;
     if(r&&r.success){sfx.level();toast('Enchant realizado! '+name+' agora está +'+r.newEnchant+'.');bsMsg='Excelente! Fica cada vez mais forte.';bsSel=r.uid}
-    else if(r){sfx.hit();toast('Enchant falhou. '+name+' +'+prevEnchant+' foi destruída.');bsMsg='Que pena... acontece até com os melhores aços.';bsSel=null}
+    else if(r){sfx.hit();toast('Enchant falhou. '+name+' continua +'+prevEnchant+' ('+r.cost+' '+(r.currency==='gem'?'gemas':'moedas')+' consumidas).');bsMsg='Não foi desta vez... o aço aguentou firme.';bsSel=r.uid}
     renderBlacksmith();
   }finally{bsBusy=false}
 }
@@ -3148,7 +3161,7 @@ function netConnect(){
     else if(m.type==='world_boss_respawn'){P.dead=false;P.x=m.x;P.y=m.y;P.hp=P.maxhp;P.inv=1.5;toast('Você retornou à Arena do Titã')}
     else if(m.type==='world_boss_exit')exitWorldBoss(m)
     else if(m.type==='world_boss_cancelled')toast(m.message)
-    else if(m.type==='world_boss_reward'){P.gold=m.gold;P.gem=m.gem;P.xp=m.xp;P.lvl=m.lvl;P.bag=m.bag||P.bag;for(const k of EQ_KEYS)P.eq[k]=(m.eq&&m.eq[k])||null;recalc();hud();if(m.legendary)toast('Lendário do grupo: '+m.legendary.n+' +0');else toast('Recompensa do World Boss recebida');if(scrOpen==='bestiary')requestBestiaryState()}
+    else if(m.type==='world_boss_reward'){P.gold=m.gold;P.gem=m.gem;P.xp=m.xp;P.lvl=m.lvl;P.bag=m.bag||P.bag;for(const k of EQ_KEYS)P.eq[k]=(m.eq&&m.eq[k])||null;recalc();hud();if(m.drop)toast(dropToastText(m.drop.rarity,m.drop.n));else toast('Recompensa do World Boss: +'+(m.xpGain||0)+' XP'+(m.gemGain?' e +'+m.gemGain+' gemas':''));if(m.dropLost)toast('Mochila cheia — equipamento '+GEAR_DATA.RARITY[m.dropLost.rarity].label+' não foi coletado.');if(scrOpen==='bestiary')requestBestiaryState()}
     else if(m.type==='world_boss_hit'){const b=netMobById('ancient_titan');if(b){b.hp=m.bossHp;b.maxhp=m.bossMaxHp;floater(b.x,b.y-100,'-'+m.damage,'#ffd45a')}}
     else if(m.type==='tvt_enter')enterTvt(m)
     else if(m.type==='tvt_state'&&W_&&m.mapId===netMapId())applyTvtState(m)
@@ -3156,7 +3169,9 @@ function netConnect(){
     else if(m.type==='tvt_exit')exitTvt(m)
     else if(m.type==='tvt_cancelled')toast(m.message)
     else if(m.type==='tvt_reserve')toast(m.message)
-    else if(m.type==='tvt_reward'){P.gold=m.gold;P.gem=m.gem;P.xp=m.xp;P.lvl=m.lvl;recalc();hud();toast('Recompensa do Team vs Team recebida')}
+    else if(m.type==='tvt_reward'){P.gold=m.gold;P.gem=m.gem;P.xp=m.xp;P.lvl=m.lvl;recalc();hud();toast('Recompensa do Team vs Team: +'+(m.xpGain||0)+' XP'+(m.gemGain?' e +'+m.gemGain+' gema':''))}
+    // Fase 5.17: morte PvE custa 0,25% do XP do nivel (nunca nivel/item/ouro/gema).
+    else if(m.type==='death_penalty'){P.xp=m.xp;hud();toast('Você perdeu '+m.lost+' XP ao morrer')}
     else if(m.type==='tvt_hit'){
       const isMe=m.targetId===(CUR_CHAR&&CUR_CHAR.id);
       if(isMe)floater(P.x,P.y-70,'-'+m.damage,'#ff6a5a');
@@ -3218,7 +3233,10 @@ function netConnect(){
       // (gainXp/toast) no momento do abate; isso so corrige o numero final
       // pro valor autoritativo do servidor, sem repetir a celebracao.
       P.xp=m.xp;
-      if(typeof m.lvl==='number'&&m.lvl!==P.lvl){const up=m.lvl>P.lvl;P.lvl=m.lvl;recalc();if(up){P.hp=P.maxhp;P.mp=P.maxmp}}
+      // Fase 5.17: o cliente online nao soma mais XP local (gap/party/cap
+      // sao do servidor) -- o level-up e celebrado AQUI, pelo valor real.
+      if(typeof m.lvl==='number'&&m.lvl!==P.lvl){const up=m.lvl>P.lvl;P.lvl=m.lvl;recalc();if(up){P.hp=P.maxhp;P.mp=P.maxmp;celebrateLevel()}}
+      if(m.bossGem)toast('Chefe do dia: +'+m.bossGem+' gema');
       if(m.fields)Object.assign(P,m.fields);
       // Fase 5.3: mob de campo agora tambem pode dropar Raro/Epico
       // (comum) ou Lendario (chefe) -- bag/eq so vem junto quando teve
@@ -3278,7 +3296,11 @@ function netConnect(){
       // vem inteiros (igual applyShopResult) porque pode ter item novo.
       P.gold=m.gold;P.gem=m.gem;P.pv=m.pv;P.ap=m.ap;P.scr=m.scr;
       P.bag=m.bag||[];for(const k of EQ_KEYS)P.eq[k]=(m.eq&&m.eq[k])||null;
-      recalc();hud();saveGame();
+      // Fase 5.17: chefe de masmorra paga XP/gema de conclusao (limite diario).
+      let dunUp=false;if(typeof m.xp==='number'){P.xp=m.xp;if(typeof m.lvl==='number'&&m.lvl!==P.lvl){dunUp=m.lvl>P.lvl;P.lvl=m.lvl}}
+      recalc();if(dunUp){P.hp=P.maxhp;P.mp=P.maxmp;celebrateLevel()}hud();saveGame();
+      if(m.clearXp||m.clearGem)toast('Masmorra concluída: +'+(m.clearXp||0)+' XP'+(m.clearGem?' e +'+m.clearGem+' gemas':''));
+      else if(typeof m.clearXp==='number')toast('Masmorra concluída (recompensa diária já recebida)');
       // Fase 5.3: masmorra agora dropa Raro/Epico (trash) ou Lendario
       // (chefe) em vez do Basic garantido antigo -- avisa igual mob de campo.
       if(m.drop){sfx.level();toast(dropToastText(m.drop.rarity,m.drop.n))}
@@ -4263,6 +4285,9 @@ const QUEST_REWARDS_LOCAL={
   22:{next:23,gold:0,gem:0,xp:0,msg:'Portal das Ilhas liberado!',sound:'level'},
   26:{next:27,gold:0,gem:0,xp:0,msg:'Portal do Vulcão liberado!',sound:'level'},
 };
+// Fase 5.17: XP de missao espelha BALANCE_DATA.questXpFor (mesma fonte do
+// servidor) -- so usado offline e pra texto; online o servidor decide.
+for(const [st,r] of Object.entries(QUEST_REWARDS_LOCAL)){r.xp=BALANCE_DATA.questXpFor(Number(st));if(r.xp&&/\d+ XP/.test(r.msg))r.msg=r.msg.replace(/\d+ XP/,r.xp+' XP');else if(r.xp)r.msg+=' (+'+r.xp+' XP)'}
 function applyQuestResult(character){
   const s=character.save,leveledUp=s.lvl>P.lvl;
   P.gold=s.gold;P.gem=s.gem;P.pv=s.pv;P.xp=s.xp;P.quest=s.quest;P.lvl=s.lvl;
