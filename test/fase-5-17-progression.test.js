@@ -384,3 +384,18 @@ test('CLIENTE: index.html carrega balance-data.js antes de gear-data.js e nao te
   assert.ok(bi > 0 && gi > 0 && bi < gi);
   assert.ok(!/const need\s*=\s*l\s*=>\s*30\s*\*\s*l/.test(html), 'curva antiga no cliente');
 });
+
+test('CLIENTE: scripts de game-data carregados como no navegador (escopo global compartilhado) nao colidem', () => {
+  // Regressao real do Browser QA da 5.17: `const ENCHANT_MAX` em dois
+  // <script> classicos = SyntaxError e cliente inteiro fora do ar.
+  const vm = require('vm'), fs = require('fs'), path = require('path');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const srcs = [...html.matchAll(/<script src="\/(game-data\/[^"]+\.js)"><\/script>/g)].map(m => m[1]);
+  assert.ok(srcs.includes('game-data/balance-data.js') && srcs.includes('game-data/gear-data.js'));
+  const ctx = vm.createContext({ window: {}, console });
+  ctx.window = ctx;
+  for (const src of srcs) vm.runInContext(fs.readFileSync(path.join(__dirname, '..', src), 'utf8'), ctx, { filename: src });
+  assert.equal(ctx.BALANCE_DATA.LEVEL_CAP, 40);
+  assert.equal(ctx.GEAR_DATA.enchantCostForItem({ lv: 36, rarity: 'epic' }, 8).amount, 6);
+  assert.equal(ctx.GEAR_DATA.statsFor('sword', 36, 'epic', 8).atk, 54);
+});

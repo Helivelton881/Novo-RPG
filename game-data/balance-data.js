@@ -11,6 +11,11 @@
 // magico em server.js/index.html. Ver docs/FASE-5.17-PROGRESSAO-ECONOMIA.md
 // pra a filosofia, a tabela completa e as premissas do simulador
 // (node tools/balance-sim.js).
+// IIFE: no navegador os <script> classicos dividem o MESMO escopo lexico
+// global -- sem isso, `const ENCHANT_MAX` daqui colidiria com o de
+// gear-data.js e derrubaria o cliente inteiro (SyntaxError). So
+// window.BALANCE_DATA / module.exports saem daqui.
+(function () {
 'use strict';
 
 // ===== Level cap =====
@@ -296,3 +301,4 @@ const DATA = {
 
 if (typeof module !== 'undefined' && module.exports) module.exports = DATA;
 else if (typeof window !== 'undefined') window.BALANCE_DATA = DATA;
+})();
