@@ -18,6 +18,8 @@ const MARKET = require('./game-data/market.js');
 // Fase 5.17: fonte unica de balanceamento (level cap 40, curva de XP, gap,
 // drop, enchant, gemas, party, morte). Nunca espalhar numero economico aqui.
 const BALANCE = require('./game-data/balance-data.js');
+// Fase 5.17.1: animacao do Vulcao (so o campo VISUAL `face` e decidido com isto).
+const MONSTER_ANIM = require('./game-data/monster-animation.js');
 const { LEVEL_CAP, clampLevel } = BALANCE;
 
 const PORT = Number(process.env.PORT || 8080);
@@ -5553,6 +5555,21 @@ function mobPositionPayload(mob, moving) {
   }
   return out;
 }
+// Fase 5.17.1: `face` dos monstros do Vulcao (campo so VISUAL -- nenhuma
+// regra de gameplay le mob.face). Antes seguia so dx>0.01 por tick: ficava
+// congelado no ultimo passo durante wind/breath/slam (monstro atacando de
+// costas pro alvo) e piscava com empurrao de colisao de sub-pixel. Agora:
+// em ataque olha pro alvo real (mob.tgt), fora dele segue o movimento com
+// histerese (MONSTER_ANIM.FACE_MIN_DX). Restrito ao Vulcao (escopo do hotfix).
+const VOLCANO_FACE_TYPES = new Set(MONSTER_ANIM.VOLCANO_TYPES);
+function volcanoMobFace(mob, moveDx, present) {
+  let targetDx = NaN;
+  if (mob.tgt != null && MONSTER_ANIM.isAttackState(mob.type, mob.state)) {
+    const t = (present || []).find(([, p]) => p && p.id === mob.tgt);
+    if (t) targetDx = t[1].x - mob.x;
+  }
+  return MONSTER_ANIM.resolveFace({ type: mob.type, state: mob.state, face: mob.face, moveDx, targetDx });
+}
 let mobAiLastTick = performance.now();
 function tickMobAI() {
   const now = performance.now();
@@ -5580,7 +5597,8 @@ function tickMobAI() {
       }
       if (upd && Number.isFinite(mob.x) && Number.isFinite(mob.y)) {
         const moving = Math.hypot(mob.x - startX, mob.y - startY) > .01;
-        if (Math.abs(mob.x - startX) > .01) mob.face = mob.x < startX ? -1 : 1;
+        if (VOLCANO_FACE_TYPES.has(mob.type)) mob.face = volcanoMobFace(mob, mob.x - startX, present);
+        else if (Math.abs(mob.x - startX) > .01) mob.face = mob.x < startX ? -1 : 1;
         moved.push(mobPositionPayload(mob, moving));
       }
     }
@@ -5662,7 +5680,7 @@ module.exports = {
   normalizeLivingWorldSettings, applyLivingWorldConfig, loadLivingWorldConfig, persistLivingWorldConfig,
   fieldAiEntities, fieldAiCounts, instanceAiCounts, isSafeFieldAi, despawnFieldAi, rebalanceFieldAi, livingWorldStatus,
   villageAiEntities, VILLAGE_SOCIAL_CAP, VILLAGE_ANCHOR,
-  moveMob, rectsBlock, maps, mapState, mobStats, MOB_MANIFEST, rollMobLoot, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST, placePlayerAtDungeonStart,
+  moveMob, rectsBlock, maps, mapState, mobStats, volcanoMobFace, MONSTER_ANIM, tickMobAI, MOB_MANIFEST, rollMobLoot, DUNGEON_CFG, DUNGEON_UNLOCK_QUEST, placePlayerAtDungeonStart,
   pickTier, rollDungeonTrashLoot, rollDungeonBossLoot, clampAtk, DUNGEON_GEN,
   // Fase 5.13 -- exportado so pra teste unitario puro (mapa fixo da masmorra):
   DUNGEON_ROOM_MOB_COUNTS,
