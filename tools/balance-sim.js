@@ -285,6 +285,31 @@ function report() {
   }
   console.log('Ouro de mob comum nao foi alterado nesta fase; ouro de World Boss/TvT/missoes preservado.');
 
+  header('RELIC MERCHANT (Fase 5.17.2 — gem sink, sem alterar gem income)');
+  const RS = require('../game-data/relic-shop.js');
+  const wk = { casual: 18, active: 40, endgame: 47 }; // referencias oficiais da 5.17 (gemas/semana)
+  console.log(padR('Tier', 6) + pad('Rare', 6) + pad('Epic', 6) + '   semanas (casual 18 / ativo 40 / endgame 47)');
+  for (const lv of GEAR.GEAR_LEVELS) {
+    const r = B.relicPrice(lv, 'rare'), e = B.relicPrice(lv, 'epic');
+    const wks = g => [wk.casual, wk.active, wk.endgame].map(x => fmt(g / x, 1)).join(' / ');
+    console.log(padR('Lv' + lv, 6) + pad(r, 6) + pad(e, 6) + `   Rare ${wks(r)}  |  Epic ${wks(e)}`);
+  }
+  const all6 = lv => 4 * B.relicPrice(lv, 'rare') + 2 * B.relicPrice(lv, 'epic');
+  console.log(`Comprar as 6 ofertas de uma semana (tudo no tier Lv40): ${all6(40)} gemas ≈ ${fmt(all6(40) / wk.active, 1)} semanas de gema de um jogador ativo.`);
+  console.log(`Comprar vs enchant: Epic Lv40 (65) ≈ ${fmt(65 / expGems * 100, 0)}% do custo medio de levar 1 item +3→+10 (${fmt(expGems, 0)} gemas).`);
+  const atk = (r, e) => Math.round(GEAR.GEAR_STATS.sword[40].atk * GEAR.RARITY[r].mul * (1 + B.enchantPower(e)));
+  console.log(`Arma Lv40 ATK: Rare+0 ${atk('rare', 0)} (30 gemas) | Epic+0 ${atk('epic', 0)} (65) | Rare+7 ${atk('rare', 7)} | Epic+7 ${atk('epic', 7)} | Legendary+0 ${atk('legendary', 0)} (so drop)`);
+  // Arbitragem gema -> item -> ouro (venda ao Mercador comum, preco NAO alterado nesta fase)
+  const gemSell = 25;
+  for (const [r, lv] of [['rare', 40], ['epic', 40], ['rare', 20], ['epic', 20]]) {
+    const price = B.relicPrice(lv, r), sell = GEAR.sellPriceForItem({ lv, rarity: r });
+    console.log(`Arbitragem ${padR(r + ' Lv' + lv, 10)}: ${price} gemas (= ${price * gemSell} ouro vendendo gema) -> vende item por ${sell} ouro (${fmt(sell / (price * gemSell), 1)}x)`);
+  }
+  const weeklyGold = [0, 1, 2, 3].reduce((s, i) => s + GEAR.sellPriceForItem({ lv: 40, rarity: 'rare' }), 0) + 2 * GEAR.sellPriceForItem({ lv: 40, rarity: 'epic' });
+  console.log(`Teto de conversao por personagem/semana (6 ofertas Lv40 vendidas): ${fmt(weeklyGold)} ouro por ${all6(40)} gemas ≈ ${fmt(weeklyGold / 3500, 1)}h de farm de ouro no Vulcao. Limitado a 6 ofertas/semana — documentado para revisao (sellPrice nao foi alterado).`);
+  const sample = RS.relicStock({ weekId: RS.relicWeekInfo(Date.UTC(2026, 8, 24)).weekId, cls: 'guerreiro', lvl: 36, types: S.DROP_TYPES_BY_CLASS.guerreiro });
+  console.log('Exemplo estoque 2026-W39 guerreiro Lv36: ' + sample.map(o => `${o.rarity[0].toUpperCase()}:${o.type}${o.lv}=${o.priceGem}`).join(' '));
+
   header('PARTY XP');
   for (let n = 1; n <= 4; n++) console.log(`${n} jogador(es): ${fmt(B.partyXpShare(n) * 100)}% cada, ${fmt(B.partyXpShare(n) * n * 100)}% total`);
   header('DEATH PENALTY (PvE)');
