@@ -21,7 +21,7 @@ test('defaults persistentes sao conservadores e hard limits nunca aceitam 999999
 });
 
 test('migration aditiva persiste singleton, habilita RLS e nao cria policy publica',()=>{
-  const sql=fs.readFileSync(path.join(__dirname,'../supabase/migrations/20260925020000_add_living_world_settings.sql'),'utf8');
+  const sql=fs.readFileSync(path.join(__dirname,'../supabase/migrations/20260925104225_add_living_world_settings.sql'),'utf8');
   assert.match(sql,/create table if not exists public\.living_world_settings/i);
   assert.match(sql,/enable row level security/i);assert.match(sql,/revoke all .* anon, authenticated/i);
   assert.doesNotMatch(sql,/^\s*(drop|delete)\b|create\s+policy/im);
