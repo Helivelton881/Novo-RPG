@@ -39,7 +39,12 @@ if (mode === 'unit') {
 }
 
 const files = fs.readdirSync(path.join(ROOT, 'test')).filter(f => f.endsWith('.test.js')).sort().map(f => path.join('test', f));
-const child = spawn(process.execPath, ['--test', ...files], { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'inherit'] });
+// Integracoes compartilham o mesmo banco descartavel. Paralelizar arquivos
+// causa colisao de estado, satura o scrypt e produz timeouts falsos.
+const nodeArgs = ['--test'];
+if (mode === 'integration') nodeArgs.push('--test-concurrency=1');
+nodeArgs.push(...files);
+const child = spawn(process.execPath, nodeArgs, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'inherit'] });
 let tail = '';
 child.stdout.on('data', chunk => { process.stdout.write(chunk); tail = (tail + chunk.toString()).slice(-4000); });
 child.on('close', code => {

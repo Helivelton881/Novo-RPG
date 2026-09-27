@@ -12,8 +12,8 @@ let srv;
 before(async () => { if (!skip) srv = await startServer(PORT); });
 after(() => { if (srv) stopServer(srv); });
 
-const RUN = (process.env.GITHUB_RUN_ID || 'local') + '_' + Math.random().toString(36).slice(2, 6);
-const rnd = () => ('q' + RUN + Math.random().toString(36).slice(2, 6)).replace(/[^a-z0-9_]/g, '').slice(0, 16);
+const RUN = String(process.env.GITHUB_RUN_ID || 'local').replace(/[^a-z0-9]/gi, '').slice(-5).toLowerCase();
+const rnd = () => ('qr_' + RUN + '_' + Math.random().toString(36).slice(2, 8)).slice(0, 16);
 async function rest(pathAndQuery, init = {}) {
   const url = String(process.env.SUPABASE_URL).replace(/\/$/, '') + '/rest/v1/' + pathAndQuery;
   const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;

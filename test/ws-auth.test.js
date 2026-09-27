@@ -67,7 +67,7 @@ test('charId inexistente: token valido mas charId nao existe -> degrada pra anon
   conn.ws.send(JSON.stringify({ type: 'join', name: 'CharFalso', cls: 'guerreiro', lvl: 55, token: acc.token, charId: '99999999-9999-9999-9999-999999999999' }));
   await waitFor(conn.msgs, m => m.type === 'welcome', 3000);
   const join = await waitFor(obs.msgs, m => m.type === 'player_join' && m.player.name === 'CharFalso', 2000, before);
-  assert.equal(join.player.lvl, 55, 'charId inexistente nao deveria autenticar -- cls/lvl da mensagem sao usados (visita anonima)');
+  assert.equal(join.player.lvl, 40, 'visita anonima tambem respeita o teto oficial de nivel');
   obs.close(); conn.close();
 });
 
@@ -81,7 +81,7 @@ test('charId de outra conta: token valido de A + charId de B -> nao autentica co
   await waitFor(conn.msgs, m => m.type === 'welcome', 3000);
   const join = await waitFor(obs.msgs, m => m.type === 'player_join' && m.player.name === 'RoubandoConta', 2000, before);
   assert.notEqual(join.player.cls, 'mago', 'nao deveria ter autenticado com o personagem (mago) que pertence a outra conta');
-  assert.equal(join.player.lvl, 44, 'sem autenticacao real, cai pro fallback anonimo (lvl da mensagem)');
+  assert.equal(join.player.lvl, 40, 'fallback anonimo respeita o teto oficial de nivel');
   obs.close(); conn.close();
 });
 

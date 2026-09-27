@@ -40,7 +40,13 @@ async function startServer(port, envOverrides) {
     // monster-movement.test.js antes desta linha existir). Testes que
     // exercitam IA de verdade (test/ai.test.js) chamam aiSpawnEntity()
     // direto, ou reativam explicitamente via envOverrides.
-    env: Object.assign({}, process.env, { PORT: String(port), AI_ENABLED: '0' }, envOverrides || {}),
+    env: Object.assign({}, process.env, {
+      PORT: String(port),
+      AI_ENABLED: '0',
+      // Todos os testes chegam de 127.0.0.1 e varios arquivos criam dezenas
+      // de contas. Evita que o anti-abuso de producao invalide a propria QA.
+      AUTH_RATE_LIMIT_MAX: '10000',
+    }, envOverrides || {}),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

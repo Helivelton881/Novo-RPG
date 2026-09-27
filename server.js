@@ -1152,7 +1152,12 @@ function authIp(req) {
 function rateLimited(req) {
   const now = Date.now(), key = authIp(req), recent = (authAttempts.get(key) || []).filter(t => now - t < 60000);
   recent.push(now); authAttempts.set(key, recent);
-  return recent.length > 12;
+  // Testes de integracao enviam muitas operacoes legitimas pelo mesmo IP
+  // loopback. O limite continua 12 em producao; o helper de testes sobe o
+  // teto explicitamente apenas no processo filho.
+  const configured = Number(process.env.AUTH_RATE_LIMIT_MAX);
+  const limit = Number.isInteger(configured) && configured >= 12 ? configured : 12;
+  return recent.length > limit;
 }
 
 function b64url(buf) { return Buffer.from(buf).toString('base64url'); }
