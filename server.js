@@ -1301,6 +1301,11 @@ async function handleCharacters(req, res, pathname) {
         if (e.status === 409) { json(res,409,{error:'Espaço ou nome já em uso'}); return true; }
         throw e;
       }
+      // Fase 5.17.3: a linha de ranking nasce no MESMO INSERT via trigger
+      // (trg_characters_create_rank_stats). Este upsert idempotente so
+      // cobre um banco que ainda nao recebeu a migration -- nunca duplica
+      // (PK character_id) e nunca bloqueia a criacao se falhar.
+      await syncRankLevelXp(rows[0].id, rows[0].lvl, rows[0].save && rows[0].save.xp).catch(err => console.error('rank_stats_create_error', err.message));
       json(res,201,{character: rows[0]}); return true;
     }
 
@@ -1542,7 +1547,7 @@ async function handleShop(req, res, pathname) {
       }
 
       if (error) return {status:400, body:{error}};
-      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
+      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{lvl, save}, prefer:'return=representation'}); // Fase 5.17.3: coluna lvl e save.lvl sempre gravados juntos (mesmo valor normalizado)
       if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
       let itemEffect=null;
       if(runtimeEffectKey==='pv'||runtimeEffectKey==='ap')itemEffect={type:'hp',...consumeRuntimePotion(activeP,runtimeEffectKey)};
@@ -1642,7 +1647,7 @@ async function handleChest(req, res, pathname) {
       save.gold = Math.min(500000, save.gold + reward.gold);
       const item = rollChestItem(save, lvl, reward.tier);
 
-      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{save}, prefer:'return=representation'});
+      const rows = await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(charId)}&user_id=eq.${user.id}`, body:{lvl, save}, prefer:'return=representation'}); // Fase 5.17.3: coluna lvl e save.lvl sempre gravados juntos (mesmo valor normalizado)
       if (!rows.length) return {status:404, body:{error:'Personagem não encontrado'}};
       return {status:200, body:{character: rows[0], item}};
     });
@@ -1819,7 +1824,7 @@ async function applyDeathPenalty(ws, p, cause) {
       const loss = BALANCE.deathXpLoss(lvl, save.xp, cause);
       if (loss <= 0) return;
       save.xp = Math.max(0, save.xp - loss);
-      await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{save}, prefer:'return=minimal'});
+      await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'}); // Fase 5.17.3: coluna lvl e save.lvl juntos
       syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
       send(ws, {type:'death_penalty', xp: save.xp, lvl, lost: loss});
     });
@@ -2744,9 +2749,17 @@ async function handleBestiary(req, res, pathname) {
 // localmente); pvp_kills/pvp_deaths existem na tabela pra uso futuro mas
 // ficam sempre 0 nesta fase, nunca um numero inventado ou auto-reportado
 // pelo cliente.
+// Fase 5.17.3: level/xp SEMPRE normalizados pela regra oficial
+// (BALANCE.normalizeProgress: 1..LEVEL_CAP, XP 0 no cap) antes de persistir
+// -- a RPC no banco tambem faz clamp (defesa em profundidade).
+function normalizeRankProgress(level, xp) {
+  const prog = BALANCE.normalizeProgress(Number(level) || 1, Number(xp) || 0);
+  return { level: prog.lvl, xp: prog.xp };
+}
 async function syncRankLevelXp(charId, lvl, xp) {
   if (!charId) return;
-  const result = await rpc('rank_stats_set_level_xp', {p_character_id:charId, p_level:Math.round(Number(lvl)||1), p_xp:Math.round(Number(xp)||0)});
+  const norm = normalizeRankProgress(lvl, xp);
+  const result = await rpc('rank_stats_set_level_xp', {p_character_id:charId, p_level:norm.level, p_xp:norm.xp});
   if (!result.ok) console.error('rank_stats_level_error', charId, result.error);
 }
 async function bumpRankStat(charId, field, delta) {
@@ -2768,9 +2781,11 @@ async function fetchRankRows(type) {
   const rows = await supabase('character_rank_stats', {query:'?select=character_id,level,xp,pvp_kills,pvp_deaths,tvt_wins,tvt_losses,tvt_draws,tvt_kills,tvt_deaths,world_boss_kills,world_boss_participations,bestiary_discovered,characters(name,cls,lvl)&limit=500'});
   return rows.map(r => {
     const c = Array.isArray(r.characters) ? r.characters[0] : r.characters;
+    // Fase 5.17.3: dado legado acima do cap nunca chega ao cliente.
+    const norm = normalizeRankProgress(r.level, r.xp);
     return {
       id:r.character_id, name:c?c.name:'?', cls:c?c.cls:'guerreiro',
-      level:r.level, xp:r.xp, pvpKills:r.pvp_kills, pvpDeaths:r.pvp_deaths,
+      level:norm.level, xp:norm.xp, pvpKills:r.pvp_kills, pvpDeaths:r.pvp_deaths,
       tvtWins:r.tvt_wins, tvtLosses:r.tvt_losses, tvtDraws:r.tvt_draws, tvtKills:r.tvt_kills, tvtDeaths:r.tvt_deaths,
       worldBossKills:r.world_boss_kills, worldBossParticipations:r.world_boss_participations,
       bestiaryDiscovered:r.bestiary_discovered,
@@ -3442,8 +3457,24 @@ function publicPlayer(player) {
   return {id:player.id,name:player.name,cls:player.cls,map:player.map,x:player.x,y:player.y,dir:player.dir,moving:player.moving,lvl:player.lvl,atkT:player.atkT||0,atkAng:player.atkAng||0,charId:player.charId||null};
 }
 
+// Fase 5.17.3: health check de LIVENESS (Render healthCheckPath=/health).
+// Barato e sem I/O: nunca consulta Supabase, nunca muta nada, nunca expoe
+// segredo/usuario/personagem/stack -- so prova que o processo Node esta de
+// pe e atendendo HTTP. Commit vem da env que o proprio Render injeta.
+const PROCESS_STARTED_AT = Date.now();
+function healthPayload(now = Date.now()) {
+  const commit = String(process.env.RENDER_GIT_COMMIT || '').slice(0, 12) || null;
+  return { ok: true, service: 'novo-rpg', commit, uptimeSeconds: Math.floor((now - PROCESS_STARTED_AT) / 1000) };
+}
+function handleHealth(req, res, pathname) {
+  if (pathname !== '/health') return false;
+  if (req.method !== 'GET' && req.method !== 'HEAD') { json(res, 405, { ok: false }); return true; }
+  json(res, 200, healthPayload());
+  return true;
+}
 const server = http.createServer(async (req, res) => {
   const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  if (handleHealth(req, res, pathname)) return;
   if (await handleAuth(req, res, pathname)) return;
   if (await handleShop(req, res, pathname)) return;
   if (await handleQuest(req, res, pathname)) return;
@@ -5766,7 +5797,7 @@ module.exports = {
   // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   rollEnchantSuccess, applyEnchant, attemptEnchant,
   // Fase 5.17 -- progressao/economia (nucleo puro, sem HTTP/WS/Supabase):
-  BALANCE, applyXpGain, RELIC, relicShopView, attemptRelicPurchase, sanitizeRelicShopState, SHOP_BAG_MAX, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
+  BALANCE, applyXpGain, normalizeRankProgress, fetchRankRows, healthPayload, handleHealth, RELIC, relicShopView, attemptRelicPurchase, sanitizeRelicShopState, SHOP_BAG_MAX, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
   sanitizeRewardState, rolloverRewardState, rewardDayKey, rewardWeekKey, partyXpRecipients, parties, memberParty,
   hitTarget, applyDeathPenalty,
   // Fase 5.12 -- primitivas puras do runtime autoritativo:
