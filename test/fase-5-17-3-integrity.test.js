@@ -61,13 +61,13 @@ function migFiles() { return fs.readdirSync(MIG_DIR).filter(f => f.endsWith('.sq
 test('MIGRATIONS: historico do repo = versoes aplicadas em producao + as novas da 5.17.3', () => {
   const versions = migFiles().map(f => f.slice(0, 14));
   assert.deepEqual(versions.slice(0, PRODUCTION_VERSIONS.length), PRODUCTION_VERSIONS);
-  assert.deepEqual(versions.slice(PRODUCTION_VERSIONS.length), ['20260927010000', '20260927010100']);
+  assert.deepEqual(versions.slice(PRODUCTION_VERSIONS.length), ['20260927010241', '20260927010254']);
   assert.equal(new Set(versions).size, versions.length, 'versoes unicas');
   for (const f of migFiles()) assert.match(f, /^\d{14}_[a-z0-9_]+\.sql$/);
 });
 
 test('MIGRATIONS: integridade -- backfill, RPC com clamp, trigger de nascimento, constraints e idempotencia', () => {
-  const sql = fs.readFileSync(path.join(MIG_DIR, '20260927010000_enforce_level_cap_and_rank_stats_integrity.sql'), 'utf8');
+  const sql = fs.readFileSync(path.join(MIG_DIR, '20260927010241_enforce_level_cap_and_rank_stats_integrity.sql'), 'utf8');
   for (const needle of [
     'set lvl = least(greatest(lvl, 1), 40)',
     "jsonb_set(save, '{xp}', '0'::jsonb, true)",
@@ -87,7 +87,7 @@ test('MIGRATIONS: integridade -- backfill, RPC com clamp, trigger de nascimento,
 });
 
 test('MIGRATIONS: indice friends(friend_id) e nenhum indice removido', () => {
-  const sql = fs.readFileSync(path.join(MIG_DIR, '20260927010100_add_friends_friend_id_index.sql'), 'utf8');
+  const sql = fs.readFileSync(path.join(MIG_DIR, '20260927010254_add_friends_friend_id_index.sql'), 'utf8');
   assert.match(sql, /create index if not exists idx_friends_friend_id on public\.friends\(friend_id\)/);
   for (const f of migFiles()) assert.ok(!/\bdrop\s+index\b/i.test(fs.readFileSync(path.join(MIG_DIR, f), 'utf8').replace(/--[^\n]*/g, '')), f);
 });
