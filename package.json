@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:unit": "node tools/run-tests.js unit",
+    "test:integration": "node tools/run-tests.js integration"
   },
   "engines": {
     "node": ">=20"
