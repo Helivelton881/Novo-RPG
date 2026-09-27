@@ -23,7 +23,7 @@ Fase de estabilidade e hardening. **Nenhuma mecânica nova**, e nada muda em gam
 ### 2.1 Level cap 40 (A1–A3)
 - **Causa:** o personagem foi gravado antes da Fase 5.17, quando o cap era 99. Depois disso, o código passou a fazer clamp em todos os caminhos de escrita (`clampLevel`/`applyXp`), mas nada normalizava o dado já persistido e o banco não tinha constraint.
 - **Regra oficial verificada no código:** `BALANCE.normalizeProgress` define level em 1..40 e, **no cap, XP = 0** (XP excedente é descartada).
-- **Migration `20260927010000_enforce_level_cap_and_rank_stats_integrity`** (idempotente):
+- **Migration `20260927010241_enforce_level_cap_and_rank_stats_integrity`** (idempotente):
   - `characters.lvl` → faixa 1..40;
   - `save.lvl` = coluna `lvl`;
   - no cap, `save.xp` = 0;
@@ -111,7 +111,7 @@ Enquanto esses secrets não existirem, o job de integração **falha**, de prop�
 
 ### 2.8 Índice `friends(friend_id)` (G)
 - O advisor confirmou que o índice ainda estava ausente.
-- A migration `20260927010100_add_friends_friend_id_index` cria `idx_friends_friend_id`.
+- A migration `20260927010254_add_friends_friend_id_index` cria `idx_friends_friend_id`.
 - Os 25 índices marcados como "unused" **não** foram removidos: o banco é pequeno e muitos sistemas ainda têm pouco uso.
 
 ### 2.9 RLS (H)
