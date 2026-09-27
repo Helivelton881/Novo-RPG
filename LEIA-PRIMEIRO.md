@@ -1948,3 +1948,29 @@ Novo gem sink na Vila Inicial. Detalhes: [`docs/FASE-5.17.2-MERCADOR-RELIQUIAS.m
 ## Próximo grande sistema
 
 **FASE 5.18 — Guild Wars.**
+
+# FASE 5.17.3 — Integridade, CI & Observabilidade
+
+Fase de hardening, sem mecânica nova. Detalhes: [`docs/FASE-5.17.3-INTEGRIDADE-CI-OBSERVABILIDADE.md`](docs/FASE-5.17.3-INTEGRIDADE-CI-OBSERVABILIDADE.md).
+
+- **Level cap 40 também no banco:**
+  - backfill do Lv41 legado para 40/0;
+  - constraints de 1 a 40 em `characters.lvl` e `character_rank_stats.level`;
+  - `rank_stats_set_level_xp` com clamp;
+  - a coluna `lvl` e `save.lvl` agora são sempre gravadas juntas.
+- **Ranking:**
+  - normalizado na resposta;
+  - cada personagem novo ganha sua linha de rank via trigger `AFTER INSERT`;
+  - backfill das linhas que faltavam.
+- **Migrations:** 5 arquivos renomeados para as versões já aplicadas em produção (o SQL é idêntico). Novo-RPG CI com o schema completo e o mesmo histórico.
+- **CI:**
+  - jobs separados de unit e integration;
+  - o job de integration exige o Supabase CI (secrets `CI_SUPABASE_URL`/`CI_SUPABASE_SECRET_KEY`) e falha se não houver secret, se o alvo for produção ou se algum teste for SKIP.
+- **`GET /health`:** liveness, sem I/O.
+- **Índice:** `idx_friends_friend_id`.
+- **Avisos do PostgREST:** classificados como aviso interno sem impacto (evidências na doc).
+- **Living World:** fora do escopo e **não modificado**.
+
+## Próximo grande sistema
+
+**FASE 5.18 — Guild Wars.**

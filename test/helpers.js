@@ -9,8 +9,21 @@ const WebSocket = require('ws');
 
 const ROOT = path.join(__dirname, '..');
 
+// Fase 5.17.3: testes de integracao so podem rodar contra o Supabase de
+// CI (projeto "Novo-RPG CI"). Nunca contra producao -- mesmo que alguem
+// exporte as credenciais erradas localmente, a suite aborta aqui.
+const PRODUCTION_SUPABASE_REF = 'depdbddsbszhyeiuxhtd';
+function assertSafeSupabaseTarget() {
+  const url = String(process.env.SUPABASE_URL || '');
+  if (url.includes(PRODUCTION_SUPABASE_REF)) throw new Error('REFUSING_PRODUCTION_SUPABASE: testes nunca rodam contra o Supabase de producao');
+}
 function hasSupabase() {
-  return !!(process.env.SUPABASE_URL && (process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY));
+  const ok = !!(process.env.SUPABASE_URL && (process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY));
+  // Job de integracao (REQUIRE_SUPABASE=1): credencial ausente e FALHA,
+  // nunca "SKIP + CI verde".
+  if (!ok && process.env.REQUIRE_SUPABASE === '1') throw new Error('INTEGRATION_REQUIRES_SUPABASE: SUPABASE_URL/SUPABASE_SECRET_KEY do projeto CI ausentes');
+  if (ok) assertSafeSupabaseTarget();
+  return ok;
 }
 
 // Sobe server.js como processo filho numa porta dedicada e espera responder.
@@ -144,4 +157,4 @@ async function adminRpc(name, body) {
   return Array.isArray(data) ? data[0] : data;
 }
 
-module.exports = { hasSupabase, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter, adminRpc, moveToDungeonCave };
+module.exports = { hasSupabase, assertSafeSupabaseTarget, PRODUCTION_SUPABASE_REF, startServer, stopServer, httpJson, wsConnect, waitFor, joinWs, sleep, adminPatchCharacter, adminRpc, moveToDungeonCave };
