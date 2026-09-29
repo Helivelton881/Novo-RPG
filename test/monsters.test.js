@@ -30,7 +30,7 @@ async function killMob(conn, mob, atk) {
   let deadMsg = null;
   for (let i = 0; i < 30 && !deadMsg; i++) {
     conn.ws.send(JSON.stringify({ type: 'mob_damage', map: 'floresta', id: mob.id, skill: 'basic', atk: atk ?? 35 }));
-    await sleep(90);
+    await sleep(450);
     const last = conn.msgs.filter(m => m.type === 'mob_state' && m.mob.id === mob.id).pop();
     if (last && (last.mob.dead || last.mob.hp <= 0)) deadMsg = last;
   }
