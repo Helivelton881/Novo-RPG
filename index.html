@@ -3236,6 +3236,20 @@ function netApplyMob(u,killerId){
   else if(!m.netDead&&m.dead){m.dead=false;m.respawn=0;m.hp=m.maxhp;if(Number.isFinite(sx)&&Number.isFinite(sy)){m.x=sx;m.y=sy}m.state='idle'}
   m.hp=m.netHp;
 }
+function applyWelcomePosition(m){
+  const sx=Number(m&&m.x),sy=Number(m&&m.y),map=typeof m?.map==='string'?m.map:'';
+  if(!Number.isFinite(sx)||!Number.isFinite(sy))return false;
+  if(map===netMapId()){
+    P.x=sx;P.y=sy;clickPath=null;stopAuto();return true;
+  }
+  if(/^(vila|floresta|cripta|serra|pantano|torre|ilhas|vulcao)$/.test(map)){
+    if(!worlds[map]&&map!=='vila')ensureWorld(map);
+    const w=worlds[map];if(!w)return false;
+    if(W_!==w)setWorld(w);
+    P.x=sx;P.y=sy;clickPath=null;stopAuto();return true;
+  }
+  return false;
+}
 function netConnect(){
   if(!started||!CUR_CHAR||NET&&NET.readyState<2)return;
   const proto=location.protocol==='https:'?'wss:':'ws:';
@@ -3248,7 +3262,7 @@ function netConnect(){
   // novo no onclose) sempre manda um join novo, reautenticando do zero.
   ws.onopen=()=>{if(NET!==ws)return;netRetry=0;ws.send(JSON.stringify({type:'join',name:P.name,cls:P.cls,lvl:P.lvl,userId:(ACC&&ACC.id)||undefined,charId:(CUR_CHAR&&CUR_CHAR.id)||undefined,token:authToken()||undefined,clientInstanceId:CLIENT_INSTANCE_ID}))};
   ws.onmessage=e=>{if(NET!==ws)return;let m;try{m=JSON.parse(e.data)}catch(err){return}
-    if(m.type==='welcome'){NET_ID=m.id;NET_SESSION=m.sessionKey||'';if(Number.isFinite(m.hp))P.hp=m.hp;if(Number.isFinite(m.maxHp))P.maxhp=m.maxHp;P.dead=!!m.dead;REMOTE.clear();for(const p of m.players||[])applyRemoteUpdate(p);netLabel(netCountsLabel(),true);netJoinMap()}
+    if(m.type==='welcome'){NET_ID=m.id;NET_SESSION=m.sessionKey||'';if(Number.isFinite(m.hp))P.hp=m.hp;if(Number.isFinite(m.maxHp))P.maxhp=m.maxHp;P.dead=!!m.dead;applyWelcomePosition(m);REMOTE.clear();for(const p of m.players||[])applyRemoteUpdate(p);netLabel(netCountsLabel(),true);netJoinMap()}
     else if(m.type==='event_state'){EVENT_STATE=m;EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(scrOpen==='events')renderScr()}
     else if(m.type==='event_announcement'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();chatAdd('Sistema',m.message,true);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.message)}
     else if(m.type==='event_registration'){EVENT_CLOCK_OFFSET=(Number(m.serverNow)||Date.now())-Date.now();if(!m.ok)toast(m.error==='EVENT_UNAVAILABLE'?'Evento ainda não disponível':m.error==='AUTH_REQUIRED'?'Entre com uma conta online para se inscrever':'Não foi possível alterar a inscrição');else toast(m.action==='unregister'?'Inscrição cancelada':m.alreadyRegistered?'Você já está inscrito':'Inscrição realizada')}

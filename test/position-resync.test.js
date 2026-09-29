@@ -15,6 +15,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const html = fs.readFileSync(path.join(__dirname, '../index.html'), 'utf8');
+const server = fs.readFileSync(path.join(__dirname, '../server.js'), 'utf8');
+const WELCOME_FN = html.slice(
+  html.indexOf('function applyWelcomePosition(m){'),
+  html.indexOf('function netConnect(){')
+);
+assert.ok(WELCOME_FN.length > 100, 'sanity: applyWelcomePosition deveria existir em index.html');
 const BLOCK = html.slice(
   html.indexOf("else if(m.type==='position_resync'){"),
   html.indexOf("else if(m.type==='server_teleport'")
@@ -69,4 +75,38 @@ test('position_resync: ja no mundo certo (setWorld nao deveria rodar de novo por
   // ramo (if simples), nunca no de troca de mundo.
   assert.equal(ctx.P.x, 5); assert.equal(ctx.P.y, 9);
   assert.deepEqual(ctx.calls, []);
+});
+
+function welcomeCtx(overrides={}) {
+  const calls=[];
+  const ctx={P:{x:10,y:20},W_:{name:'vila'},worlds:{vila:{name:'vila'}},clickPath:{active:true},calls,
+    netMapId:()=>ctx.W_.name,
+    stopAuto:()=>calls.push('stopAuto'),
+    setWorld:w=>{ctx.W_=w;calls.push('setWorld:'+w.name)},
+    ensureWorld:map=>{ctx.worlds[map]={name:map};calls.push('ensureWorld:'+map)}};
+  Object.assign(ctx,overrides);vm.runInNewContext(WELCOME_FN,ctx);return ctx;
+}
+
+test('welcome: servidor envia map/x/y autoritativos junto da sessao',()=>{
+  assert.match(server,/type:'welcome'[^\n]*map:p\.map, x:p\.x, y:p\.y/);
+});
+
+test('welcome: mesmo mapa aplica x/y e cancela rota/auto locais',()=>{
+  const ctx=welcomeCtx();
+  assert.equal(ctx.applyWelcomePosition({map:'vila',x:701,y:1259}),true);
+  assert.equal(ctx.P.x,701);assert.equal(ctx.P.y,1259);assert.equal(ctx.clickPath,null);
+  assert.ok(ctx.calls.includes('stopAuto'));
+});
+
+test('welcome: mapa de campo diferente e ainda nao construido e carregado e sincronizado',()=>{
+  const ctx=welcomeCtx();
+  assert.equal(ctx.applyWelcomePosition({map:'cripta',x:480,y:1906}),true);
+  assert.equal(ctx.W_.name,'cripta');assert.equal(ctx.P.x,480);assert.equal(ctx.P.y,1906);
+  assert.ok(ctx.calls.includes('ensureWorld:cripta'));assert.ok(ctx.calls.includes('setWorld:cripta'));
+});
+
+test('welcome: instancia temporaria desconhecida fica para o fluxo especializado',()=>{
+  const ctx=welcomeCtx();const before=ctx.clickPath;
+  assert.equal(ctx.applyWelcomePosition({map:'vulcao_d#abcdef12',x:999,y:888}),false);
+  assert.equal(ctx.P.x,10);assert.equal(ctx.P.y,20);assert.equal(ctx.clickPath,before);
 });

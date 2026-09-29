@@ -3639,7 +3639,7 @@ async function handleWsJoin(ws, msg) {
     // snapshot inicial devia ja vir completo). Reusa o MESMO array
     // `players` que o cliente ja sabe consumir (welcome handler faz
     // REMOTE.set pra cada item) -- nenhum tipo de mensagem novo.
-    send(ws, {type:'welcome', id:p.id, sessionKey:p.sessionKey, hp:p.hp, maxHp:p.maxHp, dead:p.dead, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer).concat([...aiEntities.values()].map(aiPublicPlayer))});
+    send(ws, {type:'welcome', id:p.id, sessionKey:p.sessionKey, hp:p.hp, maxHp:p.maxHp, dead:p.dead, map:p.map, x:p.x, y:p.y, players:[...clients.values()].filter(x=>x!==p).map(publicPlayer).concat([...aiEntities.values()].map(aiPublicPlayer))});
     send(ws, eventStatePayload(p));
     const wbMap=p.charId&&worldBossByChar.get(p.charId),instance=wbMap&&worldBossInstances.get(wbMap),member=instance&&instance.members.get(p.charId);
     if(member&&member.userId===p.userId&&instance.state!=='ended'){member.online=true;p.map=instance.mapId;p.x=member.x;p.y=member.y;send(ws,{...WORLD_BOSS.publicWorldBossState(instance),type:'world_boss_enter',spawn:{x:p.x,y:p.y},reconnect:true})}
