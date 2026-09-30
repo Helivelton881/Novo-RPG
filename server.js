@@ -22,6 +22,7 @@ const BALANCE = require('./game-data/balance-data.js');
 const MONSTER_ANIM = require('./game-data/monster-animation.js');
 // Fase 5.17.2: Mercador de Reliquias (estoque semanal deterministico, puro).
 const RELIC = require('./game-data/relic-shop.js');
+const ENDGAME = require('./game-data/endgame-data.js');
 const { LEVEL_CAP, clampLevel } = BALANCE;
 
 const PORT = Number(process.env.PORT || 8080);
@@ -315,7 +316,7 @@ const QUEST_GATE_FIELDS = ['kills', 'gk', 'ks', 'kw', 'kp', 'kt', 'ki', 'kv'];
 // handleChest, handleQuest, creditKillReward, dungeon). gunlock e os
 // chestN entram aqui pela mesma razao (desbloqueio de portal so por
 // buy_portal; abertura de bau de campo so por handleChest).
-const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards', 'rwd', 'relicShop'];
+const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards', 'rwd', 'relicShop', 'endgame'];
 function advanceQuestOnKill(save, type, boss, lvl) {
   const q = save.quest, changed = {};
   const bump = (field, need, next) => {
@@ -1036,6 +1037,41 @@ function rolloverRewardState(save, now = Date.now()) {
   return r;
 }
 
+
+function rolloverEndgameRewards(save, now = Date.now()) {
+  const e = save.endgame = ENDGAME.sanitizeEndgame(save.endgame, save.cls);
+  const r = e.rewards = ENDGAME.sanitizeEndgameRewardState(e.rewards);
+  const d = rewardDayKey(now), w = rewardWeekKey(now);
+  if (r.d !== d) { r.d = d; r.dungeon = 0; r.worldBoss = 0; }
+  if (r.w !== w) { r.w = w; r.worldBossEssence = 0; }
+  return r;
+}
+function applyEndgameDungeonReward(save, lvl, difficulty = 'normal', now = Date.now()) {
+  if (lvl !== LEVEL_CAP) return { masteryGain:0, essenceGain:0 };
+  const diff = ENDGAME.difficultyFor(difficulty, save.endgame.rank);
+  if (!diff) return { masteryGain:0, essenceGain:0, locked:true };
+  const r = rolloverEndgameRewards(save, now), cfg = ENDGAME.ENDGAME_REWARDS.DUNGEON;
+  if (r.dungeon >= cfg.REWARDED_CLEARS_PER_DAY) return { masteryGain:0, essenceGain:0 };
+  r.dungeon++;
+  const masteryGain = Math.floor(cfg.MASTERY_XP * diff.mastery);
+  const essenceGain = Math.floor(cfg.ESSENCE * diff.essence);
+  save.endgame = ENDGAME.applyMasteryXp(save.endgame, masteryGain, lvl, save.cls);
+  save.endgame = ENDGAME.addEssence(save.endgame, essenceGain, save.cls);
+  save.endgame.rewards = r;
+  return { masteryGain, essenceGain };
+}
+function applyEndgameWorldBossReward(save, lvl, now = Date.now()) {
+  if (lvl !== LEVEL_CAP) return { masteryGain:0, essenceGain:0 };
+  const r = rolloverEndgameRewards(save, now), cfg = ENDGAME.ENDGAME_REWARDS.WORLD_BOSS;
+  let masteryGain=0, essenceGain=0;
+  if (r.worldBoss < cfg.REWARDED_EVENTS_PER_DAY) { r.worldBoss++; masteryGain=cfg.MASTERY_XP; }
+  if (r.worldBossEssence < cfg.ESSENCE_EVENTS_PER_WEEK) { r.worldBossEssence++; essenceGain=cfg.ESSENCE; }
+  save.endgame = ENDGAME.applyMasteryXp(save.endgame, masteryGain, lvl, save.cls);
+  save.endgame = ENDGAME.addEssence(save.endgame, essenceGain, save.cls);
+  save.endgame.rewards = r;
+  return { masteryGain, essenceGain };
+}
+
 // Reconstroi o save inteiro a partir de limites plausiveis em vez de
 // confiar no JSON que o cliente manda: mesmo com o jogo ainda calculando
 // dano/inventario no cliente, isso impede que editar localStorage/memoria
@@ -1051,8 +1087,9 @@ function sanitizeSave(raw, lvl) {
   // Arenas de evento nunca sao persistidas no save; acesso e exclusivamente
   // server-driven via WorldBossInstance.
   const map = ALLOWED_MAP.test(cleanText(save.map, 24)) ? cleanText(save.map, 24) : 'vila';
+  const cls = ALLOWED_CLASS.has(save.cls) ? save.cls : 'guerreiro';
   const out = {
-    cls: ALLOWED_CLASS.has(save.cls) ? save.cls : 'guerreiro', lvl,
+    cls, lvl,
     xp: progress.xp, gold: clampInt(save.gold, 500000), gem: clampInt(save.gem, 5000),
     pv: clampInt(save.pv, 999), pa: clampInt(save.pa, 999), quest: clampInt(save.quest, 40), kills: clampInt(save.kills, 999999),
     hp: clampInt(save.hp, 100000), mp: clampInt(save.mp, 100000),
@@ -1071,6 +1108,7 @@ function sanitizeSave(raw, lvl) {
     tvtRewards: Array.isArray(save.tvtRewards) ? save.tvtRewards.slice(-12).map(x=>cleanText(x,96)).filter(Boolean) : [],
     rwd: sanitizeRewardState(save.rwd),
     relicShop: sanitizeRelicShopState(save.relicShop),
+    endgame: ENDGAME.sanitizeEndgame(save.endgame, cls),
   };
   for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
   // Um uid nunca pode aparecer duas vezes (mochila+mochila ou mochila+
@@ -1859,7 +1897,8 @@ function applyDungeonClearReward(save, lvl, bossClear, now = Date.now()) {
   if (rwd.dg < BALANCE.DUNGEON.GEM_CLEARS_PER_DAY) { rwd.dg += 1; gem = BALANCE.DUNGEON.BOSS_GEMS; save.gem = Math.min(5000, save.gem + gem); }
   const leveled = applyXpGain(save, lvl, xpGain);
   save.xp = leveled.xp; save.lvl = leveled.lvl;
-  return { xpGain, gem, lvl: leveled.lvl };
+  const eg = applyEndgameDungeonReward(save, leveled.lvl, bossClear.difficulty || 'normal', now);
+  return { xpGain, gem, lvl: leveled.lvl, masteryGain:eg.masteryGain, essenceGain:eg.essenceGain };
 }
 async function creditDungeonReward(ws, p, { gold = 0, gem = 0, pv = 0, ap = 0, scr = 0, items = [], bossClear = null } = {}) {
   if (!p.charId || !p.userId) return;
@@ -1880,7 +1919,7 @@ async function creditDungeonReward(ws, p, { gold = 0, gem = 0, pv = 0, ap = 0, s
       await supabase('characters', {method:'PATCH', query:`?id=eq.${encodeURIComponent(p.charId)}&user_id=eq.${encodeURIComponent(p.userId)}`, body:{lvl, save}, prefer:'return=minimal'});
       const msg = {type:'dungeon_reward', gold: save.gold, gem: save.gem, pv: save.pv, ap: save.ap, scr: save.scr, bag: save.bag, eq: save.eq};
       if (bossClear) {
-        msg.xp = save.xp; msg.lvl = lvl; msg.clearXp = clear.xpGain; msg.clearGem = clear.gem;
+        msg.xp = save.xp; msg.lvl = lvl; msg.clearXp = clear.xpGain; msg.clearGem = clear.gem; msg.masteryGain = clear.masteryGain; msg.essenceGain = clear.essenceGain; msg.endgame = save.endgame;
         const live = clients.get(ws); if (live && live.charId === p.charId) syncLiveLevel(live, lvl);
         syncRankLevelXp(p.charId, lvl, save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));
       }
@@ -3080,13 +3119,13 @@ async function grantWorldBossRewards(instance){
   for(const member of eligible){
     try{await withCharLock(member.charId,async()=>{
       const loaded=await loadWorldBossCharacter(member.userId,member.charId);if(!loaded)return;const {row,save}=loaded;
-      const r=applyWorldBossReward(save,clampLevel(row.lvl),member.cls,instance.eventId);if(!r)return;
+      const r=applyWorldBossReward(save,clampLevel(row.lvl),member.cls,instance.eventId);if(!r)return; const eg=applyEndgameWorldBossReward(save,r.lvl);
       await supabase('characters',{method:'PATCH',query:`?id=eq.${encodeURIComponent(member.charId)}&user_id=eq.${encodeURIComponent(member.userId)}`,body:{lvl:r.lvl,save},prefer:'return=minimal'});
       member.rewarded=true;
       for(const [,live] of clients)if(live.charId===member.charId&&live.userId===member.userId)syncLiveLevel(live,r.lvl);
       syncRankLevelXp(member.charId,r.lvl,save.xp).catch(err=>console.error('rank_stats_sync_error',err.message));bumpRankStat(member.charId,'world_boss_kills',1).catch(()=>{});bumpRankStat(member.charId,'world_boss_participations',1).catch(()=>{});
       const it=r.item;
-      sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:r.lvl,xpGain:r.xpGain,gemGain:r.gem,bag:save.bag,eq:save.eq,drop:it?{n:it.n,rarity:it.rarity,enchant:it.enchant}:null,legendary:it&&it.rarity==='legendary'?{n:it.n,rarity:it.rarity,enchant:it.enchant}:null,dropLost:r.lostItem?{n:r.lostItem.n,rarity:r.lostItem.rarity}:null});
+      sendToWorldBossMember(member,{type:'world_boss_reward',gold:save.gold,gem:save.gem,xp:save.xp,lvl:r.lvl,xpGain:r.xpGain,gemGain:r.gem,bag:save.bag,eq:save.eq,drop:it?{n:it.n,rarity:it.rarity,enchant:it.enchant}:null,legendary:it&&it.rarity==='legendary'?{n:it.n,rarity:it.rarity,enchant:it.enchant}:null,dropLost:r.lostItem?{n:r.lostItem.n,rarity:r.lostItem.rarity}:null,masteryGain:eg.masteryGain,essenceGain:eg.essenceGain,endgame:save.endgame});
     })}catch(err){console.error('world_boss_reward_error',member.charId,err.message)}
   }
 }
@@ -5797,8 +5836,8 @@ module.exports = {
   // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   rollEnchantSuccess, applyEnchant, attemptEnchant,
   // Fase 5.17 -- progressao/economia (nucleo puro, sem HTTP/WS/Supabase):
-  BALANCE, applyXpGain, normalizeRankProgress, fetchRankRows, healthPayload, handleHealth, RELIC, relicShopView, attemptRelicPurchase, sanitizeRelicShopState, SHOP_BAG_MAX, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
-  sanitizeRewardState, rolloverRewardState, rewardDayKey, rewardWeekKey, partyXpRecipients, parties, memberParty,
+  BALANCE, ENDGAME, applyXpGain, normalizeRankProgress, fetchRankRows, healthPayload, handleHealth, RELIC, relicShopView, attemptRelicPurchase, sanitizeRelicShopState, SHOP_BAG_MAX, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
+  sanitizeRewardState, rolloverRewardState, rewardDayKey, rewardWeekKey, rolloverEndgameRewards, applyEndgameDungeonReward, applyEndgameWorldBossReward, partyXpRecipients, parties, memberParty,
   hitTarget, applyDeathPenalty,
   // Fase 5.12 -- primitivas puras do runtime autoritativo:
   resolveAttackDamage, applyGlobalPlayerDamage, mitigatePlayerDamage, consumeRuntimePotion,
