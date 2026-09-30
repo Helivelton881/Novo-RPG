@@ -1,0 +1,10 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),C=require('../game-data/competitive-data.js');
+test('7.1 rating Elo e simetrico e limitado',()=>{const a=C.applyRating(1000,1000,'win'),b=C.applyRating(1000,1000,'loss');assert.equal(a.delta,-b.delta);assert.equal(a.rating,1016)});
+test('7.1 divisoes competitivas sao deterministicas',()=>{assert.equal(C.divisionFor(0),'bronze');assert.equal(C.divisionFor(1200),'gold');assert.equal(C.divisionFor(2200),'master')});
+test('7.2 placements usam K maior e registram W/L/D',()=>{const r=C.recordMatch({rating:1000},1000,'win');assert.equal(r.delta,24);assert.equal(r.competitive.wins,1);assert.equal(r.competitive.placements,1)});
+test('7.3 temporadas reiniciam progresso competitivo sem tocar historico maximo',()=>{const r=C.recordMatch({season:'old',rating:1800,bestRating:2100,wins:99},1000,'draw',Date.now());assert.equal(r.competitive.rating,1000);assert.equal(r.competitive.bestRating,2100)});
+test('7.4 modos cobrem duelo trio e guerra 5v5',()=>{assert.equal(C.ARENA_MODES.duel.teamSize,1);assert.equal(C.ARENA_MODES.trio.teamSize,3);assert.equal(C.ARENA_MODES.guild_war.teamSize,5)});
+test('7.5 roster Guild War exige 3-5 membros unicos',()=>{assert.equal(C.validateGuildWarRoster(['a','b']),false);assert.equal(C.validateGuildWarRoster(['a','b','c']),true);assert.equal(C.validateGuildWarRoster(['a','a','b']),false)});
+test('7.6 matchmaking considera rating e powerScore sem alterar combate',()=>{assert.ok(C.matchmakingScore({rating:1000,powerScore:100},{rating:1300,powerScore:100})>C.matchmakingScore({rating:1000,powerScore:100},{rating:1010,powerScore:110}))});
+test('7.7 sanitize impede rating e contadores forjados fora dos limites',()=>{const c=C.sanitizeCompetitive({rating:99999,placements:99,weeklyWars:999});assert.equal(c.rating,3000);assert.equal(c.placements,5);assert.equal(c.weeklyWars,99)});

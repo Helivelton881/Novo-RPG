@@ -11,6 +11,7 @@ const DUNGEON_GEN = require('./game-data/dungeon-generation.js');
 const EVENT_DATA = require('./game-data/event-manager.js');
 const WORLD_BOSS = require('./game-data/world-boss.js');
 const TVT = require('./game-data/tvt.js');
+const COMPETITIVE = require('./game-data/competitive-data.js');
 const GUILD = require('./game-data/guild.js');
 const BESTIARY = require('./game-data/bestiary.js');
 const RANKINGS = require('./game-data/rankings.js');
@@ -316,7 +317,7 @@ const QUEST_GATE_FIELDS = ['kills', 'gk', 'ks', 'kw', 'kp', 'kt', 'ki', 'kv'];
 // handleChest, handleQuest, creditKillReward, dungeon). gunlock e os
 // chestN entram aqui pela mesma razao (desbloqueio de portal so por
 // buy_portal; abertura de bau de campo so por handleChest).
-const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards', 'rwd', 'relicShop', 'endgame'];
+const ECONOMY_LOCK_FIELDS = ['gold', 'gem', 'pv', 'pa', 'ap', 'key', 'scr', 'gunlock', 'chest', 'chest2', 'chest3', 'chest4', 'chest5', 'chest6', 'chest7', 'wbRewards', 'tvtRewards', 'rwd', 'relicShop', 'endgame', 'competitive'];
 function advanceQuestOnKill(save, type, boss, lvl) {
   const q = save.quest, changed = {};
   const bump = (field, need, next) => {
@@ -1109,6 +1110,7 @@ function sanitizeSave(raw, lvl) {
     rwd: sanitizeRewardState(save.rwd),
     relicShop: sanitizeRelicShopState(save.relicShop),
     endgame: ENDGAME.sanitizeEndgame(save.endgame, cls),
+    competitive: COMPETITIVE.sanitizeCompetitive(save.competitive),
   };
   for (const f of COUNTER_FIELDS) out[f] = clampInt(save[f], 999);
   // Um uid nunca pode aparecer duas vezes (mochila+mochila ou mochila+
@@ -5836,7 +5838,7 @@ module.exports = {
   // Fase 5.4 -- exportado so pra teste unitario puro (sem HTTP/WS/Supabase):
   rollEnchantSuccess, applyEnchant, attemptEnchant,
   // Fase 5.17 -- progressao/economia (nucleo puro, sem HTTP/WS/Supabase):
-  BALANCE, ENDGAME, applyXpGain, normalizeRankProgress, fetchRankRows, healthPayload, handleHealth, RELIC, relicShopView, attemptRelicPurchase, sanitizeRelicShopState, SHOP_BAG_MAX, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
+  BALANCE, ENDGAME, COMPETITIVE, applyXpGain, normalizeRankProgress, fetchRankRows, healthPayload, handleHealth, RELIC, relicShopView, attemptRelicPurchase, sanitizeRelicShopState, SHOP_BAG_MAX, killXpFor, fieldBossDailyGem, applyDungeonClearReward, applyWorldBossReward, applyTvtReward,
   sanitizeRewardState, rolloverRewardState, rewardDayKey, rewardWeekKey, rolloverEndgameRewards, applyEndgameDungeonReward, applyEndgameWorldBossReward, partyXpRecipients, parties, memberParty,
   hitTarget, applyDeathPenalty,
   // Fase 5.12 -- primitivas puras do runtime autoritativo:
