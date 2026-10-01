@@ -1,0 +1,7 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict');
+const R=require('../game-data/arena-runtime.js');
+function m(id,r=1000){return{userId:'u'+id,charId:id,name:id,cls:'guerreiro',lvl:20,snapshot:{maxHp:300,maxMp:100,atk:30,def:20,skills:{}},rating:r,competitive:{rating:r}}}
+test('arena 1x1 cria instancia isolada com regras competitivas',()=>{const a=m('a'),b=m('b');const members=new Map([['a',a],['b',b]]),teams={red:[{charId:'a'}],blue:[{charId:'b'}]};const x=R.createArenaInstance({id:'x',mode:'duel',teams,members,now:100});assert.equal(x.mapId,'tvt#arena_x');assert.equal(x.scoreLimit,3);assert.equal(x.expiresAt,300100);assert.equal(x.isCompetitive,true)});
+test('resultado e rating medio do oponente sao deterministas',()=>{const a=m('a',1100),b=m('b',1300);const x=R.createArenaInstance({id:'x',mode:'duel',teams:{red:[{charId:'a'}],blue:[{charId:'b'}]},members:new Map([['a',a],['b',b]]),now:1});x.winner='red';assert.equal(R.resultFor(x,x.players.get('a')),'win');assert.equal(R.resultFor(x,x.players.get('b')),'loss');assert.equal(R.avgOpponentRating(x,'red'),1300)});
+test('guild war registra historico e limite semanal sem misturar com Elo',()=>{const now=Date.UTC(2026,8,30),a=R.applyGuildWarMeta({rating:1200},'win',now),b=R.applyGuildWarMeta(a,'loss',now);assert.equal(b.rating,1200);assert.equal(b.guildWins,1);assert.equal(b.guildLosses,1);assert.equal(b.weeklyWars,2);assert.match(b.week,/^2026-W\d{2}$/)});

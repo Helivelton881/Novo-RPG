@@ -3336,6 +3336,8 @@ function netConnect(){
     else if(m.type==='projectile'&&m.map===netMapId()&&m.ownerId!==NET_ID){const p=m.projectile;if(p&&!RPROJ.some(x=>x.id===p.id))RPROJ.push(Object.assign({remote:true},p))}
     else if(m.type==='projectile_end'&&m.map===netMapId()&&m.ownerId!==NET_ID){const i=RPROJ.findIndex(x=>x.id===m.id);if(i>=0)RPROJ.splice(i,1);if(m.boom)EFX.push({kind:'boom',x:m.x,y:m.y+22,t:0,life:.35,r:70,col:'255,140,40'})}
     else if(m.type==='arena_queue_result'){toast(m.ok?'Fila da Arena: '+m.mode:(m.error||'Arena indisponível'))}
+    else if(m.type==='arena_match_found'){closeArena();toast('Partida encontrada: '+(m.mode||'Arena'))}
+    else if(m.type==='arena_result'){P.competitive=P.competitive||{};Object.assign(P.competitive,{rating:m.rating});toast((m.outcome==='win'?'Vitória':m.outcome==='loss'?'Derrota':'Empate')+' · Rating '+m.rating+' ('+(m.delta>=0?'+':'')+m.delta+')')}
       else if(m.type==='arena_ranking'){const el=document.querySelector('#arenaRanking');if(el)el.innerHTML=(m.rows||[]).map((r,i)=>'<div class="arenaRankRow"><b>#'+(i+1)+'</b><span>'+r.name+'</span><span>'+r.division+'</span><strong>'+r.rating+'</strong></div>').join('')||'<p>Nenhum jogador ranqueado online.</p>'}
       else if(m.type==='chat'){chatAdd(m.from,m.text);if(scrOpen==='social'&&socTab==='chat')renderScr();toast(m.from+': '+m.text)}
     else if(m.type==='guild_chat'){GUILD_CHAT.push({from:m.from,text:m.text});if(GUILD_CHAT.length>60)GUILD_CHAT.shift();if(scrOpen==='guild'){renderScr();const l=$('#gChatLog');if(l)l.scrollTop=l.scrollHeight}}

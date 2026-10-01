@@ -13,6 +13,7 @@ const WORLD_BOSS = require('./game-data/world-boss.js');
 const TVT = require('./game-data/tvt.js');
 const COMPETITIVE = require('./game-data/competitive-data.js');
 const ARENA_MATCH = require('./game-data/arena-matchmaking.js');
+const ARENA_RUNTIME = require('./game-data/arena-runtime.js');
 const GUILD = require('./game-data/guild.js');
 const BESTIARY = require('./game-data/bestiary.js');
 const RANKINGS = require('./game-data/rankings.js');
@@ -36,6 +37,7 @@ const authAttempts = new Map();
 const clients = new Map();
 const arenaQueues = new Map(ARENA_MATCH.QUEUE_MODES.map(mode => [mode, []]));
 const arenaQueuedByChar = new Map();
+const arenaInstances=new Map(),arenaByChar=new Map(),guildWarQueue=[];
 const maps = new Map();
 const activeCharacterSockets = new Map();
 const characterRuntime = new Map();
@@ -3324,6 +3326,7 @@ function finishTvtInstance(instance,reason,winner){
 }
 function tickTvt(now=Date.now()){
   for(const instance of[...tvtInstances.values()]){
+    if(instance.isCompetitive)continue;
     const respawned=TVT.tickTvtRespawns(instance,now);
     TVT.tickTvtStatusExpiry(instance,now);
     const thornsEvents=TVT.tickTvtThorns(instance,now,secureRandom);
@@ -3345,6 +3348,12 @@ function tickTvt(now=Date.now()){
 // caminhos nunca duplica nada.
 eventManager.registerEventHandler('team_vs_team',{durationMs:TVT.TVT_DURATION_MS,onStart:(event,registrations)=>startTvtEvent(event,registrations),onEnd:event=>{for(const instance of[...tvtInstances.values()])if(instance.eventId===event.id&&instance.state!=='ended'){const winner=instance.score.red===instance.score.blue?null:(instance.score.red>instance.score.blue?'red':'blue');instance.winner=winner;grantTvtRewards(instance).catch(err=>console.error('tvt_reward_error',err.message));finishTvtInstance(instance,'timeout',winner)}}});
 
+async function finishCompetitiveArena(instance,reason,winner){
+ if(!instance||instance._competitiveFinished)return;instance._competitiveFinished=true;instance.winner=winner===undefined?null:winner;
+ for(const member of instance.players.values()){if(member.kind==='ai')continue;const outcome=ARENA_RUNTIME.resultFor(instance,member),opp=ARENA_RUNTIME.avgOpponentRating(instance,member.team),rec=COMPETITIVE.recordMatch(member.competitive,opp,outcome);if(instance.mode==='guild_war')rec.competitive=ARENA_RUNTIME.applyGuildWarMeta(rec.competitive,outcome);member.competitive=rec.competitive;const active=activeCharacterForUser(member.userId);if(active&&active.p.charId===member.charId)active.p.competitive=rec.competitive;try{await patchCharacterFields(member.charId,member.userId,{competitive:rec.competitive})}catch(err){console.error('arena_rating_save_error',member.charId,err.message)}sendToWorldBossMember(member,{type:'arena_result',mode:instance.mode,outcome,rating:rec.competitive.rating,delta:rec.delta,division:rec.division,score:instance.score});arenaByChar.delete(member.charId)}
+ arenaInstances.delete(instance.mapId);finishTvtInstance(instance,reason,winner);
+}
+function tickCompetitiveArena(now=Date.now()){for(let i=guildWarQueue.length-1;i>=0;i--)if(now-guildWarQueue[i].joinedAt>COMPETITIVE.GUILD_WAR.challengeTtlMs)guildWarQueue.splice(i,1);for(const instance of [...arenaInstances.values()]){const respawned=TVT.tickTvtRespawns(instance,now);TVT.tickTvtStatusExpiry(instance,now);TVT.tickTvtThorns(instance,now,secureRandom);if(respawned.length)for(const charId of respawned){const m=instance.players.get(charId);sendToWorldBossMember(m,{type:'tvt_respawn',x:m.x,y:m.y,hp:m.hp,maxHp:m.maxHp})}const end=TVT.checkTvtEnd(instance,now);if(end)finishCompetitiveArena(instance,end.reason,end.winner).catch(err=>console.error('arena_finish_error',err.message))}}
 function eventStatePayload(player,now=Date.now()) {
   const state={type:'event_state',...eventManager.snapshot(now)},event=state.current,entries=event&&eventManager.registrations.get(event.id);
   if(player&&player.authed&&player.charId){const registration=entries&&entries.get(player.charId);state.registration={eventId:event.id,registered:!!registration,groupId:registration&&registration.groupId||null};const code=memberParty.get(player.userId),party=code&&partyView(code);state.party=party?{code:party.code,size:party.members.length,isLeader:party.ownerId===player.userId}:null}
@@ -4653,20 +4662,30 @@ wss.on('connection', ws => {
       if(!cfg){send(ws,{type:'arena_queue_result',ok:false,error:'Modo inválido'});return}
       if(!p.authed||!p.charId){send(ws,{type:'arena_queue_result',ok:false,error:'Entre com um personagem para usar a Arena'});return}
       if(p.map!=='vila'){send(ws,{type:'arena_queue_result',ok:false,error:'Volte à Vila Inicial para usar a Arena'});return}
-      if(mode==='guild_war'){send(ws,{type:'arena_queue_result',ok:false,error:'Guild War exige formação da guilda'});return}
+      if(mode==='guild_war'){
+        if(!p.guildId){send(ws,{type:'arena_queue_result',ok:false,error:'Você precisa estar em uma guilda'});return}
+        if(!['leader','officer'].includes(p.guildRole)){send(ws,{type:'arena_queue_result',ok:false,error:'Somente líder ou oficial pode procurar Guild War'});return}
+        const roster=[...clients.values()].filter(q=>q.authed&&q.guildId===p.guildId&&q.map==='vila'&&!arenaByChar.has(q.charId)).filter((q,i,a)=>a.findIndex(x=>x.charId===q.charId)===i).slice(0,COMPETITIVE.GUILD_WAR.maxMembers);
+        if(!COMPETITIVE.validateGuildWarRoster(roster.map(q=>q.charId))){send(ws,{type:'arena_queue_result',ok:false,error:'Reúna de 3 a 5 membros da guilda na Vila'});return}
+        let entry=guildWarQueue.find(x=>x.guildId===p.guildId);if(!entry){entry={guildId:p.guildId,joinedAt:Date.now(),roster};guildWarQueue.push(entry)}
+        send(ws,{type:'arena_queue_result',ok:true,mode,status:'queued',teamSize:entry.roster.length});
+        const rival=guildWarQueue.find(x=>x.guildId!==p.guildId&&Date.now()-x.joinedAt<=COMPETITIVE.GUILD_WAR.challengeTtlMs);
+        if(rival){const own=entry;for(const x of [own,rival]){const i=guildWarQueue.indexOf(x);if(i>=0)guildWarQueue.splice(i,1)}const n=Math.min(own.roster.length,rival.roster.length),red=own.roster.slice(0,n),blue=rival.roster.slice(0,n),members=new Map();for(const q of [...red,...blue])members.set(q.charId,{userId:q.userId,charId:q.charId,name:q.name,cls:q.cls,lvl:q.lvl,snapshot:q.combat,rating:q.competitive.rating,competitive:q.competitive});const teams={red:red.map(q=>({charId:q.charId})),blue:blue.map(q=>({charId:q.charId}))},matchId=crypto.randomBytes(6).toString('hex'),instance=ARENA_RUNTIME.createArenaInstance({id:matchId,mode,teams,members});arenaInstances.set(instance.mapId,instance);tvtInstances.set(instance.mapId,instance);const st=mapState(instance.mapId);st.isTvt=true;st.tvt=instance;for(const member of instance.players.values()){const active=activeCharacterForUser(member.userId);if(!active)continue;instance.previousLocations.set(member.charId,{map:active.p.map,x:active.p.x,y:active.p.y});tvtByChar.set(member.charId,instance.mapId);arenaByChar.set(member.charId,instance.mapId);for(const[sock,q]of clients)if(q.charId===member.charId){q.map=instance.mapId;q.x=member.x;q.y=member.y;send(sock,{type:'arena_match_found',matchId,mode,team:member.team});send(sock,{type:'tvt_enter',mapId:instance.mapId,team:member.team,spawn:{x:member.x,y:member.y},scoreLimit:instance.scoreLimit,expiresAt:instance.expiresAt,competitive:true,mode})}}}
+        return;
+      }
       const previous=arenaQueuedByChar.get(p.charId);
       if(previous&&previous!==mode){const old=arenaQueues.get(previous)||[];arenaQueues.set(previous,old.filter(e=>e.charId!==p.charId))}
       const queue=arenaQueues.get(mode),existing=queue.find(e=>e.charId===p.charId);
       if(!existing){queue.push({charId:p.charId,userId:p.userId,name:p.name,cls:p.cls,rating:p.competitive.rating,powerScore:TVT.powerScore(p.combat,{}),joinedAt:Date.now()});arenaQueuedByChar.set(p.charId,mode)}
       send(ws,{type:'arena_queue_result',ok:true,mode,status:'queued',teamSize:cfg.teamSize,position:queue.findIndex(e=>e.charId===p.charId)+1});
       const group=ARENA_MATCH.bestGroup(queue,mode);
-      if(group){const ids=new Set(group.map(e=>e.charId)),teams=ARENA_MATCH.splitTeams(group,mode);arenaQueues.set(mode,queue.filter(e=>!ids.has(e.charId)));for(const id of ids)arenaQueuedByChar.delete(id);const matchId='arena#'+crypto.randomBytes(4).toString('hex');for(const e of group)for(const [sock,q] of clients)if(q.charId===e.charId)send(sock,{type:'arena_match_found',matchId,mode,team:teams.red.some(x=>x.charId===e.charId)?'red':'blue',players:group.map(x=>({charId:x.charId,name:x.name,cls:x.cls,rating:x.rating}))})}
+      if(group){const ids=new Set(group.map(e=>e.charId)),teams=ARENA_MATCH.splitTeams(group,mode);arenaQueues.set(mode,queue.filter(e=>!ids.has(e.charId)));for(const id of ids)arenaQueuedByChar.delete(id);const matchId=crypto.randomBytes(6).toString('hex'),members=new Map();for(const e of group){const active=[...clients.values()].find(q=>q.charId===e.charId&&q.authed);if(active)members.set(e.charId,{userId:active.userId,charId:e.charId,name:active.name,cls:active.cls,lvl:active.lvl,snapshot:active.combat,rating:e.rating,competitive:active.competitive})}if(members.size===group.length){const instance=ARENA_RUNTIME.createArenaInstance({id:matchId,mode,teams,members});arenaInstances.set(instance.mapId,instance);tvtInstances.set(instance.mapId,instance);const state=mapState(instance.mapId);state.isTvt=true;state.tvt=instance;for(const member of instance.players.values()){const active=activeCharacterForUser(member.userId);if(!active)continue;instance.previousLocations.set(member.charId,{map:active.p.map,x:active.p.x,y:active.p.y});tvtByChar.set(member.charId,instance.mapId);arenaByChar.set(member.charId,instance.mapId);for(const[sock,q]of clients)if(q.charId===member.charId&&q.userId===member.userId){q.map=instance.mapId;q.x=member.x;q.y=member.y;send(sock,{type:'arena_match_found',matchId,mode,team:member.team,players:group.map(x=>({charId:x.charId,name:x.name,cls:x.cls,rating:x.rating}))});send(sock,{type:'tvt_enter',mapId:instance.mapId,team:member.team,spawn:{x:member.x,y:member.y},scoreLimit:instance.scoreLimit,expiresAt:instance.expiresAt,competitive:true,mode})}}}}
     } else if (msg.type === 'arena_queue_leave') {
       const mode=arenaQueuedByChar.get(p.charId);if(mode){arenaQueues.set(mode,(arenaQueues.get(mode)||[]).filter(e=>e.charId!==p.charId));arenaQueuedByChar.delete(p.charId)}
-      send(ws,{type:'arena_queue_result',ok:true,mode:mode||null,status:'left'});
+      if(p.guildId)for(let i=guildWarQueue.length-1;i>=0;i--)if(guildWarQueue[i].guildId===p.guildId)guildWarQueue.splice(i,1);
+      send(ws,{type:'arena_queue_result',ok:true,mode:mode||(p.guildId?'guild_war':null),status:'left'});
     } else if (msg.type === 'arena_ranking') {
-      const rows=[];for(const [,q] of clients){if(!q.authed)continue;const c=COMPETITIVE.sanitizeCompetitive(q.competitive);rows.push({name:q.name||'Aventureiro',cls:q.cls||'guerreiro',rating:c.rating,division:COMPETITIVE.divisionFor(c.rating)})}
-      rows.sort((a,b)=>b.rating-a.rating);send(ws,{type:'arena_ranking',rows:rows.slice(0,50)});
+      try{const db=await supabase('characters',{query:'?select=name,cls,save&limit=500'}),rows=db.map(r=>{const c=COMPETITIVE.sanitizeCompetitive(r.save?.competitive);return{name:r.name||'Aventureiro',cls:r.cls||'guerreiro',rating:c.rating,division:COMPETITIVE.divisionFor(c.rating)}}).sort((a,b)=>b.rating-a.rating);send(ws,{type:'arena_ranking',rows:rows.slice(0,50)})}catch(err){console.error('arena_ranking_error',err.message);send(ws,{type:'arena_ranking',rows:[]})}
     } else     if (msg.type === 'event_status') {
       send(ws,eventStatePayload(p));
     } else if (msg.type === 'event_register') {
@@ -4910,7 +4929,7 @@ wss.on('connection', ws => {
           tvtPublicSync(instance);
           if(result.kind==='damage'&&!result.evaded&&result.blocked!=='protection')broadcastMap(mapEarly,{type:'tvt_hit',attackerId:p.charId,targetId:result.targetId,damage:result.damage,skill:result.skill,killed:!!result.killed});
           const end=TVT.checkTvtEnd(instance,Date.now());
-          if(end){instance.winner=end.winner;grantTvtRewards(instance).catch(err=>console.error('tvt_reward_error',err.message));finishTvtInstance(instance,end.reason,end.winner)}
+          if(end){instance.winner=end.winner;if(instance.isCompetitive)finishCompetitiveArena(instance,end.reason,end.winner).catch(err=>console.error('arena_finish_error',err.message));else{grantTvtRewards(instance).catch(err=>console.error('tvt_reward_error',err.message));finishTvtInstance(instance,end.reason,end.winner)}}
         }
         return;
       }
@@ -4974,6 +4993,7 @@ wss.on('connection', ws => {
     // pertencendo a instancia; reconectar com o mesmo userId/charId acha
     // ela de novo em handleWsJoin.
     const tvtMap=p.charId&&tvtByChar.get(p.charId),tvtInstance=tvtMap&&tvtInstances.get(tvtMap),tvtMember=tvtInstance&&tvtInstance.players.get(p.charId);if(tvtMember&&wasAuthoritative)tvtMember.online=false;
+    if(p.charId&&wasAuthoritative&&!tvtMember){const aq=arenaQueuedByChar.get(p.charId);if(aq){arenaQueues.set(aq,(arenaQueues.get(aq)||[]).filter(e=>e.charId!==p.charId));arenaQueuedByChar.delete(p.charId)}for(let i=guildWarQueue.length-1;i>=0;i--)if(guildWarQueue[i].roster.some(q=>q.charId===p.charId))guildWarQueue.splice(i,1)}
     // Fase 5.13.1: desconectar nao termina a masmorra nem afeta quem mais
     // esta dentro -- so marca esse membro offline (mesma regra de
     // World Boss/TvT). Reconectar acha a mesma instancia de novo (ver
@@ -5008,6 +5028,7 @@ setInterval(()=>{
   eventManager.tick(Date.now());
   tickWorldBoss(Date.now());
   tickTvt(Date.now());
+  tickCompetitiveArena(Date.now());
 },1000).unref();
 
 // Sweeps leves e nao tempo-criticos (convites de guilda vencidos) --
