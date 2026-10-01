@@ -12,6 +12,7 @@ const EVENT_DATA = require('./game-data/event-manager.js');
 const WORLD_BOSS = require('./game-data/world-boss.js');
 const TVT = require('./game-data/tvt.js');
 const COMPETITIVE = require('./game-data/competitive-data.js');
+const ARENA_MATCH = require('./game-data/arena-matchmaking.js');
 const GUILD = require('./game-data/guild.js');
 const BESTIARY = require('./game-data/bestiary.js');
 const RANKINGS = require('./game-data/rankings.js');
@@ -33,6 +34,8 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPAB
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const authAttempts = new Map();
 const clients = new Map();
+const arenaQueues = new Map(ARENA_MATCH.QUEUE_MODES.map(mode => [mode, []]));
+const arenaQueuedByChar = new Map();
 const maps = new Map();
 const activeCharacterSockets = new Map();
 const characterRuntime = new Map();
@@ -3646,7 +3649,7 @@ async function handleWsJoin(ws, msg) {
       combat, hp:remembered?Math.min(combat.maxHp,remembered.hp):Math.min(combat.maxHp,realSave.hp||combat.maxHp), maxHp:combat.maxHp,
       dead:!!remembered?.dead, respawnAt:remembered?.respawnAt||0, skillCd:remembered?.skillCd||{}, basicCdUntil:remembered?.basicCdUntil||0,
       lastMoveAt:Date.now(), gameplayAuthority:true, packetWindows:new Map(), sessionKey:crypto.randomUUID(),
-      quest:realSave?.quest||0, gunlock:realSave?.gunlock||{}, _dirty:false, _lastSavedAt:0,
+      quest:realSave?.quest||0, gunlock:realSave?.gunlock||{}, competitive:COMPETITIVE.sanitizeCompetitive(realSave?.competitive), _dirty:false, _lastSavedAt:0,
     };
     if(p.charId){
       const old=activeCharacterSockets.get(p.charId),oldP=old&&old!==ws?clients.get(old):null;
@@ -4645,7 +4648,26 @@ wss.on('connection', ws => {
     if(p.authed&&['mob_damage','player_damage','cast_skill','state'].includes(msg.type)&&['atk','damage','hp','maxHp','sk'].some(k=>Object.prototype.hasOwnProperty.call(msg,k)))securityReject(p,'FORGED_COMBAT');
     const packetPolicy={state:[35,1000],mob_damage:[16,1000],player_damage:[16,1000],cast_skill:[10,1000],event_register:[4,5000],event_unregister:[4,5000],dungeon_enter:[3,5000],dungeon_queue_join:[4,5000],dungeon_queue_leave:[4,5000]};
     if(packetPolicy[msg.type]&&!allowPacket(p,msg.type,...packetPolicy[msg.type]))return;
-    if (msg.type === 'event_status') {
+    if (msg.type === 'arena_queue') {
+      const mode=cleanText(msg.mode,16),cfg=COMPETITIVE.ARENA_MODES[mode];
+      if(!cfg){send(ws,{type:'arena_queue_result',ok:false,error:'Modo inválido'});return}
+      if(!p.authed||!p.charId){send(ws,{type:'arena_queue_result',ok:false,error:'Entre com um personagem para usar a Arena'});return}
+      if(p.map!=='vila'){send(ws,{type:'arena_queue_result',ok:false,error:'Volte à Vila Inicial para usar a Arena'});return}
+      if(mode==='guild_war'){send(ws,{type:'arena_queue_result',ok:false,error:'Guild War exige formação da guilda'});return}
+      const previous=arenaQueuedByChar.get(p.charId);
+      if(previous&&previous!==mode){const old=arenaQueues.get(previous)||[];arenaQueues.set(previous,old.filter(e=>e.charId!==p.charId))}
+      const queue=arenaQueues.get(mode),existing=queue.find(e=>e.charId===p.charId);
+      if(!existing){queue.push({charId:p.charId,userId:p.userId,name:p.name,cls:p.cls,rating:p.competitive.rating,powerScore:TVT.powerScore(p.combat,{}),joinedAt:Date.now()});arenaQueuedByChar.set(p.charId,mode)}
+      send(ws,{type:'arena_queue_result',ok:true,mode,status:'queued',teamSize:cfg.teamSize,position:queue.findIndex(e=>e.charId===p.charId)+1});
+      const group=ARENA_MATCH.bestGroup(queue,mode);
+      if(group){const ids=new Set(group.map(e=>e.charId)),teams=ARENA_MATCH.splitTeams(group,mode);arenaQueues.set(mode,queue.filter(e=>!ids.has(e.charId)));for(const id of ids)arenaQueuedByChar.delete(id);const matchId='arena#'+crypto.randomBytes(4).toString('hex');for(const e of group)for(const [sock,q] of clients)if(q.charId===e.charId)send(sock,{type:'arena_match_found',matchId,mode,team:teams.red.some(x=>x.charId===e.charId)?'red':'blue',players:group.map(x=>({charId:x.charId,name:x.name,cls:x.cls,rating:x.rating}))})}
+    } else if (msg.type === 'arena_queue_leave') {
+      const mode=arenaQueuedByChar.get(p.charId);if(mode){arenaQueues.set(mode,(arenaQueues.get(mode)||[]).filter(e=>e.charId!==p.charId));arenaQueuedByChar.delete(p.charId)}
+      send(ws,{type:'arena_queue_result',ok:true,mode:mode||null,status:'left'});
+    } else if (msg.type === 'arena_ranking') {
+      const rows=[];for(const [,q] of clients){if(!q.authed)continue;const c=COMPETITIVE.sanitizeCompetitive(q.competitive);rows.push({name:q.name||'Aventureiro',cls:q.cls||'guerreiro',rating:c.rating,division:COMPETITIVE.divisionFor(c.rating)})}
+      rows.sort((a,b)=>b.rating-a.rating);send(ws,{type:'arena_ranking',rows:rows.slice(0,50)});
+    } else     if (msg.type === 'event_status') {
       send(ws,eventStatePayload(p));
     } else if (msg.type === 'event_register') {
       const eventId=cleanText(msg.eventId,96),candidate=EVENT_DATA.scheduleAfter(Date.now(),2).find(e=>e.id===eventId);
