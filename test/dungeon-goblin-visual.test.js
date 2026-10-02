@@ -80,7 +80,8 @@ test('buildMasmorra: o rework visual so ativa pra zoneId==="floresta" (Covil dos
   const body = extractFn('buildMasmorra');
   assert.match(body, /isGoblinRework\s*=\s*zoneId==='floresta'&&!!DUN2_IMG/, 'o gate precisa ser exatamente zoneId==="floresta" -- nunca theme, nunca outro criterio que poderia acidentalmente pegar outra masmorra');
   assert.match(body, /if\(isGoblinRework\)paintGoblinDungeonTiles/);
-  assert.match(body, /if\(isGoblinRework\)decorateGoblinDungeon\(w,rooms,pr\);\s*\n\s*else decorateMasmorra\(w,rooms,cfg\.theme,pr\)/, 'decorateMasmorra precisa continuar sendo chamada pras outras 6 masmorras (else), nunca substituida globalmente');
+  assert.match(body, /isKaykitMarmoraria\s*=\s*zoneId==='vulcao'&&!!MARMORARIA_KAYKIT_IMG/, 'a Marmoraria KayKit deve ficar restrita ao vulcao');
+  assert.match(body, /if\(isGoblinRework\)decorateGoblinDungeon\(w,rooms,pr\);\s*\n\s*else if\(!isKaykitMarmoraria\) decorateMasmorra\(w,rooms,cfg\.theme,pr\)/, 'decorateMasmorra continua nas outras 5 masmorras; floresta usa atlas e vulcao usa KayKit');
   // colisao continua exatamente a mesma pra TODAS as masmorras, goblin
   // inclusive -- addBlock(layout.rects) roda ANTES do branch novo, sem
   // nenhuma condicao nova em cima dela.
