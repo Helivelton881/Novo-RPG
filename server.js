@@ -3393,7 +3393,7 @@ const DUNGEON_IDLE_MS = 30 * 60 * 1000, DUNGEON_MAX_LIFE_MS = 2 * 60 * 60 * 1000
 // boss esta entrelacado no FSM de combate de cada mob no cliente; reusa-lo
 // marcaria bossDefeated incorretamente e concederia loot de chefe cedo
 // demais -- documentado em LEIA-PRIMEIRO.md "Fase 5.16.3").
-const DUNGEON_ROOM_MOB_COUNTS = { corredorInicial: [2, 3], encruzilhada: [3, 5], salaEsquerda: [3, 4], salaDireita: [4, 6], salaElite: [2, 3] };
+const DUNGEON_ROOM_MOB_COUNTS = { armadilhas:[2,3], encruzilhada:[3,5], cripta:[3,4], prisao:[4,6], arsenal:[2,3], secreta:[1,2], salaElite:[2,3], antecamara:[1,2] };
 // Fase 5.13.1 -- Dungeon em Party: nucleo real de criacao de instancia,
 // aceita 1 a 4 membros reais (nunca confia em memberIds do cliente --
 // quem chama isto ja resolveu cada membro via activeCharacterForUser +

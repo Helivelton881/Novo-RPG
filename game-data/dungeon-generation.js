@@ -77,30 +77,33 @@ const T = 48, WALL = 1;
 // cima-pra-baixo da imagem de referencia. Ainda cabe no teto global de
 // mundo (60x44 tiles) -- ver LEIA-PRIMEIRO.md "Fase 5.16.3".
 const DUNGEON_ROOMS_V2 = {
-  entrada:         { x:22, y:37, w:16, h:6 },
-  corredorInicial: { x:25, y:31, w:10, h:6 },
-  encruzilhada:    { x:24, y:23, w:12, h:8 },
-  salaEsquerda:    { x:2,  y:23, w:22, h:8 },
-  salaDireita:     { x:36, y:23, w:22, h:8 },
-  salaElite:       { x:21, y:15, w:18, h:8 },
-  corredorFinal:   { x:27, y:11, w:6,  h:4 },
-  boss:            { x:20, y:2,  w:20, h:9 },
-  saida:           { x:40, y:2,  w:10, h:8 },
+  entrada:         { x:20, y:37, w:20, h:5 },
+  armadilhas:      { x:23, y:29, w:14, h:6 },
+  encruzilhada:    { x:22, y:21, w:16, h:5 },
+  cripta:          { x:4,  y:20, w:12, h:7 },
+  prisao:          { x:44, y:20, w:12, h:7 },
+  arsenal:         { x:43, y:29, w:12, h:5 },
+  secreta:         { x:5,  y:29, w:10, h:5 },
+  salaElite:       { x:20, y:13, w:20, h:6 },
+  antecamara:      { x:22, y:7,  w:16, h:4 },
+  boss:            { x:20, y:1,  w:20, h:6 },
+  saida:           { x:40, y:2,  w:8,  h:4 },
 };
-// [idA, ladoDeSaidaEmA, idB, larguraDaPassagem(tiles)]
 const DUNGEON_CONNECTIONS_V2 = [
-  ['entrada','N','corredorInicial',4],
-  ['corredorInicial','N','encruzilhada',4],
-  ['encruzilhada','W','salaEsquerda',5],
-  ['encruzilhada','E','salaDireita',5],
-  ['encruzilhada','N','salaElite',6],
-  ['salaElite','N','corredorFinal',4],
-  ['corredorFinal','N','boss',4],
-  ['boss','E','saida',6],
+  ['entrada','N','armadilhas',5],
+  ['armadilhas','N','encruzilhada',5],
+  ['encruzilhada','W','cripta',5],
+  ['encruzilhada','E','prisao',5],
+  ['armadilhas','E','arsenal',4],
+  ['armadilhas','W','secreta',4],
+  ['encruzilhada','N','salaElite',5],
+  ['salaElite','N','antecamara',5],
+  ['antecamara','N','boss',5],
+  ['boss','E','saida',4],
 ];
 // Salas que recebem monstros comuns (nunca entrada/corredores/saida --
 // entrada e area segura de proposito, corredores sao so passagem).
-const DUNGEON_MOB_ROOMS_V2 = ['corredorInicial', 'encruzilhada', 'salaEsquerda', 'salaDireita', 'salaElite'];
+const DUNGEON_MOB_ROOMS_V2 = ['armadilhas','encruzilhada','cripta','prisao','arsenal','secreta','salaElite','antecamara'];
 
 function wallSegments(rangeFrom, rangeTo, openings) {
   let segments = [[rangeFrom, rangeTo]];
