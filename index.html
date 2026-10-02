@@ -7119,11 +7119,11 @@ function buildMasmorra(zoneId,seed,roster){
   // nunca duas matematicas que podem divergir.
   for(const r of layout.rects)addBlock(r.x,r.y,r.w,r.h);
   paintGround(cfg.theme,true);w.ground=ground;
-  // Marmoraria KayKit: o Vulcao usa a renderizacao oficial exportada do
-  // kaykit-master-dungeon-final.blend, mantendo a geometria/colisao
-  // server-authoritative existente como fonte de verdade do gameplay.
-  const isKaykitMarmoraria=zoneId==='vulcao'&&!!MARMORARIA_KAYKIT_IMG;
-  if(isKaykitMarmoraria){
+  // Projeto KayKit global: todas as 7 masmorras usam o mapa mestre exportado
+  // do kaykit-master-dungeon-final.blend. A geometria/colisao e o roster
+  // continuam server-authoritative; muda somente a apresentacao visual.
+  const isKaykitDungeon=!!MARMORARIA_KAYKIT_IMG;
+  if(isKaykitDungeon){
     const gg=ground.getContext('2d');gg.imageSmoothingEnabled=true;
     gg.drawImage(MARMORARIA_KAYKIT_IMG,0,0,WPX,HPX);
   }
@@ -7132,12 +7132,12 @@ function buildMasmorra(zoneId,seed,roster){
   // uma segunda geometria), substitui inteiramente a decoracao
   // procedural pra esta masmorra especifica. As outras 6 continuam
   // exatamente como sempre (decorateMasmorra/paintGround procedural).
-  const isGoblinRework=zoneId==='floresta'&&!!DUN2_IMG;
+  const isGoblinRework=zoneId==='floresta'&&!isKaykitDungeon&&!!DUN2_IMG;
   if(isGoblinRework)paintGoblinDungeonTiles(ground.getContext('2d'),rooms);
   addStatic(SP.portal,w.portal.x,w.portal.y);addBlock(w.portal.x-40,w.portal.y-30,80,30);
   const pr=mulberry(Number.isFinite(seed)?seed:555+zoneId.length);
   if(isGoblinRework)decorateGoblinDungeon(w,rooms,pr);
-  else if(!isKaykitMarmoraria) decorateMasmorra(w,rooms,cfg.theme,pr);
+  else if(!isKaykitDungeon) decorateMasmorra(w,rooms,cfg.theme,pr);
   if(Array.isArray(roster)){
     // roster server-autoritativo (Fase 5.2): tipo/nivel/HP/posicao de cada
     // mob vem inteiro do servidor, nunca sorteado aqui. Fase 5.13: posicao
