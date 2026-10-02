@@ -4707,7 +4707,17 @@ wss.on('connection', ws => {
       if(result.ok&&result.members)for(const member of result.members)sendToWorldBossMember(member,eventStatePayload(activeCharacterForUser(member.userId)?.p||member));
     } else if (msg.type === 'state') {
       const map = cleanText(msg.map,24);
-      if (!isAllowedMap(map)) { securityReject(p,'INVALID_MAP'); return; }
+      if (!isAllowedMap(map)) {
+        securityReject(p,'INVALID_MAP');
+        const ds = DUNGEON_MAP_RE.test(p.map) ? maps.get(p.map) : null;
+        const dm = ds?.isDungeon ? ds.members?.get(p.charId) : null;
+        if (dm && dm.userId === p.userId && dm.inside !== false) {
+          sendDungeonStateTo(ws, ds, {resync:true});
+        } else {
+          send(ws,{type:'position_resync',x:p.x,y:p.y,map:p.map});
+        }
+        return;
+      }
       // Instancia de masmorra (`_d#id`): so pode "continuar" na que o
       // proprio dungeon_enter ja colocou o personagem (p.map) -- nunca
       // trocar pra outra instancia, nem pra `_d` sem instancia, so
