@@ -7105,7 +7105,7 @@ function decorateGoblinDungeon(w,rooms,pr){
 function buildMasmorra(zoneId,seed,roster){
   const cfg=MASMORRA_CFG[zoneId],id=zoneId+'_d';
   const w=newWorld(id);worlds[id]=w;
-  const layout=DUNGEON_GEN.dungeonLayout(seed);
+  const layout=DUNGEON_GEN.dungeonLayoutForZone(zoneId,seed);
   const rooms=layout.rooms;
   w.start={x:layout.start.x,y:layout.start.y};
   w.portal={x:layout.exitPoint.x,y:layout.exitPoint.y,to:zoneId};

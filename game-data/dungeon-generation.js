@@ -178,6 +178,52 @@ function dungeonLayout(seed) {
   return buildFixedDungeonLayout();
 }
 
+// KayKit master dungeon -- layout isolado da Forja Ancestral/Marmoraria.
+// Derivado dos volumes NAV_* e markers do kaykit-master-dungeon-final.blend.
+// Nao altera o layout legado das outras seis masmorras.
+let _cachedKaykitLayout = null;
+function kaykitDungeonLayout() {
+  if (_cachedKaykitLayout) return _cachedKaykitLayout;
+  const R = {
+    entrada:{x:22,y:37,w:16,h:5}, armadilhas:{x:24,y:29,w:12,h:6},
+    encruzilhada:{x:23,y:21,w:14,h:5}, cripta:{x:5,y:20,w:11,h:6},
+    prisao:{x:44,y:20,w:11,h:6}, arsenal:{x:43,y:29,w:11,h:5},
+    secreta:{x:6,y:29,w:9,h:5}, salaElite:{x:22,y:13,w:16,h:6},
+    antecamara:{x:23,y:7,w:14,h:4}, boss:{x:22,y:1,w:16,h:6},
+    saida:{x:38,y:2,w:8,h:4}
+  };
+  const C = [
+    ['entrada','N','armadilhas',4],['armadilhas','N','encruzilhada',4],
+    ['armadilhas','E','arsenal',3],['armadilhas','W','secreta',3],
+    ['encruzilhada','W','cripta',4],['encruzilhada','E','prisao',4],
+    ['encruzilhada','N','salaElite',4],['salaElite','N','antecamara',4],
+    ['antecamara','N','boss',4],['boss','E','saida',3]
+  ];
+  const openings = {};
+  const add=(id,side,a,b)=>{const k=id+side;(openings[k]=openings[k]||[]).push([a,b]);};
+  for(const [a,side,b,pass] of C){
+    const A=R[a],B=R[b],opp={N:'S',S:'N',E:'W',W:'E'}[side];
+    if(side==='E'||side==='W'){const f=Math.max(A.y,B.y),t=Math.min(A.y+A.h,B.y+B.h),n=t-f;if(n<=0)continue;const q=Math.min(pass,n),x=f+(n-q)/2;add(a,side,x,x+q);add(b,opp,x,x+q);}
+    else {const f=Math.max(A.x,B.x),t=Math.min(A.x+A.w,B.x+B.w),n=t-f;if(n<=0)continue;const q=Math.min(pass,n),x=f+(n-q)/2;add(a,side,x,x+q);add(b,opp,x,x+q);}
+  }
+  const rects=[],push=(x,y,w,h)=>{if(w>.01&&h>.01)rects.push({x:Math.round(x*T),y:Math.round(y*T),w:Math.round(w*T),h:Math.round(h*T)});};
+  for(const id of Object.keys(R)){const r=R[id];
+    for(const [a,b] of wallSegments(r.x,r.x+r.w,openings[id+'N']||[]))push(a,r.y-WALL,b-a,WALL);
+    for(const [a,b] of wallSegments(r.x,r.x+r.w,openings[id+'S']||[]))push(a,r.y+r.h,b-a,WALL);
+    for(const [a,b] of wallSegments(r.y,r.y+r.h,openings[id+'W']||[]))push(r.x-WALL,a,WALL,b-a);
+    for(const [a,b] of wallSegments(r.y,r.y+r.h,openings[id+'E']||[]))push(r.x+r.w,a,WALL,b-a);
+  }
+  const center=id=>roomCenter(R[id]);
+  _cachedKaykitLayout={rects,start:center('entrada'),boss:center('boss'),exitPoint:center('saida'),rooms:R,
+    mobRooms:['armadilhas','encruzilhada','cripta','prisao','arsenal','secreta','salaElite','antecamara'],
+    connections:C,kaykit:true};
+  return _cachedKaykitLayout;
+}
+
+function dungeonLayoutForZone(zone, seed) {
+  return zone === 'vulcao' ? kaykitDungeonLayout() : dungeonLayout(seed);
+}
+
 // Fase 5.13.1 -- Dungeon em Party: multiplicador de HP de mob/chefe por
 // numero de participantes REAIS na instancia (nunca por membro nominal da
 // Party -- so quem realmente entrou). Ponto de partida pedido
@@ -191,7 +237,7 @@ function dungeonScaleFor(memberCount) {
 }
 
 const DUNGEON_GEN_DATA = {
-  mulberry, mazeGen, dungeonLayout, T, WALL,
+  mulberry, mazeGen, dungeonLayout, dungeonLayoutForZone, kaykitDungeonLayout, T, WALL,
   DUNGEON_ROOMS_V2, DUNGEON_CONNECTIONS_V2, DUNGEON_MOB_ROOMS_V2,
   roomCenter, roomRandomPoint, DUNGEON_PARTY_SCALE, dungeonScaleFor,
 };
