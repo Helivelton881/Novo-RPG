@@ -1011,7 +1011,7 @@ function buildVila(){
     // validar a proximidade da compra).
     {id:'relicario',nome:'Mercador de Relíquias',x:BALANCE_DATA.RELIC_SHOP.NPC.x,y:BALANCE_DATA.RELIC_SHOP.NPC.y,spriteKey:'mercador'}
   ];
-  npcDefs.forEach(n=>{const sk=n.spriteKey||n.id;n.img=n.id==='mestre_pvp'&&PVP_MASTER_IMG?PVP_MASTER_IMG:IMG[sk];n.w=n.id==='mestre_pvp'&&PVP_MASTER_IMG?76:SPR[sk].w;n.h=n.id==='mestre_pvp'&&PVP_MASTER_IMG?96:SPR[sk].h;NPCS.push(n);addBlock(n.x-11,n.y-9,22,9);clearZones.push([n.x,n.y,70])});
+  npcDefs.forEach(n=>{const sk=n.spriteKey||n.id;n.img=n.id==='mestre_pvp'&&PVP_MASTER_IMG?PVP_MASTER_IMG:IMG[sk];n.w=n.id==='mestre_pvp'&&PVP_MASTER_IMG?58:SPR[sk].w;n.h=n.id==='mestre_pvp'&&PVP_MASTER_IMG?100:SPR[sk].h;NPCS.push(n);addBlock(n.x-11,n.y-9,22,9);clearZones.push([n.x,n.y,70])});
   clearZones.push([PORTAL.x,PORTAL.y,110],[START.x,START.y,80],[28.5*T,23*T,120]);
 
   // árvores
@@ -4029,7 +4029,7 @@ function drawSlime(s){
 }
 function drawNpc(n){
   shadow(n.x,n.y,15,6);
-  ctx.drawImage(n.img,Math.round(n.x-n.w/2),Math.round(n.y-n.h));
+  if(n.id==='mestre_pvp'&&PVP_MASTER_IMG)ctx.drawImage(n.img,0,0,n.img.width,n.img.height,Math.round(n.x-n.w/2),Math.round(n.y-n.h),n.w,n.h);else ctx.drawImage(n.img,Math.round(n.x-n.w/2),Math.round(n.y-n.h));
   let news=false;
   if(n.id==='aldea')news=P.quest===0||P.quest===2;
   if(n.id==='mercador'||n.id==='sacerdotisa'||n.id==='ferreiro')news=false;
