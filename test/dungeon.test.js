@@ -211,11 +211,11 @@ test('DUNGEON_GEN: conexoes formam uma ARVORE enraizada em entrada (sem ciclo, t
 test('DUNGEON_GEN: a encruzilhada e um HUB de verdade -- abre pra sala esquerda, sala direita e sala de elite (3 filhos, nao mais so passagem)', () => {
   const conns = S.DUNGEON_GEN.DUNGEON_CONNECTIONS_V2;
   const children = conns.filter(([a]) => a === 'encruzilhada').map(([, , b]) => b);
-  assert.deepEqual(new Set(children), new Set(['cripta', 'prisao', 'salaElite']), 'encruzilhada deveria conectar exatamente com cripta, prisao e salaElite');
+  assert.deepEqual(new Set(children), new Set(['salaEsquerda', 'salaDireita', 'salaElite']), 'encruzilhada deveria conectar exatamente com salaEsquerda, salaDireita e salaElite');
 });
-test('DUNGEON_GEN: cripta e prisao sao alas opcionais (dead-end) -- nao fazem parte do caminho obrigatorio ate o chefe', () => {
+test('DUNGEON_GEN: sala esquerda e sala direita sao alas opcionais (dead-end) -- nao fazem parte do caminho obrigatorio ate o chefe', () => {
   const conns = S.DUNGEON_GEN.DUNGEON_CONNECTIONS_V2;
-  for (const wing of ['cripta', 'prisao']) {
+  for (const wing of ['salaEsquerda', 'salaDireita']) {
     const touches = conns.filter(([a, , b]) => a === wing || b === wing);
     assert.equal(touches.length, 1, `${wing} deveria ter exatamente 1 conexao (dead-end, nao passagem)`);
   }
