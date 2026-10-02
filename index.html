@@ -834,12 +834,14 @@ let DUN_IMG=null;
 // de volta pro visual procedural antigo -- nunca uma tela quebrada.
 let DUN2_IMG=null;
 let PVP_MASTER_IMG=null;
+let MARMORARIA_KAYKIT_IMG=null;
 const loadImg = src => new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=rej;i.src=src});
 async function loadAssets(){
   await Promise.all(Object.keys(SPR).map(async k=>{IMG[k]=await loadImg(SPR[k].img)}));
   try{DUN_IMG=await loadImg('./tileset-masmorras-original.png')}catch(e){console.warn('Tileset das masmorras indisponível; usando cenário procedural.',e)}
   try{DUN2_IMG=await loadImg('./assets/dungeon-goblin-atlas.png')}catch(e){console.warn('Atlas do Covil dos Goblins indisponível; usando cenário procedural.',e)}
   try{PVP_MASTER_IMG=await loadImg('./assets/pvp-master-sprite.png')}catch(e){console.warn('Sprite Mestre do PvP pendente; usando Guarda Real como fallback.',e)}
+  try{MARMORARIA_KAYKIT_IMG=await loadImg('./assets/marmoraria-kaykit-map.png')}catch(e){console.warn('Mapa KayKit da Marmoraria indisponivel; usando dungeon procedural.',e)}
 }
 
 /* ================= construção do mundo ================= */
@@ -7117,6 +7119,14 @@ function buildMasmorra(zoneId,seed,roster){
   // nunca duas matematicas que podem divergir.
   for(const r of layout.rects)addBlock(r.x,r.y,r.w,r.h);
   paintGround(cfg.theme,true);w.ground=ground;
+  // Marmoraria KayKit: o Vulcao usa a renderizacao oficial exportada do
+  // kaykit-master-dungeon-final.blend, mantendo a geometria/colisao
+  // server-authoritative existente como fonte de verdade do gameplay.
+  const isKaykitMarmoraria=zoneId==='vulcao'&&!!MARMORARIA_KAYKIT_IMG;
+  if(isKaykitMarmoraria){
+    const gg=ground.getContext('2d');gg.imageSmoothingEnabled=true;
+    gg.drawImage(MARMORARIA_KAYKIT_IMG,0,0,WPX,HPX);
+  }
   // Covil dos Goblins (zoneId==='floresta'): rework visual completo --
   // pipeline de tile real por cima do MESMO kind[]/layout.rects (nunca
   // uma segunda geometria), substitui inteiramente a decoracao
@@ -7127,7 +7137,7 @@ function buildMasmorra(zoneId,seed,roster){
   addStatic(SP.portal,w.portal.x,w.portal.y);addBlock(w.portal.x-40,w.portal.y-30,80,30);
   const pr=mulberry(Number.isFinite(seed)?seed:555+zoneId.length);
   if(isGoblinRework)decorateGoblinDungeon(w,rooms,pr);
-  else decorateMasmorra(w,rooms,cfg.theme,pr);
+  else if(!isKaykitMarmoraria) decorateMasmorra(w,rooms,cfg.theme,pr);
   if(Array.isArray(roster)){
     // roster server-autoritativo (Fase 5.2): tipo/nivel/HP/posicao de cada
     // mob vem inteiro do servidor, nunca sorteado aqui. Fase 5.13: posicao
