@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const html=fs.readFileSync(require.resolve('../index.html'),'utf8');
 const ui=fs.readFileSync(require.resolve('../game-data/arena-ui.js'),'utf8');
 const server=fs.readFileSync(require.resolve('../server.js'),'utf8');
-test('7.8 NPC Mestre do PvP fica ao lado da Sacerdotisa',()=>{assert.match(html,/id:'mestre_pvp'.*x:14\.1\*T,y:24\.6\*T/);assert.match(html,/id:'sacerdotisa'.*x:11\.3\*T,y:24\.6\*T/)});
+test('7.8 NPC Mestre do PvP fica na praca sul indicada no gameplay',()=>{assert.match(html,/id:'mestre_pvp'.*x:9\.3\*T,y:32\.2\*T/);assert.match(html,/phase=time\*2\.2.*bob=.*breath=/)});
 test('7.8 NPC abre Arena deliberadamente',()=>{assert.match(html,/npc\.id==='mestre_pvp'.*openArena/);assert.match(html,/function openArena/)});
 test('7.8 possui cinco abas e filas 1x1 3x3 Guild War',()=>{for(const x of ['arena','3v3','guild','ranking','rewards'])assert.match(ui,new RegExp(x));for(const x of ['duel','trio','guild_war'])assert.match(ui,new RegExp(x))});
 test('7.8 sprite proprio tem caminho fixo e fallback seguro',()=>{assert.match(html,/assets\/pvp-master-sprite\.png/);assert.match(html,/PVP_MASTER_IMG/);assert.match(html,/Guarda Real como fallback/)});

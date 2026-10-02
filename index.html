@@ -998,7 +998,7 @@ function buildVila(){
     {id:'mercador',nome:'Mercador',x:22.4*T,y:12.9*T},
     {id:'guarda',nome:'Guarda Real',x:26.9*T,y:25.5*T},
     {id:'sacerdotisa',nome:'Sacerdotisa',x:11.3*T,y:24.6*T},
-    {id:'mestre_pvp',nome:'Mestre do PvP',x:14.1*T,y:24.6*T,spriteKey:'guarda'},
+    {id:'mestre_pvp',nome:'Mestre do PvP',x:9.3*T,y:32.2*T,spriteKey:'guarda'},
     // Fase 5.4: sem sprite proprio ainda (sem assets novos nesta fase) --
     // reaproveita o visual do 'guarda' (spriteKey), so a janela/dialogo e
     // diferente. Posicionado perto do mercador (mesma area de comercio da
@@ -4029,7 +4029,7 @@ function drawSlime(s){
 }
 function drawNpc(n){
   shadow(n.x,n.y,15,6);
-  if(n.id==='mestre_pvp'&&PVP_MASTER_IMG)ctx.drawImage(n.img,0,0,n.img.width,n.img.height,Math.round(n.x-n.w/2),Math.round(n.y-n.h),n.w,n.h);else ctx.drawImage(n.img,Math.round(n.x-n.w/2),Math.round(n.y-n.h));
+  if(n.id==='mestre_pvp'&&PVP_MASTER_IMG){const phase=time*2.2,bob=Math.sin(phase)*1.2,breath=1+Math.sin(phase)*.012,dw=n.w*breath,dh=n.h*breath;ctx.drawImage(n.img,0,0,n.img.width,n.img.height,Math.round(n.x-dw/2),Math.round(n.y-dh+bob),dw,dh)}else ctx.drawImage(n.img,Math.round(n.x-n.w/2),Math.round(n.y-n.h));
   let news=false;
   if(n.id==='aldea')news=P.quest===0||P.quest===2;
   if(n.id==='mercador'||n.id==='sacerdotisa'||n.id==='ferreiro')news=false;
