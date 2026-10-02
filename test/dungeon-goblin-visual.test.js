@@ -76,12 +76,12 @@ test('paintGoblinDungeonTiles/dun2Sprite: sempre checam DUN2_IMG antes de desenh
   assert.match(extractFn('paintGoblinDungeonTiles'), /if\(!DUN2_IMG\)return/);
 });
 
-test('buildMasmorra: projeto KayKit e o renderer global das 7 masmorras; atlas goblin e procedural ficam como fallback', () => {
+test('buildMasmorra: o rework visual so ativa pra zoneId==="floresta" (Covil dos Goblins) -- as outras 6 masmorras continuam chamando decorateMasmorra/paintGround de sempre, sem nenhuma mudanca', () => {
   const body = extractFn('buildMasmorra');
+  assert.match(body, /isGoblinRework\s*=\s*zoneId==='floresta'&&!!DUN2_IMG/, 'o gate precisa ser exatamente zoneId==="floresta" -- nunca theme, nunca outro criterio que poderia acidentalmente pegar outra masmorra');
   assert.match(body, /if\(isGoblinRework\)paintGoblinDungeonTiles/);
-  assert.match(body, /isKaykitDungeon\s*=\s*!!MARMORARIA_KAYKIT_IMG/, 'o projeto KayKit deve ser o renderer global das 7 masmorras');
-  assert.match(body, /isGoblinRework=zoneId==='floresta'&&!isKaykitDungeon&&!!DUN2_IMG/, 'o atlas goblin fica apenas como fallback se KayKit nao carregar');
-  assert.match(body, /if\(isGoblinRework\)decorateGoblinDungeon\(w,rooms,pr\);\s*\n\s*else if\(!isKaykitDungeon\) decorateMasmorra\(w,rooms,cfg\.theme,pr\)/, 'decoracao procedural fica apenas como fallback do renderer KayKit global');
+  assert.match(body, /isKaykitMarmoraria\s*=\s*zoneId==='vulcao'&&!!MARMORARIA_KAYKIT_IMG/, 'a Marmoraria KayKit deve ficar restrita ao vulcao');
+  assert.match(body, /if\(isGoblinRework\)decorateGoblinDungeon\(w,rooms,pr\);\s*\n\s*else if\(!isKaykitMarmoraria\) decorateMasmorra\(w,rooms,cfg\.theme,pr\)/, 'decorateMasmorra continua nas outras 5 masmorras; floresta usa atlas e vulcao usa KayKit');
   // colisao continua exatamente a mesma pra TODAS as masmorras, goblin
   // inclusive -- addBlock(layout.rects) roda ANTES do branch novo, sem
   // nenhuma condicao nova em cima dela.
